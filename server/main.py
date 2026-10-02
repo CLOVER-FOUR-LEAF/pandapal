@@ -823,6 +823,7 @@ async def _chat_stream(sess, raw_message: str, ctx: dict, resume: ResumeReq | No
                 await emit({"type": "affair", "action": "create" if created else "update",
                             "affair": await asyncio.to_thread(a_store.get, affair["id"])})
             try:
+                await emit({"type": "phase", "phase": "planning"})
                 snapshot = await asyncio.to_thread(a_store.snapshot)
                 plan = await planner.make_plan(sess.store, message, snapshot)
             except planner.PlanError:
@@ -843,15 +844,29 @@ async def _chat_stream(sess, raw_message: str, ctx: dict, resume: ResumeReq | No
                 results, statuses = await executor.run_plan(plan, sess.store, message, emit)
                 if affair:
                     # 执行链连同节点终态存进事务，详情抽屉的"DAG 回放"展示真链而非伪造
-                    await asyncio.to_thread(a_store.update, affair["id"], {"plan": {
+                    # 顺带把看板标题换成规划器起的短名：它在剥掉口语尾巴后还能顺带
+                    # 去掉"我想…""要…"这类主语前缀，比原话更适合当看板标题
+                    patch = {"plan": {
                         "title": plan["title"],
                         "nodes": [{"id": n["id"], "title": n["title"], "tool": n["tool"],
                                    "depends_on": n["depends_on"],
                                    "status": statuses.get(n["id"], "done")} for n in plan["nodes"]],
-                    }}, actor="butler", note="执行链已存档")
-                card = await synth.synthesize(sess.store, message, results)
+                    }}
+                    # 用规划器起的短名覆盖看板标题：它比原话干净（去主语前缀）。
+                    # 但模型没给标题时 planner 会兜底成"筹备计划"，拿它覆盖会把
+                    # 好标题冲掉，所以这种泛化名一律不用。
+                    ptitle = (plan.get("title") or "").strip()[:18]
+                    if ptitle and ptitle != affair.get("title") and ptitle not in _GENERIC_TITLES:
+                        patch["title"] = ptitle
+                    await asyncio.to_thread(a_store.update, affair["id"], patch,
+                                            actor="butler", note="执行链已存档")
+                await emit({"type": "phase", "phase": "synthesizing"})
+                card = await _card_with_fallback(
+                    sess.store, message, results=results, title=plan["title"],
+                    pairs=[(n["title"], results.get(n["id"], "")) for n in plan["nodes"]])
             else:
-                card = await synth.direct_card(sess.store, message)
+                await emit({"type": "phase", "phase": "synthesizing"})
+                card = await _card_with_fallback(sess.store, message, use_synth=False)
             reply_text = synth.card_to_text(card)
 
             # ③ 实际去执行：加提醒 / 生成清单 / 请家长确认。
@@ -973,6 +988,7 @@ async def _triage(sess, a_store, message: str, hit: dict, emit) -> str:
     mem = mem or "（暂无记忆）"
     if hit.get("block"):
         mem = f"{mem}\n\n和这次相关的记忆：\n{hit['block']}"
+    await emit({"type": "phase", "phase": "planning"})
     data = await llm.complete_json(
         [{"role": "system", "content": "你是任务拆解模块，只输出 JSON。"},
          {"role": "user", "content": prompts.TRIAGE.format(
@@ -1012,12 +1028,15 @@ async def _triage(sess, a_store, message: str, hit: dict, emit) -> str:
                 patch = {"summary": summary}
                 if due:
                     patch["due"] = due
+                # 拆解已经完成，接下来是孩子照着做——别把事务永远挂在"规划中"
+                if existing.get(aid, {}).get("stage") in ("discovered", "planning"):
+                    patch["stage"] = "executing"
                 affair = await asyncio.to_thread(
                     a_store.update, aid, patch, actor="child", note=f"又提起：{title}")
                 await emit({"type": "affair", "action": "update", "affair": affair})
             else:
                 affair = await asyncio.to_thread(a_store.create, {
-                    "title": title, "kind": str(t.get("kind") or "goal"), "stage": "planning",
+                    "title": title, "kind": str(t.get("kind") or "goal"), "stage": "executing",
                     "owner_next": "child", "summary": summary, "due": due,
                     "linked_nodes": linked, "progress": {"mode": "none", "value": 0},
                     "actor": "butler", "source": "triage",
@@ -1051,6 +1070,57 @@ def _flat(text: str) -> str:
     return re.sub(r"[^\w一-鿿]+", "", text or "")
 
 
+# 孩子口语里的收尾语气词，留在标题上很扎眼（"…帮我" / "…好不好"）
+_TITLE_TAIL = ("帮我", "好不好", "行不行", "可以吗", "吧", "呀", "啊", "呢", "一下", "怎么样")
+
+# 规划器没给出有效标题时的兜底名，拿它去覆盖看板标题只会把好标题冲掉
+_GENERIC_TITLES = {"筹备计划", "计划", "新的事", "执行计划", "任务", "待办"}
+
+
+def _clean_affair_title(message: str) -> str:
+    """从孩子原话里取一个能上看板的短标题：去标点、限长、去收尾语气词。
+
+    顺序很关键：必须「先截断再剥语气词」。反过来做的话，截断点会重新
+    切出一个悬在末尾的「帮我」（实测 18 字处正好切在「…绘本帮我」）。
+    """
+    t = re.sub(r"[，。！？!?~～、\s]+", "", message or "")
+    for _ in range(4):  # 截断与剥词互相影响，迭代到稳定即可
+        before = t
+        t = t[:18]
+        for w in _TITLE_TAIL:
+            if t.endswith(w) and len(t) > len(w) + 2:
+                t = t[: -len(w)]
+                break
+        if t == before:
+            break
+    # 全是语气词（"啊" / "吧"）时剥不干净，退回默认名，别让看板挂一个字
+    return t if len(t) >= 2 else "新的事"
+
+
+async def _card_with_fallback(store, message: str, *, results: dict | None = None,
+                              title: str = "", pairs=(), use_synth: bool = True) -> dict:
+    """出卡片的三档降级：汇总 → 单次直出 → 纯本地摊结果。
+
+    为什么要有第三档：synth 实测平均 35s、最慢 52.6s，已经贴着单次调用超时
+    上限跑。原来它一抛异常，整条已经跑完的规划链就白费了，孩子最后只看到
+    一句"大脑暂时连不上"——最贵的部分白干，最该给的结果反而没给。
+
+    实测 direct_card 只需 ~5s（比 synth 快 7 倍），所以拿它当中间档很划算；
+    连它也没赶上，就用本地那档把节点真实结果如实摊开，末尾说明是"来不及
+    整理"的版本，不假装成综合过的方案。
+    """
+    if use_synth:
+        try:
+            return await synth.synthesize(store, message, results or {})
+        except Exception as e:  # noqa: BLE001
+            print(f"[card] 汇总失败，降级到直出：{e}")
+    try:
+        return await synth.direct_card(store, message)
+    except Exception as e:  # noqa: BLE001
+        print(f"[card] 直出也失败，用本地兜底：{e}")
+    return synth.assemble_from_results(title, list(pairs))
+
+
 async def _open_affair(sess, a_store, message: str, hit: dict) -> tuple[dict | None, bool]:
     """把一句需求变成一个事务；返回 (事务, 是否新建)。
 
@@ -1062,7 +1132,7 @@ async def _open_affair(sess, a_store, message: str, hit: dict) -> tuple[dict | N
         linked = [n["id"] for n in nodes[:3]]
         hit_ids = {n["id"] for n in nodes}
         # 先落个短标题占位，规划成功后由调用方换成 plan["title"]
-        title = re.sub(r"[，。！？!?~～\s]+", "", message)[:18] or "新的事"
+        title = _clean_affair_title(message)
         snapshot = await asyncio.to_thread(a_store.list)
         msg_grams = store.bigrams(_flat(message))
         best, best_score = None, 0
@@ -1131,6 +1201,7 @@ async def _execute_actions(sess, a_store, affair: dict, card: dict, message: str
                        "context": synth.card_to_text(card)})
 
     affair_dirty = False
+    done_kinds: list[str] = []
     for act in to_run:
         try:
             result = await actions.run_action(sess.dir, affair, act)
@@ -1152,8 +1223,24 @@ async def _execute_actions(sess, a_store, affair: dict, card: dict, message: str
                     a_store.update, affair["id"], patch, actor="butler",
                     note=f"执行了 {act['kind']}")
                 affair_dirty = True
+                done_kinds.append(act.get("kind", ""))
         except Exception as e:  # noqa: BLE001 单个动作失败不拖垮整链
             await emit({"type": "action", "kind": act.get("kind", "?"), "ok": False, "detail": str(e), "payload": {}})
+    # 规划链跑完就把事务推出去：否则看板上永远挂着"规划中 / 管家正在筹备"，
+    # 卡片明明已经给到孩子了，看板却像卡住不动。
+    if affair.get("stage") == "planning":
+        if done_kinds:
+            need_parent = "parent_confirm" in done_kinds
+            stage = "executing"
+            owner = "parent" if need_parent else "child"
+            summary = "等家长确认" if need_parent else "管家已备好，照着做就行"
+        else:
+            stage, owner, summary = "done", "child", "方案已给到，照着做就行"
+        affair = await asyncio.to_thread(
+            a_store.update, affair["id"],
+            {"stage": stage, "owner_next": owner, "summary": summary},
+            actor="butler", note=f"规划完成，转{stage}")
+        affair_dirty = True
     if affair_dirty:
         await emit({"type": "affair", "action": "update", "affair": affair})
 

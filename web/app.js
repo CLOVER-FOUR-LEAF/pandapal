@@ -73,6 +73,8 @@ const ACTION_KIND = {
   parent_confirm: "请家长确认", ics: "导出日历", draft: "写文稿",
 };
 const MODE_LABEL = { plan: "规划链", todo: "拆解待办", affair: "事务更新", relay: "传话筒", explain: "讲给你听", chat: "" };
+// planner / synth 各要几十秒，没有阶段提示就像卡死——这里给一句人话顶着
+const PHASE_LABEL = { planning: "正在拆解要办的事…", executing: "正在一件件办…", synthesizing: "快好了，正在整理成方案…" };
 
 const KIND_ICON = { travel: "i-planet", goal: "i-growth", health: "i-heart", interest: "i-spark", study: "i-book", habit: "i-clock", event: "i-cal" };
 
@@ -1449,6 +1451,14 @@ function dagNodeRow(n, names, status) {
   name.textContent = n.title || n.id || "";
   if (dep) name.appendChild(el("div", "dag-deps", `等「${dep}」完成后`));
   append(row, dot, name, el("span", "dag-detail"));
+  // 点节点展开/收起该环节的完整结果（updatePlanNode 写入 dataset.full 后才可展开）
+  row.addEventListener("click", () => {
+    const d = row.querySelector(".dag-detail");
+    const full = d && d.dataset.full;
+    if (!full) return;
+    const open = row.classList.toggle("is-open");
+    d.textContent = open ? full : truncate(full, 26);
+  });
   return row;
 }
 
@@ -1795,7 +1805,18 @@ function updatePlanNode(tree, ev) {
   const detail = row.querySelector(".dag-detail");
   if (detail) {
     const tip = ev.detail || (ev.args && ev.args.query ? String(ev.args.query) : "");
-    detail.textContent = tip ? truncate(tip, 26) : "";
+    if (tip) {
+      // 环节结果常常上百字：默认只露一行摘要，但全文必须可达——
+      // 悬停看 tooltip，点节点展开全文，否则 DAG 跑出来的东西等于白跑。
+      detail.textContent = truncate(tip, 26);
+      detail.dataset.full = tip;
+      detail.title = tip;
+      row.classList.add("has-detail");
+    } else {
+      detail.textContent = "";
+      delete detail.dataset.full;
+      detail.removeAttribute("title");
+    }
   }
   scrollBottom();
 }
@@ -2137,6 +2158,12 @@ function handleEvent(ev, ctx, dropTyping) {
       setMoodAll(ev.mood);
       break;
 
+    case "phase": {
+      const txt = PHASE_LABEL[ev.phase];
+      if (txt) chatStatus(txt, true);
+      break;
+    }
+
     case "recall": {
       dropTyping();
       addRecallChip(ev);
@@ -2154,6 +2181,7 @@ function handleEvent(ev, ctx, dropTyping) {
       dropTyping();
       s3("clearPlanSatellites");
       ctx.tree = addPlanTree(ev.title, ev.nodes || []);
+      chatStatus(PHASE_LABEL.executing, true);
       s3("spawnPlanSatellites", (ev.nodes || []).map((n) => ({
         id: n.id, title: n.title, depends_on: n.depends_on || [],
       })));
@@ -2165,6 +2193,7 @@ function handleEvent(ev, ctx, dropTyping) {
       }
       updatePlanNode(ctx.tree, ev);
       s3("setPlanNode", ev.id, ev.status);
+      if (ev.status === "running" && ev.title) chatStatus(`正在办：${ev.title}`, true);
       break;
 
     case "action":

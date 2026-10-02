@@ -1355,6 +1355,18 @@ body[data-theme="dark"] .btn-send {
 .dag-node[data-status="done"] .dag-name { color: var(--ink); }
 .dag-deps { font-size: 11px; color: var(--ink-faint); margin-top: 1px; }
 .dag-detail { font-size: 11px; color: var(--ink-dim); flex: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 环节结果默认只露一行摘要（原来连 tooltip 都没有，DAG 跑出来的东西等于白跑）；
+   有结果时整行可点，展开后把全文换行铺满。 */
+.dag-node.has-detail { cursor: pointer; }
+.dag-node.has-detail .dag-detail { text-align: right; }
+.dag-node.has-detail:hover { background: rgba(255, 255, 255, .035); }
+.dag-node.is-open { flex-wrap: wrap; }
+.dag-node.is-open .dag-detail {
+  order: 3; flex: 1 0 100%; max-width: 100%; margin-top: 4px;
+  white-space: normal; text-align: left; line-height: 1.65;
+  padding: 6px 9px; border-radius: var(--r-sm);
+  background: var(--card-2); border: 1px solid var(--line);
+}
 
 .card.plan-card {
   align-self: stretch;
