@@ -287,8 +287,11 @@ async def extract_and_store(store: MemoryStore, user_msg: str, assistant_msg: st
                 if isinstance(n, dict):
                     n["private"] = True
             data["affair"] = None
-        await store.write_extraction(data, is_secret=is_secret)
-        merged = await asyncio.to_thread(graph_store.merge, data)
+        # 记忆文件与 graph.json 是两份独立存储，写盘并行（各自内部已 to_thread + 目录锁）
+        _, merged = await asyncio.gather(
+            store.write_extraction(data, is_secret=is_secret),
+            asyncio.to_thread(graph_store.merge, data),
+        )
         event = await asyncio.to_thread(_graph_event, graph_store, merged) or {}
         affair = _valid_affair(data.get("affair"))
         if affair:

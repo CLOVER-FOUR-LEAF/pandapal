@@ -403,7 +403,8 @@ async def _settle_memory(sess, user_msg: str, reply: str, is_secret: bool = Fals
     """
     g, a, _ = _stores(sess)
     try:
-        brief = await asyncio.to_thread(_affairs_brief, a)
+        # 悄悄话轮的 affair 字段被服务端强制清空，事务简报进了 prompt 也没用——不读
+        brief = "" if is_secret else await asyncio.to_thread(_affairs_brief, a)
         gdata = await memory.extract_and_store(sess.store, user_msg, reply,
                                                graph_store=g, is_secret=is_secret,
                                                affairs_brief=brief)
@@ -445,8 +446,13 @@ async def _chat_stream(sess, raw_message: str, ctx: dict):
 
     async def work():
         nonlocal reply_text
+        # 意图分类（LLM RTT，最慢的一段）与图谱检索并行：recall 不依赖分类结果，
+        # 契约 §5 的事件顺序由后面的 emit 顺序保证（mode 仍最先下发）。
         brief = await asyncio.to_thread(_affairs_brief, a_store, limit=4)
-        cls = await router.classify(message, brief)
+        cls, hit = await asyncio.gather(
+            router.classify(message, brief),
+            asyncio.to_thread(g_store.recall, message, limit=4),
+        )
         intent, mood = cls["intent"], cls["mood"]
         if intent == "affair_update" and not cls.get("affair_id"):
             intent = "chat"  # 没指到具体事务的"汇报"按闲聊走，不再静默落入 chat 分支
@@ -457,7 +463,6 @@ async def _chat_stream(sess, raw_message: str, ctx: dict):
         await emit({"type": "mode", "mode": mode, "mood": mood})
 
         # ① 想起来了：图谱检索 → recall 事件（同时注入 prompt）
-        hit = await asyncio.to_thread(g_store.recall, message, limit=4)
         if hit["nodes"]:
             await emit({"type": "recall", "nodes": hit["nodes"], "edges": hit["edges"]})
 
@@ -628,10 +633,11 @@ async def _triage(sess, a_store, message: str, hit: dict, emit) -> str:
 
     返回本轮回复的纯文本（进历史和记忆沉淀）。事务按 existing_id / 标题去重，不重复建单。
     """
-    mem = await asyncio.to_thread(sess.store.active_block) or "（暂无记忆）"
+    mem, brief = await asyncio.to_thread(
+        lambda: (sess.store.active_block(), _affairs_brief(a_store, limit=8)))
+    mem = mem or "（暂无记忆）"
     if hit.get("block"):
         mem = f"{mem}\n\n和这次相关的记忆：\n{hit['block']}"
-    brief = await asyncio.to_thread(_affairs_brief, a_store, limit=8)
     data = await llm.complete_json(
         [{"role": "system", "content": "你是任务拆解模块，只输出 JSON。"},
          {"role": "user", "content": prompts.TRIAGE.format(
@@ -792,8 +798,25 @@ async def api_chat(request: Request, req: ChatReq):
                 yield chunk
         finally:
             sess.lock.release()
-        # 锁外收尾：记忆沉淀与话题建议不再把下一条消息挡在 429 外面
-        async for chunk in _chat_settle(sess, ctx):
+        # 锁外收尾：记忆沉淀与话题建议不再把下一条消息挡在 429 外面。
+        # 沉淀经后台任务中转——客户端断开时本生成器被关闭，但 _settle 里的
+        # LLM 抽取和落盘必须跑完，否则这一轮的记忆就丢了。
+        q: asyncio.Queue[str | None] = asyncio.Queue()
+
+        async def _settle() -> None:
+            try:
+                async for chunk in _chat_settle(sess, ctx):
+                    await q.put(chunk)
+            except Exception as e:  # noqa: BLE001 收尾失败只记日志，不回写错误事件（回复已发完）
+                print(f"[settle] 后台收尾失败：{e}")
+            finally:
+                await q.put(None)
+
+        _bg(asyncio.create_task(_settle()))
+        while True:
+            chunk = await q.get()
+            if chunk is None:
+                break
             yield chunk
 
     return StreamingResponse(
