@@ -134,6 +134,16 @@ async def post_sse(client: httpx.AsyncClient, path: str, body: dict) -> list[dic
     return events
 
 
+async def get_sse(client: httpx.AsyncClient, path: str) -> list[dict]:
+    """GET 版 SSE（晨报/问候的 ?stream=1）。"""
+    events = []
+    async with client.stream("GET", path) as resp:
+        async for line in resp.aiter_lines():
+            if line.startswith("data:"):
+                events.append(json.loads(line[5:]))
+    return events
+
+
 def _types(events: list[dict]) -> list[str]:
     return [e.get("type") for e in events]
 
@@ -432,7 +442,69 @@ async def _run(client: httpx.AsyncClient) -> None:
            "结果#根" in ctx_s and "结果#甲支" in ctx_s and "结果#乙支" not in ctx_s,
            f"s_ctx={'根' if '结果#根' in ctx_s else '?'}/{'甲' if '结果#甲支' in ctx_s else '?'}/{'乙!' if '结果#乙支' in ctx_s else '乙ok'}")
 
-    # 10. 安全/缓存响应头：CSP 收口 'self'；vendor 依赖 immutable 长缓存
+
+    # 10. 扩展端点：增长雷达 / 梦想 / 传话筒 / PATCH / 时间轴切片 / 日志分页 / 流式晨报问候
+    client.headers["Authorization"] = f"Bearer {token}"  # 前面的用例把 header 换成过家长，切回 admin
+
+    gr = await get_json(client, f"/api/growth{q}")
+    record("growth", len(gr.get("dimensions", [])) == 5 and "totals" in gr,
+           f"dims={len(gr.get('dimensions', []))}")
+
+    r = await post(client, "/api/dream", {"name": NAME, "text": ""})
+    record("dream_invite", r.status_code == 200 and bool(r.json().get("text")),
+           str(r.json())[:60])
+
+    r = await post(client, "/api/relay",
+                   {"name": NAME, "direction": "child2teacher", "text": "老师我想再想想"})
+    rj = r.json()
+    record("relay", r.status_code == 200 and ("message" in rj or "parent_text" in rj),
+           str(rj)[:60])
+
+    # PATCH：局部更新事务（旧契约 §2.6），只改 stage，正文不动
+    before = await get_json(client, f"/api/affairs/{aid}{q}")
+    r = await client.patch(f"/api/affairs/{aid}", json={
+        "name": NAME, "stage": "waiting", "note": "离线 PATCH"})
+    after = await get_json(client, f"/api/affairs/{aid}{q}")
+    record("affair_patch",
+           r.status_code == 200 and after["affair"]["stage"] == "waiting"
+           and after["affair"]["title"] == before["affair"]["title"],
+           f"status={r.status_code} stage={after['affair'].get('stage')}")
+    r = await client.patch(f"/api/affairs/{aid}", json={"name": NAME})
+    record("affair_patch_empty_400", r.status_code == 400, f"status={r.status_code}")
+
+    # 时间轴切片：until 在节点出现之前 → 空图；until 很晚 → 全量
+    snap_early = await get_json(client, f"/api/graph/snapshot{q}&view=child&until=2000-01-01")
+    snap_late = await get_json(client, f"/api/graph/snapshot{q}&view=child&until=2999-12-31")
+    record("graph_snapshot",
+           snap_early.get("nodes") == [] and any(
+               n.get("label") == "机器人比赛" for n in snap_late.get("nodes", [])),
+           f"early={len(snap_early.get('nodes', []))} late={len(snap_late.get('nodes', []))}")
+
+    lg = await get_json(client, "/api/logs?limit=5&offset=0")
+    record("logs_pagination",
+           "calls" in lg and lg.get("limit") == 5 and lg.get("offset") == 0
+           and isinstance(lg.get("total"), int),
+           f"total={lg.get('total')} limit={lg.get('limit')}")
+    lg2 = await get_json(client, "/api/logs?limit=999999")
+    record("logs_limit_clamped", lg2.get("limit") == 200, f"limit={lg2.get('limit')}")
+
+    # 流式晨报/问候：token* → done（done 带本地数据）；LLM 假身只会吐两个 token
+    gev = await get_sse(client, f"/api/greeting{q}&stream=1")
+    gtypes = _types(gev)
+    gdone = next((e for e in gev if e["type"] == "done"), {})
+    record("greeting_stream",
+           "token" in gtypes and "done" in gtypes and gtypes.index("done") == len(gtypes) - 1
+           and "reminders" in gdone,
+           f"events={gtypes}")
+    bev = await get_sse(client, f"/api/briefing{q}&stream=1")
+    btypes = _types(bev)
+    bdone = next((e for e in bev if e["type"] == "done"), {})
+    record("briefing_stream",
+           "token" in btypes and "done" in btypes and "affairs" in bdone
+           and "suggestions" in bdone,
+           f"events={btypes}")
+
+    # 11. 安全/缓存响应头：CSP 收口 'self'；vendor 依赖 immutable 长缓存
     r = await client.get("/")
     csp = r.headers.get("content-security-policy", "")
     r2 = await client.get("/static/vendor/marked.esm.js")
@@ -442,7 +514,7 @@ async def _run(client: httpx.AsyncClient) -> None:
            and r2.status_code == 200 and "immutable" in cc,
            f"csp={'y' if csp else 'n'} vendor_cache={cc[:36]}")
 
-    # 11. XFF 信任收窄：回环/私网可信，公网/非法值不信
+    # 12. XFF 信任收窄：回环/私网可信，公网/非法值不信
     from server import main as _main  # noqa: E402
     record("xff_trust",
            _main._trusted_proxy("127.0.0.1") and _main._trusted_proxy("::1")
@@ -450,7 +522,7 @@ async def _run(client: httpx.AsyncClient) -> None:
            and not _main._trusted_proxy("8.8.8.8") and not _main._trusted_proxy("bogus"),
            "")
 
-    # 12. 收件箱裁决联动：admin approve  pending → approved + 事务推进 followup
+    # 13. 收件箱裁决联动：admin approve  pending → approved + 事务推进 followup
     client.headers["Authorization"] = f"Bearer {token}"
     inbox_items = (await get_json(client, f"/api/parent/inbox{q}")).get("items", [])
     pend = next((i for i in inbox_items if i.get("status") == "pending"), None)
@@ -467,7 +539,7 @@ async def _run(client: httpx.AsyncClient) -> None:
                and aff.get("stage") == "followup",
                f"status={r.status_code} item={item.get('status')} stage={aff.get('stage')}")
 
-    # 13. _open_affair 去重：bigram 覆盖命中认领旧事务，无关话题另开新单
+    # 14. _open_affair 去重：bigram 覆盖命中认领旧事务，无关话题另开新单
     sess2 = await _sess_mod.login(NAME)
     _, aff_store, _ = _main._stores(sess2)
     existing = await asyncio.to_thread(aff_store.list)
@@ -488,6 +560,7 @@ async def _run(client: httpx.AsyncClient) -> None:
 def test_offline():
     """pytest 入口：整套离线自检跑完且无 FAIL。"""
     assert asyncio.run(main()) == 0, [r for r in RESULTS if not r[1]]
+
 
 
 if __name__ == "__main__":

@@ -270,6 +270,39 @@ const jsonOpts = (body) => ({
 });
 const q = (name) => `name=${encodeURIComponent(name || "")}`;
 
+/**
+ * 读 GET 的 SSE 文本流（晨报/问候的 `?stream=1`）：每来一段 token 回调 onToken，
+ * 返回 done 事件的载荷（含看板/提醒等本地数据）。服务端不支持流时退化为整段 JSON。
+ */
+async function readTextStream(resp, onToken) {
+  if (!resp.body || !resp.body.getReader) {
+    const data = await resp.json().catch(() => ({}));
+    if (data.text) onToken(data.text);
+    return data;
+  }
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  let done = {};
+  for (;;) {
+    const { done: end, value } = await reader.read();
+    if (end) break;
+    buf += decoder.decode(value, { stream: true });
+    let idx;
+    while ((idx = buf.indexOf("\n\n")) >= 0) {
+      const raw = buf.slice(0, idx).replace(/\r/g, "");
+      buf = buf.slice(idx + 2);
+      if (!raw.startsWith("data:")) continue;
+      let ev;
+      try { ev = JSON.parse(raw.slice(5)); } catch { continue; }
+      if (ev.type === "token") onToken(ev.text || "");
+      else if (ev.type === "done") done = ev;
+      else if (ev.type === "error") throw new Error(ev.message || "生成失败");
+    }
+  }
+  return done;
+}
+
 function show(viewId) {
   const sel = VIEWS[viewId] || (viewId.startsWith?.("#") ? viewId : null);
   const target = sel ? $(sel) : null;
@@ -1003,21 +1036,31 @@ function briefingBody() { return $("#briefing-card .panel-body"); }
 async function loadBriefing() {
   const box = briefingBody();
   if (!box) return;
+  box.innerHTML = "";
+  const textEl = el("div", "briefing-text", "");
+  box.appendChild(textEl);
+  let full = "";
   try {
-    const resp = await api(`/api/briefing?${q(state.name)}`);
-    renderBriefing(await resp.json());
+    // 流式：正文逐字出，done 事件再补看板/截止/建议（首屏不必等整段 LLM）
+    const resp = await api(`/api/briefing?${q(state.name)}&stream=1`);
+    const done = await readTextStream(resp, (tok) => {
+      full += tok;
+      textEl.textContent = full;
+    });
+    renderBriefingExtras(done, full);
   } catch (e) {
-    box.innerHTML = "";
-    box.appendChild(el("p", "empty-hint", `晨报暂时取不到：${e.message}`));
+    textEl.textContent = `晨报暂时取不到：${e.message}`;
   }
 }
 
-function renderBriefing(data) {
+/** 流式正文之外的附带信息：建议 chips + 临近截止条。 */
+function renderBriefingExtras(data, text) {
   const box = briefingBody();
   if (!box) return;
-  box.innerHTML = "";
-  box.appendChild(el("div", "briefing-text", (data && data.text) || "（今天没有特别的巡检结果）"));
-
+  if (text !== undefined) {
+    const textEl = box.querySelector(".briefing-text");
+    if (textEl) textEl.textContent = text || "（今天没有特别的巡检结果）";
+  }
   const suggestions = (data && data.suggestions) || [];
   if (suggestions.length) {
     const row = el("div", "chip-row");
@@ -1479,62 +1522,43 @@ function actionReceipt(ev) {
  * 6. 问候 + 历史
  * ========================================================================== */
 
-/** 逐字打出来：问候气泡里"管家正在开口"的感觉 */
-function typewrite(node, text, done) {
-  const t = String(text || "");
-  let i = 0;
-  node.classList.add("bb-typing");
-  const timer = setInterval(() => {
-    if (!state.name) { clearInterval(timer); return; } // 已退出登录
-    node.textContent = t.slice(0, ++i);
-    if (i >= t.length) {
-      clearInterval(timer);
-      node.classList.remove("bb-typing");
-      if (done) done();
-    }
-  }, 34);
-}
-
 async function loadGreeting() {
   const bubble = $("#panda-bubble");
+  const span = el("span", "bb-text");
   if (bubble) {
     bubble.classList.remove("hidden");
-    bubble.textContent = "……";
+    bubble.innerHTML = "";
+    bubble.appendChild(span);
   }
+  s3("setPandaMood", "speaking");
+  let full = "";
+  let data = {};
   try {
-    const resp = await api(`/api/greeting?${q(state.name)}`);
-    const data = await resp.json();
-    const text = (data && data.text) || "早呀！今天想聊点什么？";
-    if (bubble) {
-      bubble.innerHTML = "";
-      const span = el("span", "bb-text");
-      bubble.appendChild(span);
-      typewrite(span, text, () => {
-        const reminders = (data && data.reminders) || [];
-        if (!reminders.length || !bubble.isConnected) return;
-        const box = el("div", "reminders");
-        reminders.forEach((r) => {
-          const pill = el("span", "reminder-pill");
-          pill.appendChild(icon("i-clock"));
-          pill.appendChild(document.createTextNode(` ${r.text || ""}`));
-          box.appendChild(pill);
-        });
-        bubble.appendChild(box);
-      });
-    }
-    addMsg("ai", text);
-    s3("setPandaMood", "speaking");
+    // 流式：token 一到就上屏，比整段等完再 typewrite 更早出字
+    const resp = await api(`/api/greeting?${q(state.name)}&stream=1`);
+    data = await readTextStream(resp, (tok) => {
+      full += tok;
+      if (span) span.textContent = full;
+    });
   } catch (e) {
-    const fallbackText = `早呀，${state.name || "小豆"}！今天有什么想和管家聊聊的吗？无论是生活小事、竞赛备战还是心里话，我都一直陪着你～`;
-    if (bubble) {
-      bubble.innerHTML = "";
-      const span = el("span", "bb-text");
-      bubble.appendChild(span);
-      typewrite(span, fallbackText);
-    }
-    addMsg("ai", fallbackText);
-    s3("setPandaMood", "happy");
+    full = `早呀，${state.name || "小豆"}！今天有什么想和管家聊聊的吗？无论是生活小事、竞赛备战还是心里话，我都一直陪着你～`;
   }
+  const text = (data && data.text) || full || "早呀！今天想聊点什么？";
+  if (span) span.textContent = text;
+  if (bubble) {
+    const reminders = (data && data.reminders) || [];
+    if (reminders.length && bubble.isConnected) {
+      const box = el("div", "reminders");
+      reminders.forEach((r) => {
+        const pill = el("span", "reminder-pill");
+        pill.appendChild(icon("i-clock"));
+        pill.appendChild(document.createTextNode(` ${r.text || ""}`));
+        box.appendChild(pill);
+      });
+      bubble.appendChild(box);
+    }
+  }
+  addMsg("ai", text);
 }
 
 async function loadHistory() {
@@ -2370,34 +2394,6 @@ function openNodeDrawer(node) {
  * 11. 角色切换 + 家长视图
  * ========================================================================== */
 
-/** 浅色 / 深色主题切换（localStorage 持久化，全顶栏按钮同步） */
-const THEME_KEY = "pb_theme";
-
-function applyTheme(t) {
-  const light = t !== "dark";
-  document.body.dataset.theme = light ? "light" : "dark";
-  document.querySelectorAll(".theme-toggle").forEach((b) => {
-    const use = b.querySelector("use");
-    const lab = b.querySelector(".tt-label");
-    if (use) use.setAttribute("href", light ? "#i-moon" : "#i-sun");
-    if (lab) lab.textContent = light ? "深色" : "浅色";
-    b.setAttribute("aria-pressed", String(light));
-    b.setAttribute("aria-label", light ? "切换深色主题" : "切换浅色主题");
-  });
-  const meta = document.querySelector('meta[name="theme-color"]');
-  if (meta) meta.setAttribute("content", light ? "#f6faf7" : "#0c1512");
-  // 记忆星球跟着切（s3() 被 sceneReady 门挡住会丢调用，这里直调——setTheme 在 init 前也生效）
-  if (typeof scene3d.setTheme === "function") scene3d.setTheme(light ? "light" : "dark");
-  if (state.fallback2d) { renderFallbackGraph(); drawGraph2D(); }
-}
-
-function toggleTheme() {
-  const light = document.body.dataset.theme !== "light";
-  applyTheme(light ? "light" : "dark");
-  try { localStorage.setItem(THEME_KEY, light ? "light" : "dark"); } catch { /* 忽略 */ }
-  toast(light ? "切到浅色模式" : "切回夜竹林");
-}
-
 function applyRole(role) {
   document.body.dataset.role = role;
   document.body.dataset.view = role;
@@ -3051,13 +3047,7 @@ function buildTabbar() {
     b.appendChild(el("span", null, label));
     bar.appendChild(b);
   });
-  // 窄屏下主视图顶栏导航是隐藏的，主题切换和退出入口只能放底部 tab
-  const themeBtn = el("button", "nav-btn theme-toggle");
-  themeBtn.type = "button";
-  themeBtn.appendChild(icon("i-sun"));
-  themeBtn.appendChild(el("span", "tt-label", "浅色"));
-  themeBtn.onclick = toggleTheme;
-  bar.appendChild(themeBtn);
+  // 窄屏下主视图顶栏导航是隐藏的，退出入口只能放底部 tab（主题固定夜色竹林，无切换）
   const out = el("button", "nav-btn");
   out.type = "button";
   out.setAttribute("aria-label", "退出登录");
@@ -3066,8 +3056,6 @@ function buildTabbar() {
   out.onclick = logout;
   bar.appendChild(out);
   document.body.appendChild(bar);
-  // 补建的 tabbar 里有新的主题按钮，重新跑一遍 applyTheme 同步图标/文案
-  applyTheme(document.body.dataset.theme === "dark" ? "dark" : "light");
   // 断点跨越后才建的话，登录时的 applyAuth() 早就跑完了，角色收口不会自动补上——
   // 孩子/家长会看到自己没有的入口（服务端仍会 403，但界面不该漏）。
   applyAuth();
@@ -3105,8 +3093,6 @@ function bind() {
   on("#logs-back", () => go("main"));
   // 退出按钮：主视图顶栏 + 各子视图导航里的 [data-act="logout"] 统一生效
   document.querySelectorAll('[data-act="logout"]').forEach((b) => { b.onclick = logout; });
-  // 浅色 / 深色主题切换：各顶栏的 .theme-toggle 统一生效
-  document.querySelectorAll(".theme-toggle").forEach((b) => { b.onclick = toggleTheme; });
 
   wireNav();
   buildTabbar();
@@ -3189,7 +3175,6 @@ function bind() {
 }
 
 function boot() {
-  try { applyTheme(localStorage.getItem(THEME_KEY) || "light"); } catch { applyTheme("light"); }
   if ($("#login-panda")) {
     try {
       loginPanda = mountPanda($("#login-panda"));

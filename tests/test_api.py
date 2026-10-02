@@ -101,6 +101,18 @@ def post_json(base: str, path: str, body: dict, token: str | None = None) -> tup
     return _open(req, 120)
 
 
+def patch_json(base: str, path: str, body: dict, token: str | None = None) -> tuple[int, dict]:
+    req = urllib.request.Request(
+        base + path,
+        data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json"},
+        method="PATCH",
+    )
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    return _open(req, 120)
+
+
 def post_sse(base: str, path: str, body: dict, token: str | None = None) -> list[dict]:
     req = urllib.request.Request(
         base + path,
@@ -123,6 +135,30 @@ def post_sse(base: str, path: str, body: dict, token: str | None = None) -> list
                 line = raw.decode("utf-8").strip()
                 if line.startswith("data:"):
                     events.append(json.loads(line[5:]))
+    return events
+
+
+def get_sse(base: str, path: str, token: str | None = None) -> list[dict]:
+    """GET 版 SSE（晨报/问候的 ?stream=1）；请求失败返回空列表。"""
+    req = urllib.request.Request(base + path)
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    events = []
+    buf = b""
+    try:
+        with urllib.request.urlopen(req, timeout=120) as r:
+            while True:
+                chunk = r.read(1 << 16)
+                if not chunk:
+                    break
+                buf += chunk
+                while b"\n\n" in buf:
+                    raw, buf = buf.split(b"\n\n", 1)
+                    line = raw.decode("utf-8").strip()
+                    if line.startswith("data:"):
+                        events.append(json.loads(line[5:]))
+    except Exception:
+        return events
     return events
 
 
@@ -307,6 +343,43 @@ def _run(base: str) -> int:
                f"briefing={st6} dream={st7} logs={st8}")
     except Exception as e:
         record("endpoints_matrix", False, str(e))
+
+    # 10.65 新增能力：PATCH 事务 / 图谱时间轴切片 / 日志分页 / relay
+    try:
+        st1, detail = get(base, "/api/affairs/xikesong?name=小豆", tk_child)
+        stage = detail.get("affair", {}).get("stage")
+        st2, pr = patch_json(base, "/api/affairs/xikesong",
+                             {"name": "小豆", "stage": stage, "note": "巡检"}, tk_child)
+        st3, snap = get(base, "/api/graph/snapshot?name=小豆&view=child&until=2999-12", tk_child)
+        st4, snap0 = get(base, "/api/graph/snapshot?name=小豆&view=child&until=2000-01", tk_child)
+        st5, lg = get(base, "/api/logs?limit=5&offset=1", tk_admin)
+        st6, rl = post_json(base, "/api/relay",
+                            {"name": "小豆", "direction": "child2teacher",
+                             "text": "老师我想再想想"}, tk_child)
+        ok = (st1 == 200 and st2 == 200
+              and pr.get("affair", {}).get("stage") == stage
+              and st3 == 200 and bool(snap.get("nodes"))
+              and st4 == 200 and snap0.get("nodes") == []
+              and st5 == 200 and lg.get("limit") == 5 and lg.get("offset") == 1
+              and st6 == 200 and ("message" in rl or "parent_text" in rl))
+        record("endpoints_matrix2", ok,
+               f"detail={st1} patch={st2} snap={st3}/{st4} logs={st5} relay={st6}")
+    except Exception as e:
+        record("endpoints_matrix2", False, str(e))
+
+    # 10.66 流式晨报/问候：token* → done（done 带本地附带字段）
+    try:
+        gev = get_sse(base, "/api/greeting?name=小豆&stream=1", tk_child)
+        gtypes = [e.get("type") for e in gev]
+        gdone = next((e for e in gev if e.get("type") == "done"), {})
+        bev = get_sse(base, "/api/briefing?name=小豆&stream=1", tk_child)
+        btypes = [e.get("type") for e in bev]
+        bdone = next((e for e in bev if e.get("type") == "done"), {})
+        ok = ("token" in gtypes and "done" in gtypes and "reminders" in gdone
+              and "token" in btypes and "done" in btypes and "affairs" in bdone)
+        record("stream_briefing_greeting", ok, f"greeting={gtypes} briefing={btypes}")
+    except Exception as e:
+        record("stream_briefing_greeting", False, str(e))
 
     # 10.7 显式注册 + 密保找回密码：注册即登录 → 查密保 → 错答案拒绝 → 对答案重置
     # → 旧 token 作废 → 新密码可登录；顺带覆盖家长注册需绑定已存在的孩子账号

@@ -13,11 +13,42 @@ from __future__ import annotations
 import asyncio
 import copy
 import re
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 from . import llm, prompts
 from .store import atomic_write, bigrams, fence_memory, lock_for, read_json, write_json
+
+# 文件式记忆的卫生上限（定位文档 P2）：
+#   daily / topics / MEMORY.md 只增不减会越滚越大，注入 prompt 的成本随之上升。
+#   单条事实 sanitize 成单行并带时间戳；文件超限时确定性归档最旧的内容（不调 LLM）。
+_DAILY_MAX = 400
+_TOPIC_MAX_LINES = 200
+_MEMORY_MAX_LINES = 200
+
+
+def _sanitize_line(text: str, maxlen: int = _DAILY_MAX) -> str:
+    """一段抽取文本压成单行：折叠换行/连续空白、去列表符号、截断。
+
+    防"一条 daily 事实里塞入换行"污染按行统计，也给注入 prompt 的文本兜底长度。
+    """
+    s = re.sub(r"\s+", " ", str(text or "")).strip()
+    s = re.sub(r"^[-•*]+\s*", "", s).strip()
+    return s if len(s) <= maxlen else s[: maxlen - 1] + "…"
+
+
+def _hms() -> str:
+    return datetime.now().strftime("%H:%M:%S")
+
+
+def _append_capped(lines: list[str], new_line: str, max_lines: int) -> list[str]:
+    """追加一行；超过上限时丢弃最旧的若干行，并用一行归档标记说明（确定性合并）。"""
+    lines = [ln for ln in lines if str(ln).strip()]
+    lines.append(new_line)
+    if len(lines) <= max_lines:
+        return lines
+    dropped = len(lines) - max_lines
+    return [f"- （更早的 {dropped} 条已归档）"] + lines[dropped:]
 
 
 def _mtime(path: Path) -> int:
@@ -240,19 +271,19 @@ class MemoryStore:
             if self._SECRET_MARKER not in old:
                 atomic_write(daily_path, old + f"- {self._SECRET_MARKER}\n")
             return
-        daily_text = (data.get("daily") or "").strip()
+        daily_text = _sanitize_line(data.get("daily"))
         if daily_text:
             daily_path = self.dir / "daily" / f"{today}.md"
             if daily_path.exists():
                 old = daily_path.read_text(encoding="utf-8").rstrip() + "\n"
             else:
                 old = f"# {today}\n\n"
-            atomic_write(daily_path, old + f"- {daily_text}\n")
+            atomic_write(daily_path, old + f"- {_hms()} {daily_text}\n")
 
         index = self.read_index()
         for t in data.get("topics") or []:
-            name = (t.get("name") or "").strip()
-            fact = (t.get("fact") or "").strip()
+            name = _sanitize_line(t.get("name"), 40)
+            fact = _sanitize_line(t.get("fact"))
             if not name or not fact:
                 continue
             status = t.get("status") or "active"
@@ -260,30 +291,41 @@ class MemoryStore:
             info = index.setdefault("topics", {}).get(name)
             if info:
                 meta = _parse_topic(self._topic_text(info.get("file", "")))
-                body = (meta["body"] + f"\n- {today}：{fact}").strip()
+                body_lines = _append_capped(
+                    (meta["body"] or "").splitlines(),
+                    f"- {today} {_hms()}：{fact}", _TOPIC_MAX_LINES)
                 merged_rel = sorted(set(info.get("related", [])) | set(related))
-                atomic_write(self.dir / info["file"], _render_topic(name, status, merged_rel, body))
+                atomic_write(self.dir / info["file"],
+                             _render_topic(name, status, merged_rel, "\n".join(body_lines)))
                 info.update({"status": status, "related": merged_rel})
             else:
                 safe = re.sub(r"[^\w一-鿿-]", "_", name)[:40] or "topic"
                 rel_file = f"topics/{safe}.md"
-                atomic_write(self.dir / rel_file, _render_topic(name, status, related, f"- {today}：{fact}"))
+                atomic_write(self.dir / rel_file,
+                             _render_topic(name, status, related, f"- {today} {_hms()}：{fact}"))
                 index["topics"][name] = {"status": status, "related": related, "file": rel_file}
         write_json(self.index_path, index)
 
-        longterm = (data.get("longterm") or "").strip()
+        longterm = _sanitize_line(data.get("longterm"), 300)
         if longterm:
             mem_path = self.dir / "MEMORY.md"
+            header = f"# {self.child_name}的长期记忆"
+            lines: list[str] = []
             if mem_path.exists():
-                old = mem_path.read_text(encoding="utf-8").rstrip() + "\n"
-            else:
-                old = f"# {self.child_name}的长期记忆\n"
+                old_lines = [ln for ln in mem_path.read_text(encoding="utf-8").splitlines()
+                             if ln.strip()]
+                if old_lines and old_lines[0].startswith("#"):
+                    header, lines = old_lines[0], old_lines[1:]
+                else:
+                    lines = old_lines
+            # 与已有长期记忆高度重复的不再追加（bigram Jaccard ≥0.5）
             new_g = bigrams(longterm)
-            for line in old.splitlines():
+            for line in lines:
                 g = bigrams(line)
                 if g and new_g and len(g & new_g) / len(g | new_g) >= 0.5:
-                    return  # 与已有长期记忆高度重复，不再追加
-            atomic_write(mem_path, old + f"- {longterm}\n")
+                    return
+            lines = _append_capped(lines, f"- {today} {_hms()}：{longterm}", _MEMORY_MAX_LINES)
+            atomic_write(mem_path, header + "\n" + "\n".join(lines) + "\n")
 
 
 async def extract_and_store(store: MemoryStore, user_msg: str, assistant_msg: str,

@@ -7,8 +7,11 @@ private=true 的节点是悄悄话，parent 视角整体隐藏（含相连的边
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import re
+import threading
+import time
 from datetime import date
 from pathlib import Path
 
@@ -23,6 +26,57 @@ _DOMAIN_CN = {"ethics": "德", "intellect": "智", "health": "体", "aesthetics"
 _STATUS_CN = {"active": "进行中", "dropped": "已放弃", "done": "已完成"}
 _EMPTY = {"version": 1, "nodes": [], "edges": []}
 _FACT_MAX = 72  # 注入 prompt 的单条事实截断长度
+
+# 读缓存：mode="读多写少"，动画/并发打开页面时同一份 graph.json 会被反复 load。
+# 以「文件 mtime_ns + TTL」为失效条件，merge 落盘后主动失效。缓存值按路径全局共享，
+# 返回前深拷贝，调用方改不动缓存本体（merge 也照常能安全地读改写）。
+_CACHE: dict[str, tuple[int | None, float, dict]] = {}
+_CACHE_LOCK = threading.Lock()
+_CACHE_TTL = 5.0  # 秒；mtime 不变时也不长期持有陈旧视图（外部工具手改文件也能被感知）
+
+
+def _cache_key(path: Path) -> str:
+    try:
+        return str(path.resolve())
+    except OSError:  # 极端情况下 resolve 失败，退回绝对路径字符串
+        return str(path.absolute())
+
+
+def _cache_get(path: Path) -> dict | None:
+    key = _cache_key(path)
+    try:
+        mtime = path.stat().st_mtime_ns
+    except OSError:
+        mtime = None
+    with _CACHE_LOCK:
+        ent = _CACHE.get(key)
+    if ent is None:
+        return None
+    if ent[0] != mtime:
+        return None  # 文件被换过（含被外部写入）
+    if mtime is not None and time.monotonic() - ent[1] >= _CACHE_TTL:
+        return None  # TTL 过期，重读一次确认
+    return ent[2]
+
+
+def _cache_put(path: Path, data: dict) -> None:
+    try:
+        mtime = path.stat().st_mtime_ns
+    except OSError:
+        mtime = None
+    key = _cache_key(path)
+    with _CACHE_LOCK:
+        _CACHE[key] = (mtime, time.monotonic(), data)
+        # 缓存表只随不同档案增长，档案数有限；超过阈值时清掉最旧的若干条防渗漏
+        if len(_CACHE) > 256:
+            for k in sorted(_CACHE, key=lambda x: _CACHE[x][1])[:128]:
+                _CACHE.pop(k, None)
+
+
+def invalidate_cache(path: Path) -> None:
+    """写盘后主动失效，让下一个 load 一定拿到新数据（不依赖 mtime 分辨率）。"""
+    with _CACHE_LOCK:
+        _CACHE.pop(_cache_key(path), None)
 
 
 _LABEL_PREFIX = re.compile(r"^\s*[德智体美劳]\s*[·・.:：]\s*")
@@ -52,7 +106,15 @@ class GraphStore:
     # ---------- 读 ----------
 
     def load(self) -> dict:
-        """读图谱；缺文件 / 损坏 / 脏数据都归一化成合法结构，不抛错。"""
+        """读图谱；缺文件 / 损坏 / 脏数据都归一化成合法结构，不抛错。
+
+        命中进程内 mtime 缓存时直接返回深拷贝：同一请求里 brief_block/recall/export
+        反复调用只解析一次文件。写操作（merge）落盘后主动 invalidate，读到的永远是
+        最新图谱；返回深拷贝保证调用方改动不会污染缓存。
+        """
+        cached = _cache_get(self.path)
+        if cached is not None:
+            return copy.deepcopy(cached)
         raw = store.read_json(self.path, _EMPTY)
         if not isinstance(raw, dict):
             raw = {}
@@ -65,7 +127,9 @@ class GraphStore:
             s, t = str(e.get("source") or ""), str(e.get("target") or "")
             if s in ids and t in ids:
                 edges.append(self._edge(e, s, t))
-        return {"version": int(raw.get("version") or 1), "nodes": nodes, "edges": edges}
+        g = {"version": int(raw.get("version") or 1), "nodes": nodes, "edges": edges}
+        _cache_put(self.path, g)
+        return copy.deepcopy(g)
 
     def export(self, view: str = "child") -> dict:
         """给前端图谱页；仅 view="child" 返回完整图，其余一律按家长视角剔除 private 节点及相连边。"""
@@ -74,6 +138,21 @@ class GraphStore:
         ids = {n["id"] for n in nodes}
         edges = [e for e in g["edges"] if e["source"] in ids and e["target"] in ids]
         return {"nodes": nodes, "edges": edges}
+
+    def snapshot(self, until: str = "", view: str = "child") -> dict:
+        """时间轴切片：只保留 first_seen <= until 的节点及其相连边。
+
+        旧契约 §2.6 的 `/api/graph/snapshot?until=`：服务端切片，前端不再只靠本地
+        过滤。until 为空 / 非法时退化为等价于 export() 的全量视图。
+        """
+        g = self.export(view=view)
+        limit = str(until or "").strip()[:10]
+        if not limit:
+            return g
+        nodes = [n for n in g["nodes"] if str(n.get("first_seen") or "")[:10] <= limit]
+        ids = {n["id"] for n in nodes}
+        edges = [e for e in g["edges"] if e["source"] in ids and e["target"] in ids]
+        return {"nodes": nodes, "edges": edges, "until": limit}
 
     def brief_block(self, limit: int = 40, g: dict | None = None) -> str:
         """供 prompt 注入的紧凑摘要（<=900 字）：节点一行一个 + 若干条关联。
@@ -145,6 +224,7 @@ class GraphStore:
                 if isinstance(raw, dict):
                     self._merge_edge(g, raw, by_label, result)
             store.write_json(self.path, g)
+        invalidate_cache(self.path)
         return result
 
     # ---------- 内部 ----------

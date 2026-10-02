@@ -17,7 +17,6 @@
 //   spawnPlanSatellites([{id,title,depends_on}]) / setPlanNode(id,status) / clearPlanSatellites()
 //   focusNode(id) / focusDomain(key)
 //   setPandaMood(mood)
-//   setTheme("dark"|"light")            跟随界面深浅色
 //   resize() / disposeScene() / isSceneReady()
 
 // ============================================================
@@ -48,9 +47,8 @@ const FOV = 45;
 const IDLE_RESUME_MS = 20000;
 const RECALL_MS = 3200;
 
-// 场景明暗只跟界面主题走（key 是 "dark"/"light"，不是角色）——
+// 场景固定使用夜色竹林主题（唯一主题）。
 // 角色只决定"看得到哪些节点"，不改场景明暗（否则切视角时整屏闪）。
-// 浅色底上 AdditiveBlending 只会更亮、等于隐形，additive:false 时统一换 NormalBlending。
 const THEMES = {
   dark: {
     top: "#0b1a1f", bottom: "#10302a", glow: "rgba(63,174,116,0.16)",
@@ -62,18 +60,7 @@ const THEMES = {
     spoke: 0x9fd9bf, spokeOp: 0.13, haloBoost: 1,
     orbit: 0.22, arc: 0xcfe9de, arcOp: 0.32,
   },
-  light: {
-    top: "#edf4ee", bottom: "#c6ddcd", glow: "rgba(72,160,110,0.22)",
-    // 浅底要把半球光压暗、方向光/环境反射拉高，球体才有明暗和高光；
-    // 连线颜色乘 edgeShade 压深一档、透明度拉高，否则浅彩色在浅底上几乎看不见。
-    fog: 0xd8e8dc, fogD: 0.013, hemi: 0.6, hemiGround: 0x9db8a8,
-    key: 1.5, rim: 0.55, fill: 7, env: 1.15, rough: 0.32, emiss: 1.5, exposure: 1.02,
-    edge: 0.68, edgeShade: 0.44, additive: false, bloom: 0.3, bloomT: 0.85,
-    dust: 0x3d8263, dustOp: 0.5, core: 0x3f9e6e, coreOp: 0.32,
-    disc: 0x3f9e6e, discOp: 0.18, circle: 0x3d8a62, circleOp: 0.3,
-    spoke: 0x3d8a62, spokeOp: 0.4, haloBoost: 1.6,
-    orbit: 0.45, arc: 0x4a7a64, arcOp: 0.5,
-  },
+
 };
 
 const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
@@ -93,7 +80,6 @@ const str = (x) => (x == null ? "" : String(x));
 const cfg = {
   graph: { nodes: [], edges: [] },
   role: "child",
-  theme: "dark",
   timeline: null,
   filter: { domain: "", status: "" },
   onClick: null,
@@ -141,14 +127,6 @@ const CSS = `
 .s3d-tip-lock::before{content:"";position:absolute;left:0;top:-6px;width:4px;height:5px;border:1.5px solid currentColor;border-bottom:0;border-radius:4px 4px 0 0}
 @keyframes s3d-in{from{opacity:0;filter:blur(2px)}to{opacity:1;filter:none}}
 @media (prefers-reduced-motion:reduce){.s3d-label,.s3d-cluster,.s3d-sat{animation:none}}
-/* 浅色主题：CSS2D 标签/提示/卫星编号随界面切浅（画布内颜色由 applyTheme 换） */
-body[data-theme="light"] .s3d-root{background:#e3ede4;--s3d-ink:#22332b;--s3d-ink-dim:rgba(34,51,43,.62);--s3d-ink-strong:#141f18;--s3d-label-bg:rgba(255,255,255,.8);--s3d-label-border:rgba(24,44,36,.14);--s3d-private:rgba(120,85,140,.55);--s3d-tip-bg:rgba(255,255,255,.94);--s3d-vignette:rgba(255,255,255,.30)}
-body[data-theme="light"] .s3d-label{text-shadow:none}
-body[data-theme="light"] .s3d-label.is-hl{color:#7a4a12;border-color:#e0a04a}
-body[data-theme="light"] .s3d-cluster-ch{text-shadow:0 0 12px var(--c),0 1px 0 rgba(255,255,255,.5)}
-body[data-theme="light"] .s3d-sat{color:#22332b}
-body[data-theme="light"] .s3d-sat-n,body[data-theme="light"] .s3d-sat-t{background:rgba(255,255,255,.82);color:#3c5546}
-body[data-theme="light"] .s3d-tip{box-shadow:0 8px 24px rgba(24,44,36,.18)}
 `;
 
 function injectStyle() {
@@ -237,7 +215,7 @@ function makeBackground(theme) {
   });
 }
 
-// additive 材质登记处：浅色主题下统一换 NormalBlending（additive 在浅底上只会更亮、等于隐形）。
+// additive 材质登记处（夜色竹林的发光光晕统一走 AdditiveBlending）。
 // R 建好之前创建的材质（如领域簇 halo）先存 early，R 初始化时并入。
 const _earlyAdditive = [];
 function regAdditive(mat) {
@@ -245,10 +223,6 @@ function regAdditive(mat) {
     _earlyAdditive.push(mat);
   } else {
     R.additive.add(mat);
-    if (!THEMES[R.theme].additive) {
-      mat.blending = THREE.NormalBlending;
-      mat.needsUpdate = true;
-    }
   }
   return mat;
 }
@@ -421,7 +395,7 @@ function build(container, hiddenCanvas, OrbitControls, CSS2D, pandaMod, post) {
   const camera = new THREE.PerspectiveCamera(FOV, 1, 0.1, 400);
   camera.position.set(0, 9, 30);
   const tex = makeTextures();
-  const bgTex = { dark: makeBackground(THEMES.dark), light: makeBackground(THEMES.light) };
+  const bgTex = { dark: makeBackground(THEMES.dark) };
   scene.background = bgTex.dark;
   scene.fog = new THREE.FogExp2(THEMES.dark.fog, THEMES.dark.fogD);
 
@@ -568,7 +542,6 @@ function build(container, hiddenCanvas, OrbitControls, CSS2D, pandaMod, post) {
     scene, camera, controls, world, tex, bgTex, hemi, key, rim, fill, core, ground, dust, spokes, clusters,
     discMat, circleMat, spokeMat, dustMat, coreMat,
     additive: new Set([coreMat, discMat, dustMat, ..._earlyAdditive]),
-    theme: cfg.theme,
     composer: null, bloom: null, envTex, pmrem,
     edgeMat, edgeLines: null, edgeCap: 0, edgeList: [],
     edgeShade: 1, haloBoost: 1,
@@ -1178,11 +1151,10 @@ function applyVisibility() {
 
 function applyTheme() {
   if (!R) return;
-  // 场景明暗只跟界面主题走：角色只决定"看得到哪些节点"，不改场景明暗（否则切视角时整屏闪）
-  const light = cfg.theme === "light";
-  const th = light ? THEMES.light : THEMES.dark;
-  R.theme = light ? "light" : "dark";
-  R.scene.background = light ? R.bgTex.light : R.bgTex.dark;
+  // 场景固定用夜色竹林主题；角色只决定"看得到哪些节点"，不改场景明暗（否则切视角时整屏闪）
+  const th = THEMES.dark;
+  R.theme = "dark";
+  R.scene.background = R.bgTex.dark;
   R.scene.fog.color.setHex(th.fog);
   R.scene.fog.density = th.fogD;
   R.hemi.intensity = th.hemi;
@@ -1192,30 +1164,7 @@ function applyTheme() {
   R.fill.intensity = th.fill;
   R.renderer.toneMappingExposure = th.exposure;
   R.edgeBase = th.edge;
-  R.edgeShade = th.edgeShade;
-  R.haloBoost = th.haloBoost;
-  if (R.bloom) { // 浅底 + bloom 会整屏泛白：压低强度、抬高阈值
-    R.bloom.strength = th.bloom;
-    R.bloom.threshold = th.bloomT;
-  }
-  // PBR 星球材质随主题调：浅底需要更低粗糙度 + 更强环境反射才有立体感/高光
-  for (const ns of R.order) {
-    ns.mat.envMapIntensity = th.env;
-    ns.mat.roughness = th.rough;
-    ns.mat.emissiveIntensity = ns.emissBase * th.emiss;
-  }
-  if (R.plan) {
-    for (const sat of R.plan.sats.values()) {
-      sat.mat.envMapIntensity = th.env;
-      sat.mat.roughness = th.rough;
-      sat.mat.emissiveIntensity = (sat.emissBase || 0.15) * th.emiss;
-    }
-    R.plan.orbit.material.opacity = th.orbit;
-    if (R.plan.arcs) {
-      R.plan.arcs.material.color.setHex(th.arc);
-      R.plan.arcs.material.opacity = th.arcOp;
-    }
-  }
+  if (R.bloom) R.bloom.strength = th.bloom;
   R.dustMat.color.setHex(th.dust);
   R.dustMat.opacity = th.dustOp;
   R.coreMat.color.setHex(th.core);
@@ -1226,7 +1175,6 @@ function applyTheme() {
   R.circleMat.opacity = th.circleOp;
   R.spokeMat.color.setHex(th.spoke);
   R.spokeMat.opacity = th.spokeOp;
-  // additive 在浅底上等于隐形 → 换普通混合让光晕/星尘显示真实颜色
   const blend = th.additive ? THREE.AdditiveBlending : THREE.NormalBlending;
   for (const m of R.additive) {
     if (m.blending !== blend) {
@@ -1948,17 +1896,6 @@ export const setRole = safe(function setRole(role) {
     R.themeRole = r;
     applyTheme();
     applyVisibility();
-  }
-});
-
-/** 深浅色切换：整个 3D 场景（背景/雾/光照/叠加材质/bloom）跟随界面主题。 */
-export const setTheme = safe(function setTheme(theme) {
-  const t = theme === "light" ? "light" : "dark";
-  if (cfg.theme === t && (!R || R.theme === t)) return;
-  cfg.theme = t;
-  if (R && R.ready) {
-    applyTheme();
-    if (!R.running) renderFrame(0);
   }
 });
 
