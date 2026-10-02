@@ -567,7 +567,7 @@ function build(container, hiddenCanvas, OrbitControls, CSS2D, pandaMod, post) {
     raycaster: new THREE.Raycaster(),
     pickList: [],
     ndc: new THREE.Vector2(),
-    v1: new THREE.Vector3(), v2: new THREE.Vector3(), v3: new THREE.Vector3(),
+    v1: new THREE.Vector3(), v2: new THREE.Vector3(), v3: new THREE.Vector3(), v4: new THREE.Vector3(),
     col: new THREE.Color(), col2: new THREE.Color(), gray: new THREE.Color(0x7d8b88), amber: new THREE.Color(AMBER),
     plan: null,
     planFading: [],
@@ -1398,7 +1398,43 @@ function updateEdges(tms, time) {
   L.geometry.attributes.color.needsUpdate = true;
 }
 
-// 标签：只显示重要 / 悬停 / 高亮 / 聚焦 / 新生节点
+// ---- 标签互斥：屏幕空间 AABB 占位 ----------------------------------
+// 原来只按权重取前 labelBudget 个，但 ① 悬停/高亮/聚焦/新生这些"豁免项"
+// 完全绕过预算（连续召回时可见标签无上限增长）；② 簇标签走独立循环，
+// 根本不参与互斥。结果就是"德智体美劳"和节点名互相压在一起，文字糊成一团。
+// 现在改成：簇标签先占位（辨识度高，优先保住），节点标签按权重依次抢位，
+// 撞上的这一帧就不发——下一帧它们的位置变了还会再试，不会永久消失。
+const LABEL_PAD = 3;   // px，标签之间留一点缝
+const LABEL_W = 60;    // 兜底宽度（标签还没显示过、量不到时）
+const LABEL_H = 18;
+const LABEL_BONUS = 3; // 豁免项（悬停/高亮/聚焦/新生）单独给几个位，别无限堆
+
+function labelSize(holder) {
+  // 只在标签当前可见时量（量得到才准），量到就缓存，避免每帧强制重排
+  const w = holder.el && holder.el.offsetWidth;
+  const h = holder.el && holder.el.offsetHeight;
+  if (w > 0 && h > 0) { holder.lw = w; holder.lh = h; }
+  return { w: holder.lw || LABEL_W, h: holder.lh || LABEL_H };
+}
+
+/** 世界坐标 → 标签的屏幕 AABB；相机背后返回 null */
+function labelRectAt(pos, holder) {
+  R.v3.copy(pos).project(R.camera);
+  if (R.v3.z > 1) return null;               // 在相机背面，CSS2D 也不画
+  const s = labelSize(holder);
+  const out = R.labelProbe;
+  out.w = s.w; out.h = s.h;
+  out.x = (R.v3.x + 1) * (R.w / 2) - s.w / 2;  // CSS2D 用 translate(-50%,-50%)
+  out.y = (1 - R.v3.y) * (R.h / 2) - s.h / 2;
+  return out;
+}
+
+function rectHits(a, b) {
+  return a.x < b.x + b.w + LABEL_PAD && a.x + a.w + LABEL_PAD > b.x &&
+         a.y < b.y + b.h + LABEL_PAD && a.y + a.h + LABEL_PAD > b.y;
+}
+
+// 标签：按权重发放 + 屏幕空间互斥；只显示重要 / 悬停 / 高亮 / 聚焦 / 新生节点
 function updateLabels(tms) {
   const cand = R.labelCand;
   cand.length = 0;
@@ -1408,12 +1444,59 @@ function updateLabels(tms) {
   cand.sort(byWeightDesc);
   const budget = R.labelBudget;
   for (let i = 0; i < R.order.length; i++) R.order[i].wantLabel = false;
-  for (let i = 0; i < cand.length && i < budget; i++) cand[i].wantLabel = true;
+
+  const taken = R.labelRects;
+  taken.length = 0;
+  // 簇标签先占：只有"德智体美劳"这么几个，是识别整张图的骨架
+  // （标签挂在 group 局部 (0,3.6,0)，要抬到真实位置再投影，否则矩形会算偏）
+  for (let i = 0; i < DOMAIN_KEYS.length; i++) {
+    const c = R.clusters[DOMAIN_KEYS[i]];
+    if (!c || !R.clusterCounts[i] || !c.lab.visible) continue;
+    R.v4.copy(c.group.position).add(c.lab.position);
+    const r = labelRectAt(R.v4, c);
+    if (r) taken.push({ x: r.x, y: r.y, w: r.w, h: r.h });
+  }
+  // 悬停 / 聚焦的节点是用户正盯着的那一个：最先占位、不受配额和互斥限制
+  for (const ns of R.order) {
+    if (!ns.group.visible || ns.vis <= 0.3) continue;
+    if (R.hover !== ns && R.focusId !== ns.id) continue;
+    ns.wantLabel = true;
+    const r = labelRectAt(ns.p, ns);
+    if (r) taken.push({ x: r.x, y: r.y, w: r.w, h: r.h });
+  }
+  // 节点标签按权重抢位
+  for (let i = 0; i < cand.length && i < budget; i++) {
+    const ns = cand[i];
+    if (ns.wantLabel) continue;
+    const r = labelRectAt(ns.p, ns);
+    if (!r) continue;
+    let hit = false;
+    for (let j = 0; j < taken.length; j++) if (rectHits(r, taken[j])) { hit = true; break; }
+    if (hit) continue;
+    taken.push({ x: r.x, y: r.y, w: r.w, h: r.h });
+    ns.wantLabel = true;
+  }
+  // 豁免项：原来它们直接绕过预算，现在给一份独立的小配额并同样参与互斥
+  let bonus = LABEL_BONUS;
+  for (const ns of R.order) {
+    if (ns.wantLabel || bonus <= 0) continue;
+    if (!ns.group.visible || ns.vis <= 0.3) continue;
+    const exempt = ns.pulseUntil > tms ||
+                   (ns.spawnedAt && tms - ns.spawnedAt < 6000);
+    if (!exempt) continue;
+    const r = labelRectAt(ns.p, ns);
+    if (!r) continue;
+    let hit = false;
+    for (let j = 0; j < taken.length; j++) if (rectHits(r, taken[j])) { hit = true; break; }
+    if (hit) continue;
+    taken.push({ x: r.x, y: r.y, w: r.w, h: r.h });
+    bonus--;
+    ns.wantLabel = true;
+  }
   for (const ns of R.order) {
     const hl = ns.pulseUntil > tms;
     const hov = R.hover === ns;
-    const want = (ns.wantLabel || hl || hov || R.focusId === ns.id || (ns.spawnedAt && tms - ns.spawnedAt < 6000)) &&
-      ns.group.visible && ns.vis > 0.3;
+    const want = ns.wantLabel && ns.group.visible && ns.vis > 0.3;
     if (ns.label.visible !== want) ns.label.visible = want;
     if (!want) continue;
     const n = ns.data;
@@ -2157,5 +2240,8 @@ function ensureScratch() {
     R.clusterSums = DOMAIN_KEYS.map(() => new THREE.Vector3());
     R.clusterCounts = new Array(DOMAIN_KEYS.length).fill(0);
     R.labelCand = [];
+    R.labelRects = [];
+    R.labelProbe = {};
+    R.frameN = 0;
   }
 }

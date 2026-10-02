@@ -12,9 +12,98 @@
 <link rel="apple-touch-icon" href="static/icon.svg">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="熊猫管家">
+<link rel="modulepreload" href="static/app.js">
+<link rel="modulepreload" href="static/panda.js">
+<link rel="modulepreload" href="static/scene3d.js">
+<link rel="modulepreload" href="static/graph2d.js">
+<link rel="modulepreload" href="static/vendor/marked.esm.js">
+<link rel="modulepreload" href="static/vendor/purify.es.js">
+<script src="static/splash.js" defer></script>
+<style>
+/* 启动层：底色与登录页 .login-bg 同一渐变，揭幕时像是直接"溶"进登录页。
+   内容延迟 180ms 才淡入——快网络下根本看不到它，不会闪一下。 */
+#app-splash {
+  position: fixed; inset: 0; z-index: 9999;
+  display: grid; place-items: center;
+  padding: 24px 16px;
+  background: radial-gradient(130% 90% at 50% -6%, #12201b 0%, #0a0f0d 58%, #080d0b 100%);
+  color: #e6f4ed;
+  transition: opacity .32s ease, visibility 0s linear .32s;
+}
+#app-splash.is-done { opacity: 0; visibility: hidden; pointer-events: none; }
+.splash-inner {
+  display: flex; flex-direction: column; align-items: center; gap: 18px;
+  width: min(280px, 100%);
+  opacity: 0; transform: translateY(6px);
+  animation: splash-in .45s cubic-bezier(.2, .8, .2, 1) .18s forwards;
+}
+@keyframes splash-in { to { opacity: 1; transform: none; } }
+.splash-panda { width: 104px; height: 104px; position: relative; }
+.splash-panda svg { width: 100%; height: 100%; overflow: visible;
+  animation: splash-breathe 3.2s ease-in-out infinite; transform-origin: 50% 90%; }
+.splash-panda::after {
+  content: ""; position: absolute; left: 22%; right: 22%; bottom: -6px; height: 8px;
+  border-radius: 50%; background: rgba(0, 0, 0, .45); filter: blur(4px);
+  animation: splash-shadow 3.2s ease-in-out infinite;
+}
+@keyframes splash-breathe { 0%, 100% { transform: translateY(0) scale(1); } 50% { transform: translateY(-4px) scale(1.015); } }
+@keyframes splash-shadow { 0%, 100% { transform: scaleX(1); opacity: .9; } 50% { transform: scaleX(.86); opacity: .6; } }
+.splash-eyes { transform-box: fill-box; transform-origin: center; animation: splash-blink 4.2s infinite; }
+@keyframes splash-blink { 0%, 93%, 100% { transform: scaleY(1); } 96% { transform: scaleY(.12); } }
+.splash-leaf { transform-box: fill-box; transform-origin: 50% 100%; animation: splash-sway 2.6s ease-in-out infinite alternate; }
+@keyframes splash-sway { from { transform: rotate(-7deg); } to { transform: rotate(8deg); } }
+.splash-name, #splash-label, #splash-slow, #splash-reload {
+  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif; }
+.splash-name { margin: 0; font-size: 18px; font-weight: 600; line-height: 1.3; letter-spacing: .14em; color: #f2f8f5; }
+.splash-track { width: 100%; height: 3px; border-radius: 3px; background: rgba(220, 245, 235, .09); overflow: hidden; }
+#splash-bar { height: 100%; transform-origin: 0 50%; transform: scaleX(.08);
+  background: linear-gradient(90deg, #10b981, #34d399 70%, #fbbf24);
+  transition: transform .25s ease-out; }
+#splash-label { margin: -6px 0 0; font-size: 13px; line-height: 1.5; color: #9db8ad; text-align: center; min-height: 1.5em; }
+#splash-slow { margin: -10px 0 0; font-size: 12px; line-height: 1.5; color: #fbbf24; text-align: center; min-height: 1.5em; opacity: 0; transition: opacity .3s; }
+#app-splash.is-slow #splash-slow, #app-splash.is-stuck #splash-slow { opacity: .9; }
+#splash-reload { display: none; padding: 7px 18px; border-radius: 99px; cursor: pointer; font-size: 13px;
+  border: 1px solid rgba(52, 211, 153, .4); background: rgba(52, 211, 153, .1); color: #6ee7b7; }
+#splash-reload:hover { background: rgba(52, 211, 153, .18); }
+#splash-reload:focus-visible { outline: 2px solid #34d399; outline-offset: 2px; }
+#app-splash.is-stuck #splash-reload { display: inline-block; }
+@media (prefers-reduced-motion: reduce) {
+  .splash-inner { animation: none; opacity: 1; transform: none; }
+  .splash-panda svg, .splash-panda::after, .splash-eyes, .splash-leaf { animation: none; }
+  #splash-bar, #app-splash { transition: none; }
+}
+</style>
 </head>
 <body data-view="child" data-role="child" data-theme="dark">
 <noscript><p class="noscript">这个界面需要 JavaScript 才能和熊猫管家对话。</p></noscript>
+
+<!-- 启动层：web/splash.js 按真实加载阶段推进，app.js 进主界面/登录页后揭幕 -->
+<div id="app-splash" role="status" aria-live="polite" aria-label="熊猫管家加载中">
+  <div class="splash-inner">
+    <div class="splash-panda" aria-hidden="true">
+      <svg viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg">
+        <path class="splash-leaf" d="M60 22c-1-8-6-12-13-13 5 3 8 7 9 13zm2 0c2-9 8-13 15-13-6 3-10 7-12 13z" fill="#34d399"/>
+        <circle cx="31" cy="34" r="13" fill="#1f1d1b"/><circle cx="89" cy="34" r="13" fill="#1f1d1b"/>
+        <ellipse cx="60" cy="66" rx="42" ry="38" fill="#f4f1ea"/>
+        <ellipse cx="43" cy="63" rx="11" ry="13.5" transform="rotate(-16 43 63)" fill="#262320"/>
+        <ellipse cx="77" cy="63" rx="11" ry="13.5" transform="rotate(16 77 63)" fill="#262320"/>
+        <g class="splash-eyes" fill="#f4f1ea">
+          <circle cx="45" cy="62" r="3.6"/><circle cx="75" cy="62" r="3.6"/>
+        </g>
+        <ellipse cx="30" cy="77" rx="6" ry="3.4" fill="#fb7185" opacity=".35"/>
+        <ellipse cx="90" cy="77" rx="6" ry="3.4" fill="#fb7185" opacity=".35"/>
+        <ellipse cx="60" cy="74" rx="5" ry="3.6" fill="#262320"/>
+        <path d="M53 80q7 6 14 0" stroke="#262320" stroke-width="2.4" stroke-linecap="round" fill="none"/>
+      </svg>
+    </div>
+    <p class="splash-name">熊猫管家</p>
+    <div class="splash-track"><div id="splash-bar"></div></div>
+    <p id="splash-label">正在唤醒熊猫管家…</p>
+    <p id="splash-slow"></p>
+    <button id="splash-reload" type="button">重新加载</button>
+  </div>
+</div>
+
 
 <!-- ============================================================
      图标系统：stroke 风格 SVG sprite（禁止 emoji 当图标）
@@ -263,6 +352,12 @@
           <label class="sr-only" for="reg-child">孩子的登录名</label>
           <input id="reg-child" class="text-input" type="text" maxlength="24"
                  placeholder="孩子的登录名（如：小豆）" enterkeyhint="next">
+        </div>
+        <div id="reg-child-pass-field" class="field hidden">
+          <svg class="ic field-ic" aria-hidden="true"><use href="#i-lock"/></svg>
+          <label class="sr-only" for="reg-child-pass">孩子账号的密码</label>
+          <input id="reg-child-pass" class="text-input" type="password" maxlength="64"
+                 autocomplete="off" placeholder="孩子账号的密码（证明是一家人）" enterkeyhint="next">
         </div>
 
         <div class="field">

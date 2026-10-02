@@ -52,6 +52,42 @@ _CACHE_TTL = 5.0
 
 _ARCHIVE_RE = re.compile(r"^-\s*（更早的\s*(\d+)\s*[条行]已(?:归档|折叠)）")
 
+# ---------- 沉淀去重 ----------
+# 抽取是每轮独立跑的 LLM，同一件事换个说法就会被反复写进档案。用演示档
+# 2026-10-02 实测（store.bigrams 口径）两两 Jaccard：真重复落在 0.48~0.94，
+# 同题材但确实是不同瞬间的记忆最高 0.32，整体中位数 0.104。0.40 正好卡在
+# [0.32, 0.48] 这个空档正中——但那组样本都是长句。短句只差一个数字或一个词
+# （"考了90分/98分" 0.80、"感冒了/感冒好了" 0.67、"周六/周日去游泳" 0.50）同样会
+# 越过 0.40，被吞掉的恰恰是最有价值的"变化"。所以：阈值抬到 0.75 只拦近乎原样的
+# 复述；数字不同一律视为新事实；比对前剥掉 "日期：" 前缀，免得前缀稀释分数。
+_DUP_THRESHOLD = 0.75
+_DATE_PREFIX = re.compile(r"^\d{4}-\d{2}-\d{2}[：:]\s*")
+_DIGITS = re.compile(r"\d+(?:\.\d+)?")
+
+
+def _bullets(text: str) -> list[str]:
+    """取出 "- xxx" 形式的条目正文。"""
+    return [ln.strip()[2:].strip() for ln in (text or "").splitlines() if ln.strip().startswith("- ")]
+
+
+def _is_dup(text: str, existing, threshold: float = _DUP_THRESHOLD) -> bool:
+    """这条沉淀是不是已经说过一遍了（复用 store.bigrams，中英文分开切）。"""
+    t = _DATE_PREFIX.sub("", (text or "").strip())
+    if not t:
+        return True
+    g = bigrams(t)
+    if not g:
+        return True
+    nums = set(_DIGITS.findall(t))
+    for e in existing:
+        e = _DATE_PREFIX.sub("", (e or "").strip())
+        if set(_DIGITS.findall(e)) != nums:
+            continue  # 分数、次数、日期变了就是新情况，不算复述
+        h = bigrams(e)
+        if h and len(g & h) / len(g | h) >= threshold:
+            return True
+    return False
+
 
 def _clean_line(text, maxlen: int = 400) -> str:
     """一段抽取文本压成单行：折叠连续空白、去列表符号、超长截断。
@@ -517,7 +553,12 @@ class MemoryStore:
                 old = daily_path.read_text(encoding="utf-8").rstrip() + "\n"
             else:
                 old = f"# {today}\n\n"
-            atomic_write(daily_path, old + f"- {daily_text}\n")
+            # 同一件事换个说法也会被抽出来，不拦一下时间线上会堆一串近似条目
+            # 只和当天比：每天都会发生的日常（"今天去游泳"）隔天必须照常记下
+            if _is_dup(daily_text, _bullets(old)):
+                print(f"[memory] daily 跳过重复：{daily_text[:30]}")
+            else:
+                atomic_write(daily_path, old + f"- {daily_text}\n")
 
         index = self.read_index()
         for t in data.get("topics") or []:
@@ -530,7 +571,13 @@ class MemoryStore:
             info = index.setdefault("topics", {}).get(name)
             if info:
                 meta = _parse_topic(self._topic_text(info.get("file", "")))
-                body = (meta["body"] + f"\n- {today}：{fact}").strip()
+                body = meta["body"]
+                # 主题正文有两种形态：种子数据是散文段落，app 追加的是 "- 日期：事实"
+                # 条目。只比对 "- " 会漏掉散文那部分，所以按"所有非空行"都比。
+                if _is_dup(fact, [ln.strip() for ln in body.splitlines() if ln.strip()]):
+                    print(f"[memory] 主题「{name}」跳过重复事实：{fact[:30]}")
+                else:
+                    body = (body + f"\n- {today}：{fact}").strip()
                 merged_rel = sorted(set(info.get("related", [])) | set(related))
                 atomic_write(self.dir / info["file"], _render_topic(name, status, merged_rel, body))
                 info.update({"status": status, "related": merged_rel})
@@ -543,7 +590,14 @@ class MemoryStore:
 
         longterm = _clean_line(data.get("longterm"), 300)
         if longterm:
-            self._append_memory_line(f"- {today}：{longterm}")
+            try:
+                mem_old = (self.dir / "MEMORY.md").read_text(encoding="utf-8")
+            except OSError:
+                mem_old = ""
+            if _is_dup(longterm, _bullets(mem_old)):
+                print(f"[memory] 长期记忆跳过重复：{longterm[:30]}")
+            else:
+                self._append_memory_line(f"- {today}：{longterm}")
 
 
 async def extract_and_store(store: MemoryStore, user_msg: str, assistant_msg: str,

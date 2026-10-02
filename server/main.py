@@ -38,10 +38,12 @@ import re
 import time
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
+from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, Field
 
 from . import (actions, affairs, auth, config, executor, graph, llm, memory, planner,
@@ -57,10 +59,12 @@ async def _lifespan(_app: FastAPI):
 mimetypes.add_type("application/manifest+json", ".webmanifest")  # PWA 清单，默认会被当成 octet-stream
 
 app = FastAPI(title="PandaButler", docs_url=None, redoc_url=None, lifespan=_lifespan)
+# 静态资源压缩：首屏 JS/CSS ~500KB → ~130KB；Starlette 默认排除 text/event-stream，SSE 不受影响
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 
-# 前端无内联脚本/事件处理器，全部资源同源：CSP 可以直接收口到 'self'；
-# style 留 'unsafe-inline'（app.js 大量 el.style 赋值），img 放 data:（favicon 是内嵌 SVG）。
+# 前端无内联脚本/事件处理器（启动层也是独立的 static/splash.js），CSP 收口到 'self'；
+# style 留 'unsafe-inline'（app.js 大量 el.style 赋值、启动层内联样式），img 放 data:（favicon 是内嵌 SVG）。
 _CSP = (
     "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
     "img-src 'self' data:; connect-src 'self'; font-src 'self'; "
@@ -79,7 +83,8 @@ async def _security_headers(request: Request, call_next):
     resp.headers["Referrer-Policy"] = "same-origin"
     resp.headers["X-Frame-Options"] = "DENY"
     resp.headers["Content-Security-Policy"] = _CSP
-    # vendored 依赖版本固定，长缓存安全；其余静态文件交给 ETag/304
+    # vendored 依赖版本固定，长缓存安全；其余静态文件不带版本号，交给 ETag/304——
+    # 给它们 max-age 会让部署后一小时内的旧 app.js 去调新接口
     if request.url.path.startswith("/static/vendor/"):
         resp.headers["Cache-Control"] = "public, max-age=86400, immutable"
     return resp
@@ -111,6 +116,7 @@ class RegisterReq(BaseModel):
     password: str = Field(min_length=1, max_length=64)
     role: str = Field(default="child", pattern="^(child|parent)$")
     child: str = Field(default="", max_length=24)  # 家长账号要绑定的孩子登录名
+    child_password: str = Field(default="", max_length=64)  # 绑定凭证：孩子账号的密码
     question: str = Field(default="", max_length=60)
     answer: str = Field(default="", max_length=60)
 
@@ -210,9 +216,10 @@ async def _stream_text(messages: list[dict], *, max_tokens: int, caller: str,
     got: list[str] = []
     err = ""
     try:
-        async for tok in llm.stream(messages, max_tokens=max_tokens, caller=caller):
-            got.append(tok)
-            yield _sse({"type": "token", "text": tok})
+        if messages:  # 传 None：额度用完，直接走本地兜底，不碰 LLM
+            async for tok in llm.stream(messages, max_tokens=max_tokens, caller=caller):
+                got.append(tok)
+                yield _sse({"type": "token", "text": tok})
     except Exception as e:  # noqa: BLE001 流已开始，只能用兜底文本收尾
         err = str(e)[:120]
         print(f"[{caller}] 流式失败，已降级：{e}")
@@ -366,9 +373,56 @@ def _chat_throttle(key: str) -> bool:
     return ok
 
 
+# 所有会调 LLM 的接口共用一份额度：按账号 + 按 IP 双桶。
+# 只限 /api/chat 不够——问候/晨报/梦想/传话筒同样每次都烧 API Key，
+# 而登录对未知名字零门槛自动注册，单靠"按账号"换个名字就绕过去了，所以再按 IP 兜一层。
+_LLM_HITS: dict[str, list[float]] = {}
+_LLM_WIN = 300
+_LLM_USER_MAX, _LLM_IP_MAX = 60, 150  # 5 分钟内：每账号 60 次、每 IP 150 次（家庭/教室共用出口留余量）
+
+
+def _hit(table: dict, key: str, limit: int, win: float, now: float) -> bool:
+    hits = [t for t in table.get(key, []) if now - t < win]
+    ok = len(hits) < limit
+    if ok:
+        hits.append(now)
+    table[key] = hits
+    return ok
+
+
+def _llm_quota(request: Request, username: str) -> bool:
+    """还有没有 LLM 额度；两个桶都要有余量才放行（先查不扣，免得一个桶白扣）。"""
+    now = time.monotonic()
+    ukey, ikey = f"u:{username}", f"ip:{_client_ip(request)}"
+    for key, limit in ((ukey, _LLM_USER_MAX), (ikey, _LLM_IP_MAX)):
+        if sum(1 for t in _LLM_HITS.get(key, []) if now - t < _LLM_WIN) >= limit:
+            return False
+    _hit(_LLM_HITS, ukey, _LLM_USER_MAX, _LLM_WIN, now)
+    _hit(_LLM_HITS, ikey, _LLM_IP_MAX, _LLM_WIN, now)
+    if len(_LLM_HITS) > 1000:
+        for k in [k for k, v in _LLM_HITS.items() if not v or now - v[-1] >= _LLM_WIN]:
+            _LLM_HITS.pop(k, None)
+        _cap_table(_LLM_HITS, 10000)
+    return True
+
+
+def _need_llm_quota(request: Request, username: str) -> None:
+    if not _llm_quota(request, username):
+        raise HTTPException(429, "管家今天被问得有点累啦，歇几分钟再来")
+
+
+_SIGNUP_HITS: dict[str, list[float]] = {}
+_SIGNUP_MAX, _SIGNUP_WIN = 10, 3600  # 每 IP 每小时最多自动建 10 个新号
+
+
 @app.post("/api/auth/login")
 async def api_auth_login(request: Request, req: AuthReq):
     _throttled(request)
+    if await asyncio.to_thread(auth.would_create, req.username):
+        # 未知名字会被自动注册成新孩子号：按 IP 限量，挡住"每次换个名字"刷额度
+        if not _hit(_SIGNUP_HITS, _client_ip(request), _SIGNUP_MAX, _SIGNUP_WIN, time.monotonic()):
+            raise HTTPException(429, "这台设备新建的账号太多啦，用已有账号登录吧")
+        _cap_table(_SIGNUP_HITS, 2000)
     try:
         # PBKDF2 十多万次迭代要跑几十上百毫秒，挪出事件循环免得卡住别人的 SSE 流
         res = await asyncio.to_thread(auth.login, req.username, req.password)
@@ -383,7 +437,7 @@ async def api_auth_register(request: Request, req: RegisterReq):
     try:
         res = await asyncio.to_thread(
             auth.register, req.username, req.password, req.role,
-            req.child, req.question, req.answer)
+            req.child, req.question, req.answer, req.child_password)
     except ValueError as e:
         raise HTTPException(400, str(e))
     return await _auth_response(res)
@@ -453,7 +507,7 @@ async def api_session(request: Request, req: SessionReq):
 
 @app.get("/api/greeting")
 async def api_greeting(request: Request, name: str = "", stream: bool = False):
-    _, sess = await _auth_session(request, "greeting", name)
+    user, sess = await _auth_session(request, "greeting", name)
     _, a, _ = _stores(sess)
     block, brief, reminders = await asyncio.to_thread(
         lambda: (sess.store.active_block(), _affairs_brief(a), sess.store.due_reminders()))
@@ -465,13 +519,17 @@ async def api_greeting(request: Request, name: str = "", stream: bool = False):
     )}]
     # 兜底只说实话：AI 不可用就明说，不冒充一句生成的问候
     fallback = f"{sess.name}，管家暂时连不上大模型，问候稍后再补上～"
+    # 额度用完不报错：直接给上面那句实话兜底
+    quota = _llm_quota(request, user["username"])
     if stream:
         # opt-in 流式：`?stream=1` 走 SSE 逐字下发，默认仍返回 JSON（契约 §4 不变）
         return StreamingResponse(
-            _stream_text(messages, max_tokens=600, caller="greeting",
+            _stream_text(messages if quota else None, max_tokens=600, caller="greeting",
                          done={"reminders": reminders, "name": sess.name},
                          fallback=fallback),
             media_type="text/event-stream", headers=_SSE_HEADERS)
+    if not quota:
+        return {"text": fallback, "reminders": reminders, "name": sess.name}
     try:
         text = await llm.complete(messages, max_tokens=600, caller="greeting")
     except llm.LLMError as e:
@@ -571,7 +629,7 @@ def _briefing_fallback(name: str, snapshot: dict, due: list[dict]) -> str:
 
 @app.get("/api/briefing")
 async def api_briefing(request: Request, name: str = "", stream: bool = False):
-    _, sess = await _auth_session(request, "briefing", name)
+    user, sess = await _auth_session(request, "briefing", name)
     g, a, m = _stores(sess)
     data = await asyncio.to_thread(_briefing_collect, a, g, m)
     snapshot, due = data["snapshot"], data["due"]
@@ -587,16 +645,19 @@ async def api_briefing(request: Request, name: str = "", stream: bool = False):
         "due_soon": due,
         "suggestions": data["suggestions"],
     }
+    quota = _llm_quota(request, user["username"])  # 用完就走本地兜底，晨报照常出
     if stream:
         # opt-in 流式：先逐字出正文，done 事件再带看板/截止/建议，首屏从"整段等"变"边出边看"
         return StreamingResponse(
-            _stream_text(messages, max_tokens=800, caller="briefing",
+            _stream_text(messages if quota else None, max_tokens=800, caller="briefing",
                          done=payload,
                          fallback=_briefing_fallback(sess.name, snapshot, due)),
             media_type="text/event-stream", headers=_SSE_HEADERS)
 
     degraded = False
     try:
+        if not quota:
+            raise llm.LLMError("额度用完")
         text = await llm.complete(messages, max_tokens=800, caller="briefing")
     except llm.LLMError as e:
         # 晨报失败不影响界面：给一句基于本地数据的兜底，并显式标记降级
@@ -833,16 +894,19 @@ async def _chat_stream(sess, raw_message: str, ctx: dict, resume: ResumeReq | No
                 await emit({"type": "affair", "action": "create" if created else "update",
                             "affair": await asyncio.to_thread(a_store.get, affair["id"])})
             try:
+                await emit({"type": "phase", "phase": "planning"})
                 snapshot = await asyncio.to_thread(a_store.snapshot)
                 plan = await planner.make_plan(sess.store, message, snapshot)
             except planner.PlanError:
                 plan = None
             if plan:
-                if created and affair:
+                ptitle = (plan.get("title") or "").strip()[:18]
+                if created and affair and ptitle and ptitle not in _GENERIC_TITLES:
                     # 事务名用规整后的计划名，不拿用户原句切片当标题；
-                    # 存量事务的标题不动——那是用户/管家已经叫顺了的名字
+                    # 存量事务的标题不动——那是用户/管家已经叫顺了的名字。
+                    # 模型没给标题时 planner 兜底成"筹备计划"，这种泛化名不覆盖占位标题
                     affair = await asyncio.to_thread(
-                        a_store.update, affair["id"], {"title": plan["title"][:18]},
+                        a_store.update, affair["id"], {"title": ptitle},
                         actor="butler", note="定下事务名")
                     await emit({"type": "affair", "action": "update", "affair": affair})
                 await emit({
@@ -853,15 +917,22 @@ async def _chat_stream(sess, raw_message: str, ctx: dict, resume: ResumeReq | No
                 results, statuses = await executor.run_plan(plan, sess.store, message, emit)
                 if affair:
                     # 执行链连同节点终态存进事务，详情抽屉的"DAG 回放"展示真链而非伪造
-                    await asyncio.to_thread(a_store.update, affair["id"], {"plan": {
+                    patch = {"plan": {
                         "title": plan["title"],
                         "nodes": [{"id": n["id"], "title": n["title"], "tool": n["tool"],
                                    "depends_on": n["depends_on"],
                                    "status": statuses.get(n["id"], "done")} for n in plan["nodes"]],
-                    }}, actor="butler", note="执行链已存档")
-                card = await synth.synthesize(sess.store, message, results)
+                    }}
+                    await asyncio.to_thread(a_store.update, affair["id"], patch,
+                                            actor="butler", note="执行链已存档")
+                await emit({"type": "phase", "phase": "synthesizing"})
+                card = await _card_with_fallback(
+                    sess.store, message, results=results, title=plan["title"],
+                    pairs=[(n["title"], results.get(n["id"], "")) for n in plan["nodes"]
+                           if statuses.get(n["id"]) != "error"])
             else:
-                card = await synth.direct_card(sess.store, message)
+                await emit({"type": "phase", "phase": "synthesizing"})
+                card = await _card_with_fallback(sess.store, message, use_synth=False)
             reply_text = synth.card_to_text(card)
 
             # ③ 实际去执行：加提醒 / 生成清单 / 请家长确认。
@@ -983,6 +1054,7 @@ async def _triage(sess, a_store, message: str, hit: dict, emit) -> str:
     mem = mem or "（暂无记忆）"
     if hit.get("block"):
         mem = f"{mem}\n\n和这次相关的记忆：\n{hit['block']}"
+    await emit({"type": "phase", "phase": "planning"})
     data = await llm.complete_json(
         [{"role": "system", "content": "你是任务拆解模块，只输出 JSON。"},
          {"role": "user", "content": prompts.TRIAGE.format(
@@ -1022,12 +1094,15 @@ async def _triage(sess, a_store, message: str, hit: dict, emit) -> str:
                 patch = {"summary": summary}
                 if due:
                     patch["due"] = due
+                # 拆解已经完成，接下来是孩子照着做——别把事务永远挂在"规划中"
+                if existing.get(aid, {}).get("stage") in ("discovered", "planning"):
+                    patch["stage"] = "executing"
                 affair = await asyncio.to_thread(
                     a_store.update, aid, patch, actor="child", note=f"又提起：{title}")
                 await emit({"type": "affair", "action": "update", "affair": affair})
             else:
                 affair = await asyncio.to_thread(a_store.create, {
-                    "title": title, "kind": str(t.get("kind") or "goal"), "stage": "planning",
+                    "title": title, "kind": str(t.get("kind") or "goal"), "stage": "executing",
                     "owner_next": "child", "summary": summary, "due": due,
                     "linked_nodes": linked, "progress": {"mode": "none", "value": 0},
                     "actor": "butler", "source": "triage",
@@ -1061,6 +1136,68 @@ def _flat(text: str) -> str:
     return re.sub(r"[^\w一-鿿]+", "", text or "")
 
 
+# 孩子口语里的收尾语气词，留在标题上很扎眼（"…帮我" / "…好不好"）
+_TITLE_TAIL = ("帮我", "好不好", "行不行", "可以吗", "吧", "呀", "啊", "呢", "一下", "怎么样")
+
+# 规划器没给出有效标题时的兜底名，拿它去覆盖看板标题只会把好标题冲掉
+_GENERIC_TITLES = {"筹备计划", "计划", "新的事", "执行计划", "任务", "待办"}
+
+
+def _clean_affair_title(message: str) -> str:
+    """从孩子原话里取一个能上看板的短标题：去标点、限长、去收尾语气词。
+
+    顺序很关键：必须「先截断再剥语气词」。反过来做的话，截断点会重新
+    切出一个悬在末尾的「帮我」（实测 18 字处正好切在「…绘本帮我」）。
+    """
+    t = re.sub(r"[，。！？!?~～、\s]+", "", message or "")
+    for _ in range(4):  # 截断与剥词互相影响，迭代到稳定即可
+        before = t
+        t = t[:18]
+        for w in _TITLE_TAIL:
+            if t.endswith(w) and len(t) > len(w) + 2:
+                t = t[: -len(w)]
+                break
+        if t == before:
+            break
+    # 全是语气词（"啊" / "吧"）时剥不干净，退回默认名，别让看板挂一个字
+    return t if len(t) >= 2 else "新的事"
+
+
+_SYNTH_BUDGET = 75.0   # 汇总：实测最慢 52.6s，留余量
+_DIRECT_BUDGET = 25.0  # 直出：实测 ~5s
+
+
+async def _card_with_fallback(store, message: str, *, results: dict | None = None,
+                              title: str = "", pairs=(), use_synth: bool = True) -> dict:
+    """出卡片的三档降级：汇总 → 单次直出 → 纯本地摊结果。
+
+    为什么要有第三档：synth 实测平均 35s、最慢 52.6s，已经贴着单次调用超时
+    上限跑。原来它一抛异常，整条已经跑完的规划链就白费了，孩子最后只看到
+    一句"大脑暂时连不上"——最贵的部分白干，最该给的结果反而没给。
+
+    实测 direct_card 只需 ~5s（比 synth 快 7 倍），所以拿它当中间档很划算；
+    连它也没赶上，就用本地那档把节点真实结果如实摊开，末尾说明是"来不及
+    整理"的版本，不假装成综合过的方案。
+    """
+    # 每档给总时限：LLM_TIMEOUT 只是 httpx 单次读超时，流一直滴答或 JSON 重试一次
+    # 都能把一档拖过几分钟。孩子端等不了那么久，超时即降级。
+    if use_synth:
+        try:
+            return await asyncio.wait_for(
+                synth.synthesize(store, message, results or {}), _SYNTH_BUDGET)
+        except Exception as e:  # noqa: BLE001 含 TimeoutError；CancelledError 不在此列，照常上抛
+            print(f"[card] 汇总失败，降级：{e!r}")
+        if results:
+            # 已经有真实查询结果时不走直出：直出看不到这些结果，可能编出和
+            # 刚查到的车次/时间对不上的内容。直接摊真结果，降级不降真。
+            return synth.assemble_from_results(title, list(pairs))
+    try:
+        return await asyncio.wait_for(synth.direct_card(store, message), _DIRECT_BUDGET)
+    except Exception as e:  # noqa: BLE001
+        print(f"[card] 直出也失败，用本地兜底：{e!r}")
+    return synth.assemble_from_results(title, list(pairs))
+
+
 async def _open_affair(sess, a_store, message: str, hit: dict) -> tuple[dict | None, bool]:
     """把一句需求变成一个事务；返回 (事务, 是否新建)。
 
@@ -1072,7 +1209,7 @@ async def _open_affair(sess, a_store, message: str, hit: dict) -> tuple[dict | N
         linked = [n["id"] for n in nodes[:3]]
         hit_ids = {n["id"] for n in nodes}
         # 先落个短标题占位，规划成功后由调用方换成 plan["title"]
-        title = re.sub(r"[，。！？!?~～\s]+", "", message)[:18] or "新的事"
+        title = _clean_affair_title(message)
         snapshot = await asyncio.to_thread(a_store.list)
         msg_grams = store.bigrams(_flat(message))
         best, best_score = None, 0
@@ -1141,6 +1278,7 @@ async def _execute_actions(sess, a_store, affair: dict, card: dict, message: str
                        "context": synth.card_to_text(card)})
 
     affair_dirty = False
+    done_kinds: list[str] = []
     for act in to_run:
         try:
             result = await actions.run_action(sess.dir, affair, act)
@@ -1162,8 +1300,26 @@ async def _execute_actions(sess, a_store, affair: dict, card: dict, message: str
                     a_store.update, affair["id"], patch, actor="butler",
                     note=f"执行了 {act['kind']}")
                 affair_dirty = True
+                done_kinds.append(act.get("kind", ""))
         except Exception as e:  # noqa: BLE001 单个动作失败不拖垮整链
             await emit({"type": "action", "kind": act.get("kind", "?"), "ok": False, "detail": str(e), "payload": {}})
+    # 规划链跑完就把事务推出去：否则看板上永远挂着"规划中 / 管家正在筹备"，
+    # 卡片明明已经给到孩子了，看板却像卡住不动。
+    if affair.get("stage") == "planning":
+        if done_kinds:
+            need_parent = "parent_confirm" in done_kinds
+            stage = "waiting" if need_parent else "executing"
+            owner = "parent" if need_parent else "child"
+            summary = "等家长确认" if need_parent else "管家已备好，照着做就行"
+        else:
+            # 没有可落地的动作（纯目标型，如"我想学钢琴"）不等于办完了：
+            # 推到执行中、球在孩子手里，别让刚开始的事从活跃看板上消失
+            stage, owner, summary = "executing", "child", "方案已给到，照着做就行"
+        affair = await asyncio.to_thread(
+            a_store.update, affair["id"],
+            {"stage": stage, "owner_next": owner, "summary": summary},
+            actor="butler", note=f"规划完成，转{stage}")
+        affair_dirty = True
     if affair_dirty:
         await emit({"type": "affair", "action": "update", "affair": affair})
 
@@ -1173,6 +1329,7 @@ async def api_chat(request: Request, req: ChatReq):
     user, sess = await _auth_session(request, "chat", req.name)
     if not _chat_throttle(user["username"]):
         raise HTTPException(429, "说得太快啦，喝口水歇五分钟再聊")
+    _need_llm_quota(request, user["username"])
     try:
         await asyncio.wait_for(sess.lock.acquire(), timeout=0.3)
     except asyncio.TimeoutError:
@@ -1345,12 +1502,16 @@ async def api_ics(request: Request, aid: str, name: str = ""):
         ics = await asyncio.to_thread(a.ics, aid)
     except KeyError:
         raise HTTPException(404, "事务不存在")
-    # 事务 id 进 Content-Disposition 文件名前消毒，防引号/换行注入响应头
+    # 事务 id 进 Content-Disposition 文件名前消毒，防引号/换行注入响应头。
+    # 响应头只能是 latin-1：中文 id 直接塞进 filename="" 会 UnicodeEncodeError 成 500，
+    # 所以 filename 给 ASCII 兜底名，真名按 RFC 6266 走 filename*（UTF-8 百分号编码）
     safe = re.sub(r"[^\w一-鿿.-]", "_", aid)[:40] or "affair"
+    ascii_name = re.sub(r"[^A-Za-z0-9._-]", "_", safe).strip("_") or "affair"
+    disp = f"attachment; filename=\"{ascii_name}.ics\"; filename*=UTF-8''{quote(safe + '.ics')}"
     return PlainTextResponse(
         ics,
         media_type="text/calendar; charset=utf-8",
-        headers={"Content-Disposition": f'attachment; filename="{safe}.ics"'},
+        headers={"Content-Disposition": disp},
     )
 
 
@@ -1436,7 +1597,8 @@ async def _do_relay(sess, direction: str, text: str) -> dict:
 
 @app.post("/api/relay")
 async def api_relay(request: Request, req: RelayReq):
-    _, sess = await _auth_session(request, "relay", req.name)
+    user, sess = await _auth_session(request, "relay", req.name)
+    _need_llm_quota(request, user["username"])
     return await _do_relay(sess, req.direction, req.text)
 
 
@@ -1511,7 +1673,8 @@ async def api_growth(request: Request, name: str = "", view: str = "child"):
 @app.post("/api/dream")
 async def api_dream(request: Request, req: DreamReq):
     """「说说我的梦想」：孩子说梦想 → 接住并落成记忆；没说 → 主动邀请。"""
-    _, sess = await _auth_session(request, "dream", req.name)
+    user, sess = await _auth_session(request, "dream", req.name)
+    _need_llm_quota(request, user["username"])
     g, a, _ = _stores(sess)
     mem_block = await asyncio.to_thread(sess.store.active_block) or "（还没有记忆，慢慢了解中）"
     graph_brief = await asyncio.to_thread(g.brief_block, limit=20)

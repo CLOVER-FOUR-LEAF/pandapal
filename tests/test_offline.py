@@ -380,9 +380,9 @@ async def _run(client: httpx.AsyncClient) -> None:
                     "question": "q", "answer": "a"})
     record("alias_register_blocked", r.status_code == 400, f"status={r.status_code}")
     # 清洗/分隔符撞档：a.b 与 a_b 映射到同一 slug，但必须各自独立目录
-    r = await post(client, "/api/auth/login", {"username": "a.b", "password": "pw1"})
+    r = await post(client, "/api/auth/login", {"username": "a.b", "password": "pw11"})
     ok1 = r.status_code == 200
-    r = await post(client, "/api/auth/login", {"username": "a_b", "password": "pw2"})
+    r = await post(client, "/api/auth/login", {"username": "a_b", "password": "pw22"})
     record("slug_collision_users", ok1 and r.status_code == 200,
            f"statuses={ok1},{r.status_code}")
     dirs = sorted(p.name for p in SANDBOX.glob("child_a_b*"))
@@ -398,7 +398,7 @@ async def _run(client: httpx.AsyncClient) -> None:
     record("ics_query_token_ok", r.status_code == 404,  # 认证过了→事务不存在
            f"status={r.status_code}")
     # 每账号聊天限频：30 条/5 分钟（挡公网刷 Key）
-    r = await post(client, "/api/auth/login", {"username": "限速员", "password": "pw1"})
+    r = await post(client, "/api/auth/login", {"username": "限速员", "password": "pw11"})
     client.headers["Authorization"] = f"Bearer {r.json()['token']}"
     codes = []
     for _ in range(31):

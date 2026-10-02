@@ -75,6 +75,8 @@ const ACTION_KIND = {
   parent_confirm: "请家长确认", ics: "导出日历", draft: "写文稿",
 };
 const MODE_LABEL = { plan: "规划链", todo: "拆解待办", affair: "事务更新", relay: "传话筒", explain: "讲给你听", chat: "" };
+// planner / synth 各要几十秒，没有阶段提示就像卡死——这里给一句人话顶着
+const PHASE_LABEL = { planning: "正在拆解要办的事…", executing: "正在一件件办…", synthesizing: "快好了，正在整理成方案…" };
 
 const KIND_ICON = { travel: "i-planet", goal: "i-growth", health: "i-heart", interest: "i-spark", study: "i-book", habit: "i-clock", event: "i-cal" };
 
@@ -567,10 +569,12 @@ async function register() {
   const u = fieldVal("#reg-name");
   const p1 = fieldVal("#reg-pass", false), p2 = fieldVal("#reg-pass2", false);
   const child = fieldVal("#reg-child"), q = fieldVal("#reg-question"), a = fieldVal("#reg-answer");
+  const childPass = fieldVal("#reg-child-pass", false);
   const bad = !u ? ["先起个用户名吧", "#reg-name"]
     : p1.length < 4 ? ["密码太短啦，至少 4 位", "#reg-pass"]
     : p1 !== p2 ? ["两遍密码不一样哦", "#reg-pass2"]
     : regRole === "parent" && !child ? ["家长账号要填孩子的登录名", "#reg-child"]
+    : regRole === "parent" && !childPass ? ["还要填孩子账号的密码，证明是一家人", "#reg-child-pass"]
     : !q ? ["设一个密保问题吧，忘密码时全靠它", "#reg-question"]
     : !a ? ["密保答案也要填哦", "#reg-answer"] : null;
   if (bad) {
@@ -589,7 +593,8 @@ async function register() {
   try {
     const resp = await api("/api/auth/register", jsonOpts({
       username: u, password: p1, role: regRole,
-      child: regRole === "parent" ? child : "", question: q, answer: a,
+      child: regRole === "parent" ? child : "",
+      child_password: regRole === "parent" ? childPass : "", question: q, answer: a,
     }));
     const data = await resp.json().catch(() => ({}));
     state.token = data.token;
@@ -602,7 +607,7 @@ async function register() {
     if (loginPanda) setMood(loginPanda, "happy");
     await enterMain();
     setAuthPane("login");
-    ["#reg-name", "#reg-pass", "#reg-pass2", "#reg-child", "#reg-question", "#reg-answer"]
+    ["#reg-name", "#reg-pass", "#reg-pass2", "#reg-child", "#reg-child-pass", "#reg-question", "#reg-answer"]
       .forEach((s) => { const n = $(s); if (n) n.value = ""; });
   } catch (e) {
     setHint("#register-hint", e.message || "注册失败，请稍后再试", "err");
@@ -625,6 +630,7 @@ function setRegRole(role) {
     b.setAttribute("aria-checked", String(on));
   });
   setHidden("#reg-child-field", regRole !== "parent");
+  setHidden("#reg-child-pass-field", regRole !== "parent");
 }
 
 function forgotToStep1() {
@@ -856,8 +862,9 @@ async function restoreAuth() {
     saved = JSON.parse(localStorage.getItem(AUTH_KEY)
       || sessionStorage.getItem(AUTH_KEY) || "null");
   } catch { /* ignore */ }
-  if (!saved || !saved.token) return;
+  if (!saved || !saved.token) return; // 没登录过：boot 的 finally 会揭幕，露出登录页
   state.token = saved.token;
+  splashStage("auth");
   const hint = $("#login-hint");
   if (hint) hint.textContent = "正在恢复登录…";
   let me;
@@ -1041,28 +1048,36 @@ function applyAuth() {
 async function enterMain() {
   applyAuth();
   renderLegendIfEmpty();
-  initSceneSafe(); // 不 await
+  initSceneSafe(); // 不 await：three.js 动态加载，3D 场景在启动层揭开后再慢慢长出来
   if (state.role === "parent") {
     // 家长首页 = 家长视图（收件箱 + 传话筒），不进孩子的管家台
     show("parent");
     applyRole("parent");
-    await Promise.all([loadParentInbox(), loadGraph()]);
+    splashStage("history");
+    loadGraph();
+    await loadParentInbox();
+    splashDone();
     return;
   }
   show("main");
   applyRole(state.role);
   renderChips();
   setupMic();
-  // 问候语走顶部气泡 + 流式，先发出去；晨报/看板/图谱各渲染各的，不挡着它
+  // 问候、晨报、看板、图谱同时开跑，各渲染各的，谁也不等谁（晨报是一整段 LLM 生成，
+  // 以前要等它写完才轮到问候）。启动层只等历史这一项轻量请求——聊天区有内容再揭幕。
+  splashStage("history");
   const greeting = loadGreeting();
+  loadBriefing();
+  loadAffairs();
+  loadGraph();
   const historyCount = await loadHistory();
+  splashDone();
   // 首次见面（没有任何历史）才把问候也写进聊天区；有记录时只做顶部气泡，
   // 否则每次登录都往聊天区插一条重复问候（服务端会话历史会跨登录保留）
   if (!historyCount) {
     const text = await greeting;
     if (text) addMsg("ai", text);
   }
-  await Promise.all([loadBriefing(), loadAffairs(), loadGraph()]);
   const input = $("#msg-input");
   if (input) input.focus();
 }
@@ -1472,6 +1487,14 @@ function dagNodeRow(n, names, status) {
   name.textContent = n.title || n.id || "";
   if (dep) name.appendChild(el("div", "dag-deps", `等「${dep}」完成后`));
   append(row, dot, name, el("span", "dag-detail"));
+  // 点节点展开/收起该环节的完整结果（updatePlanNode 写入 dataset.full 后才可展开）
+  row.addEventListener("click", () => {
+    const d = row.querySelector(".dag-detail");
+    const full = d && d.dataset.full;
+    if (!full) return;
+    const open = row.classList.toggle("is-open");
+    d.textContent = open ? full : truncate(full, 26);
+  });
   return row;
 }
 
@@ -1822,7 +1845,18 @@ function updatePlanNode(tree, ev) {
   const detail = row.querySelector(".dag-detail");
   if (detail) {
     const tip = ev.detail || (ev.args && ev.args.query ? String(ev.args.query) : "");
-    detail.textContent = tip ? truncate(tip, 26) : "";
+    if (tip) {
+      // 环节结果常常上百字：默认只露一行摘要，但全文必须可达——
+      // 悬停看 tooltip，点节点展开全文，否则 DAG 跑出来的东西等于白跑。
+      detail.textContent = truncate(tip, 26);
+      detail.dataset.full = tip;
+      detail.title = tip;
+      row.classList.add("has-detail");
+    } else {
+      detail.textContent = "";
+      delete detail.dataset.full;
+      detail.removeAttribute("title");
+    }
   }
   scrollBottom();
 }
@@ -2079,7 +2113,8 @@ async function send(preset, opts = {}) {
         state.chatPaused = true;
         showResumeChip();
       }
-      if (e.status === 429) addMsg("ai", "管家还在回上一条，稍等 1 秒再说～");
+      // 429 有两种：上一条还没回完 / 额度用完——服务端的话说得更准，直接用
+      if (e.status === 429) addMsg("ai", e.message || "管家还在回上一条，稍等 1 秒再说～");
       else if (!e.status) retryableError("没能连上管家");
       else addMsg("ai", `唔……${e.message}`);
       s3("setPandaMood", "worried");
@@ -2164,6 +2199,12 @@ function handleEvent(ev, ctx, dropTyping) {
       setMoodAll(ev.mood);
       break;
 
+    case "phase": {
+      const txt = PHASE_LABEL[ev.phase];
+      if (txt) chatStatus(txt, true);
+      break;
+    }
+
     case "recall": {
       dropTyping();
       addRecallChip(ev);
@@ -2181,6 +2222,7 @@ function handleEvent(ev, ctx, dropTyping) {
       dropTyping();
       s3("clearPlanSatellites");
       ctx.tree = addPlanTree(ev.title, ev.nodes || []);
+      chatStatus(PHASE_LABEL.executing, true);
       s3("spawnPlanSatellites", (ev.nodes || []).map((n) => ({
         id: n.id, title: n.title, depends_on: n.depends_on || [],
       })));
@@ -2192,6 +2234,7 @@ function handleEvent(ev, ctx, dropTyping) {
       }
       updatePlanNode(ctx.tree, ev);
       s3("setPlanNode", ev.id, ev.status);
+      if (ev.status === "running" && ev.title) chatStatus(`正在办：${ev.title}`, true);
       break;
 
     case "action":
@@ -3484,7 +3527,16 @@ function registerSW() {
   navigator.serviceWorker.register("sw.js").catch((e) => console.warn("[app] SW 注册失败：", e && e.message));
 }
 
+/** 启动层（web/splash.js）的阶段推进：只按真实里程碑走，不存在时静默。 */
+function splashStage(stage) {
+  try { if (window.__splash) window.__splash.stage(stage); } catch { /* 启动层可选 */ }
+}
+function splashDone() {
+  try { if (window.__splash) window.__splash.done(); } catch { /* 启动层可选 */ }
+}
+
 function boot() {
+  splashStage("boot");
   registerSW();
   if ($("#login-panda")) {
     try {
@@ -3495,6 +3547,7 @@ function boot() {
   bind();
   try { setupLoginExtras(); } catch (e) { console.warn("[app] 登录页增强失败：", e && e.message); }
   Promise.resolve(restoreAuth()).finally(() => {
+    splashDone(); // 已进主界面时 enterMain 早就揭过了，这里是登录页/失败路径的兜底
     // 还停在登录页时直接聚焦名字输入框，评委上手少点一步
     if (!state.name) { const n = $("#login-name"); if (n) n.focus({ preventScroll: true }); }
   });

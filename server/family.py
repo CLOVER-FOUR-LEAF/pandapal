@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import io
 import re
+import sys
 import zipfile
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -35,10 +36,20 @@ from .affairs import STAGE_CN, AffairStore
 router = APIRouter()
 
 
+# 被 main 导入时（include_router），绑定的就是那个 main 模块本身——
+# 不能每次调用都按名字去 sys.modules 现查：server 包被重新导入后（pytest 里
+# 多个测试文件各用一个沙箱）现查会拿到另一套 auth/会话，token 对不上直接 401。
+# `python -m server.main` 时 main 的模块名是 __main__，这里拿不到，退回延迟导入。
+_MAIN = sys.modules.get(f"{__package__}.main")
+
+
 def _m():
-    """延迟取 main 的鉴权/会话辅助（避免顶层循环导入，见模块 docstring）。"""
-    from . import main
-    return main
+    """取 main 的鉴权/会话辅助（避免顶层循环导入，见模块 docstring）。"""
+    global _MAIN
+    if _MAIN is None:
+        from . import main as _loaded
+        _MAIN = _loaded
+    return _MAIN
 
 
 

@@ -81,6 +81,7 @@ async def _run(client: httpx.AsyncClient) -> None:
     await _login(client, OTHER, "pw123456")
     r = await client.post("/api/auth/register", json={
         "username": PARENT, "password": "pw123456", "role": "parent", "child": CHILD,
+        "child_password": "pw123456",  # 绑定家长需孩子账号密码
         "question": "q", "answer": "a"})
     ptoken = r.json().get("token", "")
     record("setup", bool(ctoken and ptoken), f"register={r.status_code}")

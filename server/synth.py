@@ -1,7 +1,8 @@
-"""合成器：节点结果 → 结构化卡片 JSON；含"单 LLM 直出卡片"保底路径。"""
+"""合成器：节点结果 → 结构化卡片 JSON；含"单 LLM 直出卡片"与"纯本地摊结果"两条保底路径。"""
 from __future__ import annotations
 
 import asyncio
+import re
 
 from . import llm, prompts, tools
 from .memory import MemoryStore
@@ -40,7 +41,8 @@ async def synthesize(store: MemoryStore, event: str, results: dict[str, str]) ->
                 results=results_text,
             )},
         ],
-        max_tokens=3000,
+        max_tokens=1800,  # 卡片 4-6 板块 × 2-4 条，1800 有 3 倍余量。
+                         # 调小 max_tokens 同样不省时间（瓶颈是推理不是输出长度）
         caller="synth",
     )
     return _normalize_card(data)
@@ -63,6 +65,30 @@ async def direct_card(store: MemoryStore, event: str) -> dict:
         caller="synth_fallback",
     )
     return _normalize_card(data)
+
+
+def assemble_from_results(title: str, pairs: list[tuple[str, str]]) -> dict:
+    """纯本地的最后一档：把各环节查到的结论原样摊成一张卡片。
+
+    两次 LLM 调用都没按时返回时用这一档（见 main._card_with_fallback）。
+    **不编任何新内容**——每一条都来自上游节点的真实执行结果，这里只做
+    "去掉换行、拼成一句话"的排版；结尾也如实说明这是"来不及重新整理"的版本，
+    不假装是管家综合过的方案（降级不降真）。
+    """
+    sections: list[dict] = []
+    for head, text in pairs or []:
+        clean = "；".join(ln.strip() for ln in str(text or "").splitlines() if ln.strip())
+        clean = re.sub(r"\s*\n\s*", " ", clean).strip()
+        if clean:
+            sections.append({"heading": str(head or "查到的情况"), "items": [clean]})
+    if not sections:
+        sections = [{"heading": "还在查", "items": ["管家这边刚没接上，查到东西马上告诉你。"]}]
+    return {
+        "title": str(title or "先给你查到的东西"),
+        "emoji": "🧭",
+        "sections": sections[:8],
+        "closing": "（管家刚才来不及重新整理，先把查到的原样给你看。）",
+    }
 
 
 def card_to_text(card: dict) -> str:
