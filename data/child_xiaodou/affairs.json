@@ -342,6 +342,60 @@
       ],
       "created": "2026-10-02",
       "updated": "2026-10-02"
+    },
+    {
+      "id": "要不要我帮你把_画漫画_的事接过来做",
+      "title": "要不要我帮你把「画漫画」的事接过来做",
+      "kind": "event",
+      "stage": "executing",
+      "due": null,
+      "owner_next": "butler",
+      "summary": "管家正在筹备",
+      "linked_nodes": [
+        "comic",
+        "dinosaur",
+        "xiaodou"
+      ],
+      "progress": {
+        "mode": "none",
+        "value": 0
+      },
+      "checklist_id": "要不要我帮你把_画漫画_的事接过来做_pack",
+      "actions": [
+        {
+          "kind": "checklist",
+          "title": "携带清单",
+          "items": [
+            "画画本或 A4 纸、铅笔、橡皮、黑色勾线笔，再选彩铅或马克笔就够了。",
+            "电脑硬盘只剩约 3GB，先别装大绘图软件，在纸上画或用电脑自带的画图小工具。",
+            "如果画电子稿，每几步就保存一次，存到 U 盘或网盘，别只放 C 盘。"
+          ]
+        }
+      ],
+      "log": [
+        {
+          "ts": "2026-10-02T16:35:48",
+          "actor": "butler",
+          "text": "新建事务：要不要我帮你把「画漫画」的事接过来做"
+        },
+        {
+          "ts": "2026-10-02T16:36:30",
+          "actor": "butler",
+          "text": "执行了 checklist"
+        },
+        {
+          "ts": "2026-10-02T16:36:40",
+          "actor": "child",
+          "text": "已排出每周漫画小计划，本周画四格草稿"
+        },
+        {
+          "ts": "2026-10-02T17:00:00",
+          "actor": "butler",
+          "text": "清单回挂到事务（修复：checklist_id 此前未写回）"
+        }
+      ],
+      "created": "2026-10-02",
+      "updated": "2026-10-02"
     }
   ]
 }
