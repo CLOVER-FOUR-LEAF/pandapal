@@ -278,6 +278,12 @@ async def _run(client: httpx.AsyncClient) -> None:
     r = await post(client, "/api/affairs",
                    {"name": "小豆", "patch": {"title": "家长越权测试"}})
     record("parent_affairs_403", r.status_code == 403, f"status={r.status_code}")
+    # 家长不能和管家聊天：web/app.js 的 canChat 判定就钉在这一条上。
+    # 节点抽屉的「问问管家这件事」必须对家长收起来，而不是点了等服务端 403——
+    # 早先抽屉无条件渲染那颗按钮、send() 又静默 return，家长点了像界面卡死。
+    r = await post(client, "/api/chat",
+                   {"name": "小豆", "message": "关于「数学作业」，你还记得什么"})
+    record("parent_chat_403", r.status_code == 403, f"status={r.status_code}")
     r = await client.get(f"/api/affairs{pq}")
     record("parent_read_ok", r.status_code == 200, f"status={r.status_code}")
     # 收件箱决定仍是家长的正当写权限（iid 不存在 → 404 而非 403，说明过了能力关）

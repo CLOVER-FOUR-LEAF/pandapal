@@ -1517,7 +1517,12 @@ async function send(preset) {
   const raw = preset !== undefined ? String(preset) : input ? input.value : "";
   const text = raw.trim();
   if (!text || !state.name) return;
-  if (state.authRole === "parent") return; // 家长账号没有聊天能力（服务端同样 403）
+  if (state.authRole === "parent") {
+    // 家长账号没有聊天能力（服务端 /api/chat 同样 403）。这里必须出声：
+    // 静默 return 会让「问问管家」这类入口点了像死机，看不出到底为什么没反应。
+    toast("家长账号不能直接和管家聊天，家长视图里可以用传话筒转达");
+    return;
+  }
   if (state.busy) {
     toast("管家还在回上一条，稍等一下～");
     return;
@@ -1976,6 +1981,9 @@ function openNodeDrawer(node) {
   if (!drawer || !body || !node) return;
   const id = node.id || node.node_id;
   const full = (state.graph.nodes || []).find((n) => n.id === id) || node;
+  // 家长账号没有 chat 能力（server/auth.py CAPS.parent 不含 chat，服务端 403）。
+  // 抽屉里的「问问管家」是给能聊天的人看的，家长要看到的是一句说明，不是一颗点了没反应的按钮。
+  const canChat = state.authRole !== "parent";
   const dom = full.domain;
   const domName = DOMAINS[dom] ? DOMAINS[dom][0] : dom || "";
   const domColor = DOMAIN_COLOR[dom] || "";
@@ -2017,7 +2025,9 @@ function openNodeDrawer(node) {
            </span>`).join("")}</div>`
        : '<div class="empty-hint">还没有关联节点</div>'}
      <div class="inbox-actions">
-       <button class="btn-approve" type="button" data-act="ask">${iconHTML("i-chat")} 问问管家这件事</button>
+       ${canChat
+      ? `<button class="btn-approve" type="button" data-act="ask">${iconHTML("i-chat")} 问问管家这件事</button>`
+      : '<span class="drawer-note">家长账号不能直接和管家聊天，家长视图里可以用传话筒转达</span>'}
        <button class="btn-reject" type="button" data-act="close">${iconHTML("i-x")} 关闭</button>
      </div>`;
 
@@ -2035,6 +2045,9 @@ function openNodeDrawer(node) {
       send(`关于「${full.label || id}」，你还记得什么`);
     };
   }
+  // #node-drawer 挂在图谱视图里（index.html），主视图点星球也会走这里。
+  // 不先切视图的话抽屉开在 display:none 的祖先下，点了跟没点一样——与 :443 同一套写法。
+  if (state.view !== "graph") go("graph");
   drawer.classList.remove("hidden");
   s3("focusNode", id);
 }
