@@ -845,8 +845,9 @@ async function restoreAuth() {
     saved = JSON.parse(localStorage.getItem(AUTH_KEY)
       || sessionStorage.getItem(AUTH_KEY) || "null");
   } catch { /* ignore */ }
-  if (!saved || !saved.token) return;
+  if (!saved || !saved.token) return; // 没登录过：boot 的 finally 会揭幕，露出登录页
   state.token = saved.token;
+  splashStage("auth");
   const hint = $("#login-hint");
   if (hint) hint.textContent = "正在恢复登录…";
   let me;
@@ -1024,28 +1025,36 @@ function applyAuth() {
 async function enterMain() {
   applyAuth();
   renderLegendIfEmpty();
-  initSceneSafe(); // 不 await
+  initSceneSafe(); // 不 await：three.js 动态加载，3D 场景在启动层揭开后再慢慢长出来
   if (state.role === "parent") {
     // 家长首页 = 家长视图（收件箱 + 传话筒），不进孩子的管家台
     show("parent");
     applyRole("parent");
-    await Promise.all([loadParentInbox(), loadGraph()]);
+    splashStage("history");
+    loadGraph();
+    await loadParentInbox();
+    splashDone();
     return;
   }
   show("main");
   applyRole(state.role);
   renderChips();
   setupMic();
-  // 问候语走顶部气泡 + 流式，先发出去；晨报/看板/图谱各渲染各的，不挡着它
+  // 问候、晨报、看板、图谱同时开跑，各渲染各的，谁也不等谁（晨报是一整段 LLM 生成，
+  // 以前要等它写完才轮到问候）。启动层只等历史这一项轻量请求——聊天区有内容再揭幕。
+  splashStage("history");
   const greeting = loadGreeting();
+  loadBriefing();
+  loadAffairs();
+  loadGraph();
   const historyCount = await loadHistory();
+  splashDone();
   // 首次见面（没有任何历史）才把问候也写进聊天区；有记录时只做顶部气泡，
   // 否则每次登录都往聊天区插一条重复问候（服务端会话历史会跨登录保留）
   if (!historyCount) {
     const text = await greeting;
     if (text) addMsg("ai", text);
   }
-  await Promise.all([loadBriefing(), loadAffairs(), loadGraph()]);
   const input = $("#msg-input");
   if (input) input.focus();
 }
@@ -3390,7 +3399,16 @@ function bind() {
   });
 }
 
+/** 启动层（web/splash.js）的阶段推进：只按真实里程碑走，不存在时静默。 */
+function splashStage(stage) {
+  try { if (window.__splash) window.__splash.stage(stage); } catch { /* 启动层可选 */ }
+}
+function splashDone() {
+  try { if (window.__splash) window.__splash.done(); } catch { /* 启动层可选 */ }
+}
+
 function boot() {
+  splashStage("boot");
   if ($("#login-panda")) {
     try {
       loginPanda = mountPanda($("#login-panda"));
@@ -3400,6 +3418,7 @@ function boot() {
   bind();
   try { setupLoginExtras(); } catch (e) { console.warn("[app] 登录页增强失败：", e && e.message); }
   Promise.resolve(restoreAuth()).finally(() => {
+    splashDone(); // 已进主界面时 enterMain 早就揭过了，这里是登录页/失败路径的兜底
     // 还停在登录页时直接聚焦名字输入框，评委上手少点一步
     if (!state.name) { const n = $("#login-name"); if (n) n.focus({ preventScroll: true }); }
   });

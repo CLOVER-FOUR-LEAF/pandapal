@@ -41,6 +41,7 @@ from datetime import date, datetime, timedelta
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, Field
 
 from . import (actions, affairs, auth, config, executor, graph, llm, memory, planner,
@@ -54,10 +55,12 @@ async def _lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="PandaButler", docs_url=None, redoc_url=None, lifespan=_lifespan)
+# 静态资源压缩：首屏 JS/CSS ~500KB → ~130KB；Starlette 默认排除 text/event-stream，SSE 不受影响
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 
-# 前端无内联脚本/事件处理器，全部资源同源：CSP 可以直接收口到 'self'；
-# style 留 'unsafe-inline'（app.js 大量 el.style 赋值），img 放 data:（favicon 是内嵌 SVG）。
+# 前端无内联脚本/事件处理器（启动层也是独立的 static/splash.js），CSP 收口到 'self'；
+# style 留 'unsafe-inline'（app.js 大量 el.style 赋值、启动层内联样式），img 放 data:（favicon 是内嵌 SVG）。
 _CSP = (
     "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
     "img-src 'self' data:; connect-src 'self'; font-src 'self'; "
@@ -76,7 +79,8 @@ async def _security_headers(request: Request, call_next):
     resp.headers["Referrer-Policy"] = "same-origin"
     resp.headers["X-Frame-Options"] = "DENY"
     resp.headers["Content-Security-Policy"] = _CSP
-    # vendored 依赖版本固定，长缓存安全；其余静态文件交给 ETag/304
+    # vendored 依赖版本固定，长缓存安全；其余静态文件不带版本号，交给 ETag/304——
+    # 给它们 max-age 会让部署后一小时内的旧 app.js 去调新接口
     if request.url.path.startswith("/static/vendor/"):
         resp.headers["Cache-Control"] = "public, max-age=86400, immutable"
     return resp
