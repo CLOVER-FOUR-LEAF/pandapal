@@ -513,6 +513,68 @@ class AffairStore:
         write_json(self.inbox_path, root)
         return item
 
+    # ---------- 交付文稿（drafts.json）----------
+    # "帮我写一份自我介绍/给老师的一封信"这类代办产物：LLM 真写全文，
+    # 落盘到孩子档案，可回放、可挂到事务上。与清单/收件箱同套读写纪律。
+
+    @property
+    def drafts_path(self) -> Path:
+        return self.dir / "drafts.json"
+
+    def _load_drafts(self) -> dict:
+        data = read_json(self.drafts_path, None)
+        if not isinstance(data, dict) or not isinstance(data.get("drafts"), list):
+            return {"drafts": []}
+        return data
+
+    def drafts(self, affair_id: str | None = None) -> list[dict]:
+        """全部文稿，新的在前；给 affair_id 时只取挂在该事务上的。"""
+        items = [d for d in self._load_drafts()["drafts"] if isinstance(d, dict)]
+        if affair_id:
+            items = [d for d in items if str(d.get("affair_id")) == str(affair_id)]
+        return sorted(items, key=lambda d: str(d.get("created") or ""), reverse=True)
+
+    def draft(self, did: str) -> dict:
+        """取一份文稿；不存在抛 KeyError。"""
+        for d in self._load_drafts()["drafts"]:
+            if isinstance(d, dict) and str(d.get("id")) == str(did):
+                return d
+        raise KeyError(did)
+
+    @_locked
+    def add_draft(self, title: str, body: str, affair_id: str | None = None) -> dict:
+        """存一份文稿：同一事务下同标题视为同一份（重写更新正文，幂等）。"""
+        root = self._load_drafts()
+        title = str(title or "未命名文稿").strip()
+        body = str(body or "")
+        for d in root["drafts"]:
+            if (isinstance(d, dict) and str(d.get("affair_id") or "") == str(affair_id or "")
+                    and str(d.get("title")) == title):
+                d["body"] = body
+                d["created"] = now_iso()
+                write_json(self.drafts_path, root)
+                return d
+        taken = {str(d.get("id")) for d in root["drafts"] if isinstance(d, dict)}
+        draft = {
+            "id": _new_did(taken),
+            "title": title,
+            "body": body,
+            "affair_id": str(affair_id) if affair_id else None,
+            "created": now_iso(),
+        }
+        root["drafts"].append(draft)
+        write_json(self.drafts_path, root)
+        return draft
+
+
+def _new_did(taken: set[str]) -> str:
+    """文稿 id：dr_<8 位随机>。"""
+    for _ in range(64):
+        did = f"dr_{uuid.uuid4().hex[:8]}"
+        if did not in taken:
+            return did
+    return f"dr_{uuid.uuid4().hex[:12]}"
+
 
 def _norm_item(item) -> dict:
     """清单项规整成 {"text","done","note"}；也给纯字符串留条路。"""

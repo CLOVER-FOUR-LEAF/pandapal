@@ -1,13 +1,15 @@
 """动作执行器：把规划里的"动作"真的落到档案上。
 
-契约 §3.4 的四种 kind：
+契约 §3.4 的五种 kind：
   reminder       追加一条提醒（reminders.json）
   checklist      建 / 补一份携带清单（checklists.json）
   parent_confirm 请家长确认一件事（parent_inbox.json，status=pending）
   ics            生成日历文本，只回传不落盘（前端做下载）
+  draft          代办文书：LLM 真写一份文稿（自我介绍/申请书/信/总结），
+                 落盘 drafts.json 并挂回事务——"说一件事，给我一个结果"
 
 写入一律走 `store.write_json`（原子写）+ `store.lock_for`（按目录写锁），
-清单与收件箱复用 `affairs.AffairStore`，不另起一套读写。
+清单/收件箱/文稿复用 `affairs.AffairStore`，不另起一套读写。
 未知 kind 不抛异常，返回 ok=False 让上层把回执发给前端就行。
 """
 from __future__ import annotations
@@ -18,16 +20,20 @@ import uuid
 from datetime import date
 from pathlib import Path
 
+from . import llm, prompts
 from .affairs import AffairStore, ics_text
+from .memory import MemoryStore
 from .store import lock_for, read_json, slug, write_json
 
-KINDS = ("reminder", "checklist", "parent_confirm", "ics")
-# 规划节点可能给这些别名，统一归到四种 kind 上
+KINDS = ("reminder", "checklist", "parent_confirm", "ics", "draft")
+# 规划节点可能给这些别名，统一归到五种 kind 上
 _ALIAS = {
     "remind": "reminder", "提醒": "reminder",
     "todo": "checklist", "pack": "checklist", "清单": "checklist",
     "confirm": "parent_confirm", "parent": "parent_confirm", "家长确认": "parent_confirm",
     "calendar": "ics", "ical": "ics", "日历": "ics",
+    "doc": "draft", "document": "draft", "essay": "draft", "letter": "draft",
+    "文稿": "draft", "写稿": "draft", "起草": "draft",
 }
 _WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 _WEEKDAYS_CN = {"mon": "周一", "tue": "周二", "wed": "周三", "thu": "周四", "fri": "周五", "sat": "周六", "sun": "周日"}
@@ -113,6 +119,13 @@ async def run_action(child_dir: Path, affair: dict, action: dict) -> dict:
     affair = affair or {}
     action = action or {}
     kind = _norm_kind(action.get("kind"))
+    # draft 的大头是 LLM 写稿（秒级），攥着目录写锁等它会堵住别的写入：
+    # 先在锁外生成，锁内只做文件落盘（_do_draft 内部处理）
+    if kind == "draft":
+        try:
+            return await _do_draft(Path(child_dir), affair, action)
+        except Exception as e:  # noqa: BLE001
+            return _result("draft", False, f"文稿没写成：{e}", {})
     store = AffairStore(child_dir)
     lock = lock_for(Path(child_dir))  # 契约 §3.1：普通函数，返回 asyncio.Lock
     try:
@@ -194,3 +207,38 @@ def _do_ics(affair: dict) -> dict:
     text = ics_text(affair)
     due = str(affair.get("due") or "")
     return _result("ics", True, f"已生成日历文件（{due or '未定日期'}）", {"text": text, "affair_id": affair.get("id")})
+
+
+async def _do_draft(child_dir: Path, affair: dict, action: dict) -> dict:
+    """代办文书：LLM 真写一份文稿 → 落盘 drafts.json → payload 带回全文。
+
+    action 字段：request=孩子原话（必填素材）、context=刚查到的方案/卡片文本、
+    title=可选指定题目。文稿全文进 payload，前端直接出文稿卡（"给我一个结果"）。
+    """
+    request = str(action.get("request") or action.get("text") or affair.get("title") or "").strip()
+    context = str(action.get("context") or "").strip() or "（无前置素材，靠记忆与常识写）"
+    mem_store = MemoryStore(child_dir)
+    mem = await asyncio.to_thread(mem_store.active_block)
+    data = await llm.complete_json(
+        [
+            {"role": "system", "content": "你是文书起草模块，只输出 JSON。"},
+            {"role": "user", "content": prompts.DRAFT.format(
+                name=mem_store.child_name,
+                request=request or "写一份文稿",
+                context=context,
+                memory_block=mem or "（暂无记忆）",
+            )},
+        ],
+        max_tokens=1600,
+        caller="draft",
+    )
+    title = str(data.get("title") or action.get("title") or "文稿").strip()[:40]
+    body = str(data.get("body") or data.get("text") or "").strip()
+    if not body:
+        raise ValueError("文稿正文为空")
+    draft = await asyncio.to_thread(
+        AffairStore(child_dir).add_draft, title, body, affair.get("id"))
+    return _result(
+        "draft", True, f"文稿写好了：《{title}》，点开看看",
+        {"draft_id": draft["id"], "title": title, "body": body,
+         "affair_id": affair.get("id"), "created": draft.get("created")})
