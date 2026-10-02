@@ -92,6 +92,15 @@ cp .env.example .env   # 然后填入你的 LLM_API_KEY 等
 # 记忆层自检：不联网不起服务，直接打 MemoryStore 读写
 .venv/bin/python tests/test_memory.py
 
+# 前端静态一致性：id/图标/括号配平，暂停键与断网条等关键钩子是否接上
+.venv/bin/python tests/test_web_static.py
+
+# 暂停键布局实测：本机 Chrome 无头模式量桌面/窄屏下输入栏按钮的矩形
+.venv/bin/python tests/test_pause_layout.py
+
+# 续写指令路由：暂停后点「继续」发来的话必须走闲聊直答，不能误建事务
+.venv/bin/python tests/test_router.py
+
 # 服务启动后的端到端用例（真实打接口 + 真实 LLM）：
 .venv/bin/python tests/test_api.py --base http://localhost:8000
 ```
@@ -102,6 +111,8 @@ cp .env.example .env   # 然后填入你的 LLM_API_KEY 等
 登录 → 晨报 → plan 全链路 → 记忆/事务/清单落盘 → 图谱视角白名单 → 家长只读边界 → 别名防绕过 →
 撞档隔离 → query token 收窄 → 限频 → 历史落盘与重启恢复 → 收件箱裁决联动 → 事务去重 → 安全/缓存响应头。
 `test_memory.py` 覆盖：注入字符预算与活跃主题择优、检索相关度/门槛/去重、归档累计计数与行数上限、读缓存写后失效。
+`test_web_static.py` / `test_pause_layout.py` 覆盖：前端 id/图标引用与括号配平、"暂停键在输入栏内且与发送键同位置"、
+窄屏可见、断网条与「重试/继续」入口都接上了；`test_router.py` 覆盖续写指令的路由（不误建事务、跳过多余的 LLM 分类调用）。
 
 ## 八、团队成员
 

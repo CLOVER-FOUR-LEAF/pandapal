@@ -96,6 +96,9 @@ const state = {
   sendSeq: 0,
   chatAbort: null,   // 进行中回答的 AbortController（暂停用）
   chatPaused: false, // 本轮是不是被用户主动暂停
+  chatCtx: null,     // 当前轮次的渲染上下文（暂停时按它决定「继续」入口）
+  chatResume: null,  // 暂停后待续写的内容 {raw, bubble}
+  retryText: "",     // 上一轮因网络失败的消息原文（点「重发」用）
   needGraphRefresh: false,
   relayDir: "teacher2parent",
 };
@@ -919,6 +922,10 @@ function resetUserUI() {
   if (state.chatAbort) { try { state.chatAbort.abort(); } catch { /* 忽略 */ } }
   state.chatAbort = null;
   state.chatPaused = false;
+  state.chatCtx = null;
+  state.chatResume = null;
+  clearResumeChip();
+  state.sendSeq++; // 在途的旧响应作废，别把上一个账号的内容写进新会话
   setPauseVisible(false);
   hideBubble($("#panda-bubble"));
   modeBadge("");
@@ -1027,8 +1034,16 @@ async function enterMain() {
   applyRole(state.role);
   renderChips();
   setupMic();
-  await Promise.all([loadBriefing(), loadAffairs(), loadGraph(), loadHistory()]);
-  loadGreeting();
+  // 问候语走顶部气泡 + 流式，先发出去；晨报/看板/图谱各渲染各的，不挡着它
+  const greeting = loadGreeting();
+  const historyCount = await loadHistory();
+  // 首次见面（没有任何历史）才把问候也写进聊天区；有记录时只做顶部气泡，
+  // 否则每次登录都往聊天区插一条重复问候（服务端会话历史会跨登录保留）
+  if (!historyCount) {
+    const text = await greeting;
+    if (text) addMsg("ai", text);
+  }
+  await Promise.all([loadBriefing(), loadAffairs(), loadGraph()]);
   const input = $("#msg-input");
   if (input) input.focus();
 }
@@ -1593,7 +1608,7 @@ async function loadGreeting() {
     }
   }
   scheduleBubbleFade(bubble);
-  addMsg("ai", text);
+  return text;
 }
 
 async function loadHistory() {
@@ -1606,7 +1621,8 @@ async function loadHistory() {
       if (!m) return;
       addMsg(m.role === "user" ? "me" : "ai", m.content || "", String(m.content || "").startsWith("[[secret]]"));
     });
-  } catch { /* 无历史不阻塞 */ }
+    return history.length;
+  } catch { return 0; /* 无历史不阻塞 */ }
 }
 
 /* ==========================================================================
@@ -1876,23 +1892,87 @@ function unlockInput() {
   if (input) input.placeholder = state.secret ? "悄悄话（家长视角看不到）…" : "跟熊猫管家说说今天…";
 }
 
-/** 暂停按钮：只在回答进行中显示。 */
+/** 暂停键与发送键同位置切换：回答进行中显示暂停键，其余时间显示发送键。 */
 function setPauseVisible(on) {
   const btn = $("#pause-btn");
-  if (!btn) return;
-  btn.classList.toggle("hidden", !on);
+  if (btn) btn.classList.toggle("hidden", !on);
+  const bar = document.querySelector(".inputbar");
+  // data-busy 让 CSS 把发送键收起来（两个键同尺寸同位置，切换不跳动）
+  if (bar) bar.dataset.busy = on ? "1" : "0";
 }
 
-/** 用户中途叫停：中止这一轮的 SSE 读取，已生成的部分保留。 */
+/** 暂停后给一个「继续」快捷入口：接着没说完的往下说，而不是重开一轮对话。 */
+function showResumeChip() {
+  const box = $("#chips");
+  if (!box || !state.chatResume || !state.chatResume.bubble || !state.chatResume.bubble.isConnected) return;
+  if (box.querySelector(".chip-resume")) return;
+  const b = el("button", "chip chip-resume", "继续刚才的回答");
+  b.type = "button";
+  b.title = "接着没说完的往下说";
+  b.onclick = () => {
+    b.remove();
+    send("（刚才的回答被打断了，请接着上面的内容继续说，不要重复已经说过的部分。）");
+  };
+  box.insertBefore(b, box.firstChild);
+  box.scrollLeft = 0;
+}
+
+function clearResumeChip() {
+  const b = document.querySelector("#chips .chip-resume");
+  if (b) b.remove();
+}
+
+/** 断网/弱网提示条：离线时明确告知，恢复后自动收起。 */
+function setupOfflineBar() {
+  const bar = $("#offline-bar");
+  if (!bar) return;
+  const sync = () => setHidden("#offline-bar", navigator.onLine !== false);
+  window.addEventListener("online", () => { sync(); toast("网络回来了"); });
+  window.addEventListener("offline", sync);
+  sync();
+}
+
+/** 网络类失败给一个「重试」入口，而不是只丢一句报错——点一下就重发刚才那条。 */
+function retryableError(msg) {
+  const text = state.retryText;
+  const row = addMsg("sys", text ? `${msg}（点这里重发）` : msg);
+  if (!row || !text) return;
+  row.classList.add("retryable");
+  row.setAttribute("role", "button");
+  row.setAttribute("tabindex", "0");
+  const again = () => {
+    if (state.busy) return;
+    row.classList.remove("retryable");
+    row.removeAttribute("role");
+    row.removeAttribute("tabindex");
+    send(text);
+  };
+  row.addEventListener("click", again);
+  row.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); again(); }
+  });
+}
+
+/** 用户中途叫停：中止这一轮的 SSE 读取，已生成的部分保留，并给一个「继续」入口。 */
 function pauseChat() {
   if (!state.busy) return;
   state.chatPaused = true;
   if (state.chatAbort) {
     try { state.chatAbort.abort(); } catch { /* 已结束 */ }
   }
+  const ctx = state.chatCtx;
+  if (ctx && ctx.aiRaw && ctx.aiBubble && ctx.aiBubble.isConnected) {
+    state.chatResume = { raw: ctx.aiRaw, bubble: ctx.aiBubble };
+  }
   addSys("回答已暂停");
+  showResumeChip();
   chatStatus("已暂停");
   toast("已暂停回答");
+  // 规划链跑到一半被叫停：事务/清单可能已经落盘，看板刷新一下，别让用户以为什么都没发生
+  if (ctx && ctx.tree) {
+    addSys("刚才那件事已经记到事务看板了");
+    loadAffairs();
+  }
 }
 
 async function send(preset) {
@@ -1914,6 +1994,7 @@ async function send(preset) {
   const seq = ++state.sendSeq;
   state.busy = true;
   state.chatPaused = false;
+  clearResumeChip(); // 新一轮开始：上一轮的「继续」入口作废
   const abort = new AbortController();
   state.chatAbort = abort;
   setPauseVisible(true);
@@ -1921,15 +2002,23 @@ async function send(preset) {
   if (sendBtn) sendBtn.disabled = true;
   if (input) input.placeholder = "管家正在想…";
 
+  // 暂停后接着往下说（「继续」入口）：把新内容追加进同一个气泡，而不是另起一条
+  const resume = state.chatResume
+    && state.chatResume.bubble && state.chatResume.bubble.isConnected
+    && state.chatResume.raw ? state.chatResume : null;
+  state.chatResume = null;
+
   const secret = state.secret;
   if (input && preset === undefined) input.value = "";
-  addMsg("me", text, secret);
+  if (!resume) addMsg("me", text, secret);
   hideBubble($("#panda-bubble"));
   s3("setPandaMood", "thinking");
   if (pandaSvg) setMood(pandaSvg, "thinking");
   chatStatus("正在想…", true);
 
-  const ctx = { seq, typing: addTyping(), aiBubble: null, aiRaw: "", tree: null };
+  const ctx = { seq, typing: addTyping(), aiBubble: resume ? resume.bubble : null,
+                aiRaw: resume ? resume.raw : "", tree: null };
+  state.chatCtx = ctx; // 暂停时要按当前轮次的状态决定「继续」入口与看板刷新
   const dropTyping = () => {
     if (ctx.typing) { ctx.typing.remove(); ctx.typing = null; }
   };
@@ -1947,17 +2036,23 @@ async function send(preset) {
       if (!ctx.aiRaw && input && preset === undefined && !input.value) {
         input.value = text; // 一个 token 都没回来：请求根本没生效，恢复草稿免得重打
       }
+      // 网络层失败（没有 HTTP 状态码）留一份原文，聊天区那条提示点一下就重发
+      state.retryText = !e.status && !ctx.aiRaw ? text : "";
       if (e.status === 429) addMsg("ai", "管家还在回上一条，稍等 1 秒再说～");
+      else if (!e.status) retryableError("没能连上管家");
       else addMsg("ai", `唔……${e.message}`);
       s3("setPandaMood", "worried");
     }
   } finally {
     if (state.chatAbort === abort) state.chatAbort = null;
+    if (state.chatCtx === ctx) state.chatCtx = null;
     dropTyping();
     flushMd(ctx);
     if (ctx.aiBubble) ctx.aiBubble.classList.remove("streaming");
     if (seq === state.sendSeq) {
       unlockInput();
+      // 这一轮没被暂停：正常结束，上一轮的「继续」入口不再有意义
+      if (!state.chatPaused) { state.chatResume = null; clearResumeChip(); }
       s3("setPandaMood", "idle");
       if (pandaSvg) setMood(pandaSvg, "normal");
       modeBadge("");
@@ -2107,6 +2202,7 @@ function handleEvent(ev, ctx, dropTyping) {
         setMoodAll("speaking");
       }
       if (ctx.aiBubble) {
+        // 续写：新 token 追加在原有内容之后，模型接着往下说，不另起一条消息
         ctx.aiRaw = (ctx.aiRaw || "") + (ev.text || "");
         scheduleMd(ctx);
       }
@@ -3225,9 +3321,10 @@ function bind() {
       }
     });
   }
-  // ESC 关抽屉
+  // ESC：回答进行中先停回答（和主流 agent 一致），否则关抽屉
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
+      if (state.busy) { pauseChat(); return; }
       const drawer = $("#node-drawer");
       if (drawer && !drawer.classList.contains("hidden")) drawer.classList.add("hidden");
       const detail = $("#affair-detail");
@@ -3237,6 +3334,7 @@ function bind() {
   window.addEventListener("resize", () => {
     if (state.name) renderMiniGraph();
   });
+  setupOfflineBar();
   // 跨断点补建底部 tab（老 Safari 只有 addListener）
   if (TABBAR_MQ.addEventListener) TABBAR_MQ.addEventListener("change", syncTabbar);
   else if (TABBAR_MQ.addListener) TABBAR_MQ.addListener(syncTabbar);
