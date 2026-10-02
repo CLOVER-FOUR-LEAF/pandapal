@@ -810,8 +810,11 @@ async def _chat_stream(sess, raw_message: str, ctx: dict):
                                    "depends_on": n["depends_on"],
                                    "status": statuses.get(n["id"], "done")} for n in plan["nodes"]],
                     }}
+                    # 用规划器起的短名覆盖看板标题：它比原话干净（去主语前缀）。
+                    # 但模型没给标题时 planner 会兜底成"筹备计划"，拿它覆盖会把
+                    # 好标题冲掉，所以这种泛化名一律不用。
                     ptitle = (plan.get("title") or "").strip()[:18]
-                    if ptitle and ptitle != affair.get("title"):
+                    if ptitle and ptitle != affair.get("title") and ptitle not in _GENERIC_TITLES:
                         patch["title"] = ptitle
                     await asyncio.to_thread(a_store.update, affair["id"], patch,
                                             actor="butler", note="执行链已存档")
@@ -1025,6 +1028,9 @@ def _flat(text: str) -> str:
 
 # 孩子口语里的收尾语气词，留在标题上很扎眼（"…帮我" / "…好不好"）
 _TITLE_TAIL = ("帮我", "好不好", "行不行", "可以吗", "吧", "呀", "啊", "呢", "一下", "怎么样")
+
+# 规划器没给出有效标题时的兜底名，拿它去覆盖看板标题只会把好标题冲掉
+_GENERIC_TITLES = {"筹备计划", "计划", "新的事", "执行计划", "任务", "待办"}
 
 
 def _clean_affair_title(message: str) -> str:
