@@ -10,9 +10,9 @@ from .memory import MemoryStore
 Emit = Callable[[dict], Awaitable[None]]
 
 
-async def _run_llm_node(store: MemoryStore, event: str, node: dict, results: dict) -> str:
+async def _run_llm_node(ctx: tuple[str, str], event: str, node: dict, results: dict) -> str:
     context = "\n\n".join(f"【{nid}】{text}" for nid, text in results.items())
-    name, mem = await asyncio.to_thread(lambda: (store.child_name, store.active_block()))
+    name, mem = ctx
     return await llm.complete(
         [{"role": "user", "content": prompts.NODE_LLM.format(
             name=name,
@@ -27,7 +27,7 @@ async def _run_llm_node(store: MemoryStore, event: str, node: dict, results: dic
     )
 
 
-async def _run_node(store: MemoryStore, event: str, node: dict, results: dict) -> str:
+async def _run_node(ctx: tuple[str, str], event: str, node: dict, results: dict) -> str:
     tool, args = node["tool"], node.get("args", {})
     if tool == "race_lookup":
         return await asyncio.to_thread(tools.race_lookup, str(args.get("query", event)))
@@ -44,8 +44,8 @@ async def _run_node(store: MemoryStore, event: str, node: dict, results: dict) -
         if out is not None:
             return out
         # 未配置搜索 Key：降级为模型知识，仍真生成
-        return await _run_llm_node(store, event, node, results)
-    return await _run_llm_node(store, event, node, results)
+        return await _run_llm_node(ctx, event, node, results)
+    return await _run_llm_node(ctx, event, node, results)
 
 
 async def run_plan(
@@ -60,6 +60,8 @@ async def run_plan(
     results: dict[str, str] = {}
     statuses: dict[str, str] = {}
     by_id = {n["id"]: n for n in nodes}
+    # 活跃记忆块一次取齐、全节点共享：每个节点各读一遍全部 topic 文件纯属浪费
+    ctx = await asyncio.to_thread(lambda: (store.child_name, store.active_block(event)))
 
     def _ancestors(node: dict) -> set[str]:
         """节点的全部上游依赖（传递闭包）——LLM 上下文只该看到祖先结果，
@@ -80,7 +82,7 @@ async def run_plan(
         await emit({"type": "node", "id": node["id"], "title": node["title"], "status": "running"})
         try:
             anc = _ancestors(node)
-            text = await _run_node(store, event, node,
+            text = await _run_node(ctx, event, node,
                                    {k: v for k, v in results.items() if k in anc})
             results[node["id"]] = text
             statuses[node["id"]] = "done"

@@ -6,6 +6,7 @@ from datetime import date
 
 from . import llm, prompts
 from .memory import MemoryStore
+from .store import bigrams
 
 VALID_TOOLS = {"race_lookup", "transport_lookup", "weather", "web_search", "llm"}
 
@@ -61,8 +62,11 @@ async def make_plan(store: MemoryStore, message: str, affairs_snapshot: dict | N
     if affairs_snapshot:
         rows = affairs_snapshot.get("board") or []
         if rows:
-            brief = "\n".join(f"- {r['title']}（{r.get('stage')}）" for r in rows[:5])
-    name, mem = await asyncio.to_thread(lambda: (store.child_name, store.active_block()))
+            q = bigrams(message)
+            rel = [r for r in rows if q & bigrams(str(r.get("title", "")))]
+            if rel:
+                brief = "\n".join(f"- {r['title']}（{r.get('stage')}）" for r in rel[:5])
+    name, mem = await asyncio.to_thread(lambda: (store.child_name, store.active_block(message)))
     try:
         plan = await llm.complete_json(
             [

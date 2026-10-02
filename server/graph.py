@@ -75,9 +75,11 @@ class GraphStore:
         edges = [e for e in g["edges"] if e["source"] in ids and e["target"] in ids]
         return {"nodes": nodes, "edges": edges}
 
-    def brief_block(self, limit: int = 40) -> str:
-        """供 prompt 注入的紧凑摘要（<=900 字）：节点一行一个 + 若干条关联。"""
-        g = self.load()
+    def brief_block(self, limit: int = 40, g: dict | None = None) -> str:
+        """供 prompt 注入的紧凑摘要（<=900 字）：节点一行一个 + 若干条关联。
+
+        g 传入已 load() 过的图谱时不再重复读盘（调用方刚 load 过的场景）。"""
+        g = self.load() if g is None else g
         nodes = [n for n in g["nodes"] if not n.get("private")]
         hidden = len(g["nodes"]) - len(nodes)
         head = f"成长图谱：{len(g['nodes'])} 个节点 / {len(g['edges'])} 条关联"

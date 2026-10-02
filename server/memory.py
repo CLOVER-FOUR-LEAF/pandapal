@@ -11,12 +11,21 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import re
 from datetime import date
 from pathlib import Path
 
 from . import llm, prompts
 from .store import atomic_write, bigrams, fence_memory, lock_for, read_json, write_json
+
+
+def _mtime(path: Path) -> int:
+    """文件修改时间戳；不存在/读不到归一成 -1（当成"变了"，宁可重读不错用缓存）。"""
+    try:
+        return path.stat().st_mtime_ns
+    except OSError:
+        return -1
 
 
 def _parse_topic(text: str) -> dict:
@@ -50,14 +59,27 @@ class MemoryStore:
 
     def __init__(self, child_dir: Path):
         self.dir = child_dir
+        # mtime 缓存：所有写都走 atomic_write→os.replace，mtime 必变，缓存天然失效
+        self._index_sig: int = -2
+        self._index_data: dict = {}
+        self._block_sig: tuple = ()
+        self._block_text: str = ""
 
     @property
     def index_path(self) -> Path:
         return self.dir / "index.json"
 
     def read_index(self) -> dict:
-        """读 index.json；缺文件或损坏时回落空白索引，不抛错。"""
-        return read_json(self.index_path, {"name": self.dir.name, "topics": {}})
+        """读 index.json；缺文件或损坏时回落空白索引，不抛错。
+
+        按 mtime 缓存——一轮对话里 active_block/retrieve/child_name 都走这里，
+        每次调用只做一次 stat。返回深拷贝：写方会改完再 write_json，不能共享缓存对象。
+        """
+        sig = _mtime(self.index_path)
+        if sig != self._index_sig:
+            self._index_data = read_json(self.index_path, {"name": self.dir.name, "topics": {}})
+            self._index_sig = sig
+        return copy.deepcopy(self._index_data)
 
     @property
     def child_name(self) -> str:
@@ -69,20 +91,44 @@ class MemoryStore:
         except OSError:
             return ""
 
-    def active_block(self) -> str:
-        """活跃关注点块：MEMORY.md 全文 + 所有 active 主题正文。每轮必注入，实现"一直知道"。"""
+    _PROFILE_LINES = 3   # MEMORY.md 开头几条是身份底色，永远带上
+    _RELEVANT_LINES = 6  # 其余长期记忆只取与本次话题最相关的几条
+
+    def active_block(self, query: str | None = None) -> str:
+        """活跃关注点块。不传 query（晨报/问候）：MEMORY.md 全文 + 所有 active 主题。
+        传 query（对话/规划）：只带身份底色 + 与话题相关的长期记忆 + 相关的 active 主题，
+        无关的旧事不进 prompt，避免模型硬拉扯（记忆粘连）。"""
         index = self.read_index()
+        q = bigrams(query) if query else None
         parts = []
         try:
-            parts.append(self.dir.joinpath("MEMORY.md").read_text(encoding="utf-8").strip())
+            raw = self.dir.joinpath("MEMORY.md").read_text(encoding="utf-8").strip()
         except OSError:
-            pass
+            raw = ""
+        if raw:
+            if q is None:
+                parts.append(raw)
+            else:
+                lines = raw.splitlines()
+                head = [l for l in lines if not l.startswith("- ")]
+                bullets = [l for l in lines if l.startswith("- ")]
+                keep = set(range(min(self._PROFILE_LINES, len(bullets))))
+                scored = sorted(
+                    ((len(q & bigrams(l)), i) for i, l in enumerate(bullets) if i not in keep),
+                    key=lambda x: (-x[0], x[1]))
+                keep |= {i for sc, i in scored[: self._RELEVANT_LINES] if sc > 0}
+                parts.append("\n".join(head + [bullets[i] for i in sorted(keep)]))
         for name, info in index.get("topics", {}).items():
             if info.get("status") != "active":
                 continue
             meta = _parse_topic(self._topic_text(info.get("file", "")))
-            if meta["body"]:
-                parts.append(f"【{name}】{meta['body']}")
+            if not meta["body"]:
+                continue
+            if q is not None:
+                hay = " ".join([name, *info.get("related", []), meta["body"]])
+                if not (q & bigrams(hay)):
+                    continue
+            parts.append(f"【{name}】{meta['body']}")
         return fence_memory("\n\n".join(parts))
 
     @staticmethod
@@ -113,7 +159,9 @@ class MemoryStore:
         if daily_dir.is_dir():
             latest = sorted(daily_dir.glob("*.md"))[-1:]
             for f in latest:
-                parts.append(f"【{f.stem} 日记】{f.read_text(encoding='utf-8').strip()}")
+                text = f.read_text(encoding='utf-8').strip()
+                if q_grams & self._bigrams(text):  # 与本次话题无关的日记不注入，避免旧事粘连
+                    parts.append(f"【{f.stem} 日记】{text}")
         return fence_memory("\n\n".join(parts))
 
     def topic_names(self) -> str:
@@ -230,6 +278,11 @@ class MemoryStore:
                 old = mem_path.read_text(encoding="utf-8").rstrip() + "\n"
             else:
                 old = f"# {self.child_name}的长期记忆\n"
+            new_g = bigrams(longterm)
+            for line in old.splitlines():
+                g = bigrams(line)
+                if g and new_g and len(g & new_g) / len(g | new_g) >= 0.5:
+                    return  # 与已有长期记忆高度重复，不再追加
             atomic_write(mem_path, old + f"- {longterm}\n")
 
 

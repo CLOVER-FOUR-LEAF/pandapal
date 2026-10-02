@@ -29,7 +29,7 @@ def _normalize_card(data: dict) -> dict:
 async def synthesize(store: MemoryStore, event: str, results: dict[str, str]) -> dict:
     """正常路径：汇总节点结果出卡片。"""
     results_text = "\n\n".join(f"【{nid}】{text}" for nid, text in results.items())
-    name, mem = await asyncio.to_thread(lambda: (store.child_name, store.active_block()))
+    name, mem = await asyncio.to_thread(lambda: (store.child_name, store.active_block(event)))
     data = await llm.complete_json(
         [
             {"role": "system", "content": "你是方案整理模块，只输出 JSON。"},
@@ -48,7 +48,7 @@ async def synthesize(store: MemoryStore, event: str, results: dict[str, str]) ->
 
 async def direct_card(store: MemoryStore, event: str) -> dict:
     """保底路径：跳过 DAG，单次调用直出卡片（仍是真实 LLM 生成）。"""
-    name, mem = await asyncio.to_thread(lambda: (store.child_name, store.active_block()))
+    name, mem = await asyncio.to_thread(lambda: (store.child_name, store.active_block(event)))
     data = await llm.complete_json(
         [
             {"role": "system", "content": "你是方案整理模块，只输出 JSON。"},
