@@ -238,13 +238,23 @@ async def _auth_response(res: dict) -> dict:
     }
 
 
+# 可信反代网段：回环（本机 uvicorn/nginx）、链路本地、RFC1918 私网与 ULA（内网 nginx）。
+# 不用 is_private——它把 TEST-NET/CGNAT/基准网段等一切不可公网路由的地址都算进去，
+# 那些地址不可能是我们的反代，放进来等于白送伪造 XFF 绕限流的口子。
+_TRUSTED_NETS = tuple(
+    ipaddress.ip_network(n)
+    for n in ("127.0.0.0/8", "::1/128", "169.254.0.0/16", "fe80::/10",
+              "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7")
+)
+
+
 def _trusted_proxy(host: str) -> bool:
-    """直连对端是回环/私网/链路本地地址才视为可信反代（本机 uvicorn 或内网 nginx）。"""
+    """直连对端在回环/链路本地/私网网段内才视为可信反代（本机 uvicorn 或内网 nginx）。"""
     try:
         ip = ipaddress.ip_address(host or "")
     except ValueError:
         return False
-    return ip.is_loopback or ip.is_private or ip.is_link_local
+    return any(ip in net for net in _TRUSTED_NETS)
 
 
 def _client_ip(request: Request) -> str:
@@ -921,8 +931,14 @@ async def _open_affair(sess, a_store, message: str, hit: dict) -> tuple[dict | N
         return None, False
 
 
+# 孩子明确要一份文稿（"帮我写一份自我介绍/给老师的一封信"）→ 触发 draft 动作
+_DRAFT_ASK = re.compile(
+    r"帮我写|帮我拟|帮我起草|给我写|起草|写一[封份篇个段则]|写份|写篇|写个|拟一[封份篇个]"
+    r"|发言稿|演讲稿|申请书|推荐信|自我介绍|自荐信|请假条|主持稿|竞选稿|致辞|感言|承诺书")
+
+
 async def _execute_actions(sess, a_store, affair: dict, card: dict, message: str, emit) -> None:
-    """规划完了真去执行：加提醒、生成清单、必要时请家长确认。"""
+    """规划完了真去执行：加提醒、生成清单、必要时请家长确认、代写文稿。"""
     to_run = []
     # 提醒：从卡片里挑"提醒/注意"类的条目
     reminders = []
@@ -943,6 +959,10 @@ async def _execute_actions(sess, a_store, affair: dict, card: dict, message: str
             "title": f"{affair['title']}：需要家长帮忙确认的事",
             "detail": "管家已把行程与清单准备好，请家长确认交通与报名相关事项。",
         })
+    # 代办文书：孩子要一份能直接拿去用的文稿——卡片与规划素材是它的事实底料
+    if _DRAFT_ASK.search(message):
+        to_run.append({"kind": "draft", "request": message,
+                       "context": synth.card_to_text(card)})
 
     affair_dirty = False
     for act in to_run:
@@ -952,10 +972,16 @@ async def _execute_actions(sess, a_store, affair: dict, card: dict, message: str
             if result.get("ok"):
                 affair["actions"] = (affair.get("actions") or []) + [act]
                 patch = {"actions": affair["actions"]}
-                cid = (result.get("payload") or {}).get("checklist_id")
+                payload = result.get("payload") or {}
+                cid = payload.get("checklist_id")
                 if act.get("kind") == "checklist" and cid:
                     # 清单回挂到事务上——否则清单建了却永远够不着（详情抽屉按 checklist_id 取）
                     patch["checklist_id"] = cid
+                did = payload.get("draft_id")
+                if act.get("kind") == "draft" and did:
+                    # 文稿同样回挂：详情抽屉"交付文稿"按 draft_ids 找得到
+                    patch["draft_ids"] = list(affair.get("draft_ids") or []) + [did]
+                    affair["draft_ids"] = patch["draft_ids"]
                 affair = await asyncio.to_thread(
                     a_store.update, affair["id"], patch, actor="butler",
                     note=f"执行了 {act['kind']}")
@@ -1052,7 +1078,27 @@ async def api_affair_detail(request: Request, aid: str, name: str = ""):
     affair = await asyncio.to_thread(a.get, aid)
     if affair is None:
         raise HTTPException(404, "事务不存在")
+    # 交付文稿随详情一起给：抽屉里的"交付文稿"区不用再发一轮请求
+    affair["drafts"] = await asyncio.to_thread(a.drafts, aid)
     return {"affair": affair}
+
+
+@app.get("/api/drafts")
+async def api_drafts(request: Request, name: str = "", affair: str = ""):
+    """文稿列表（代办文书的产出物）；给 affair=<id> 时只取挂在该事务上的。"""
+    _, sess = await _auth_session(request, "drafts", name)
+    _, a, _ = _stores(sess)
+    return {"drafts": await asyncio.to_thread(a.drafts, affair or None)}
+
+
+@app.get("/api/drafts/{did}")
+async def api_draft_detail(request: Request, did: str, name: str = ""):
+    _, sess = await _auth_session(request, "drafts", name)
+    _, a, _ = _stores(sess)
+    try:
+        return {"draft": await asyncio.to_thread(a.draft, did)}
+    except KeyError:
+        raise HTTPException(404, "文稿不存在")
 
 
 @app.get("/api/checklist/{cid}")
