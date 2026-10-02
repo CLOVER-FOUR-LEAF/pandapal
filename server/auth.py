@@ -31,10 +31,13 @@ _LOCK = threading.Lock()
 _ITERATIONS = 120_000
 TOKEN_TTL = 7 * 24 * 3600  # token 有效期 7 天；过期项在访问时懒惰清除
 
-# 角色 → 能力集合；admin 为 "*" 通配
+# 角色 → 能力集合；admin 为 "*" 通配。
+# 读/写分离：事务与清单的查看归 affairs/checklist，改动归 *_write——
+# 家长是"只读视图 + 收件箱确认 + 传话筒"，绝不能替孩子改看板、勾清单。
 CAPS: dict[str, set[str]] = {
     "child": {"session", "greeting", "briefing", "chat", "graph", "affairs",
-              "checklist", "ics", "growth", "dream", "memory", "history"},
+              "affairs_write", "checklist", "checklist_write",
+              "ics", "growth", "dream", "memory", "history"},
     "parent": {"session", "greeting", "briefing", "graph", "affairs", "checklist",
                "ics", "inbox", "relay", "growth", "memory", "history"},
     "admin": {"*"},
@@ -44,7 +47,8 @@ CAP_NAMES = {
     "chat": "和管家聊天", "dream": "说梦想", "inbox": "家长收件箱",
     "relay": "传话筒", "logs": "调用记录", "session": "登录",
     "greeting": "问候", "briefing": "晨报", "graph": "记忆星球",
-    "affairs": "事务看板", "checklist": "清单", "ics": "日历导出",
+    "affairs": "事务看板", "affairs_write": "修改事务",
+    "checklist": "清单", "checklist_write": "勾选清单", "ics": "日历导出",
     "growth": "成长雷达", "memory": "记忆本", "history": "对话历史",
 }
 
@@ -156,10 +160,14 @@ def login(username: str, password: str) -> dict:
         elif not hmac.compare_digest(rec["hash"], _hash(password, rec["salt"])):
             raise ValueError("密码不对，再想想～")
     token = secrets.token_hex(24)
+    now = time.time()
     with _LOCK:
+        # 顺手清掉已失效 token，避免 tokens.json 只增不减
+        for t in [t for t, u in _tokens.items() if _expired(u, now)]:
+            _tokens.pop(t, None)
         _tokens[token] = {
             "username": username, "role": rec["role"],
-            "child": rec["child"], "ts": time.time(),
+            "child": rec["child"], "ts": now,
         }
         _save_tokens()
     return {"token": token, "user": dict(_tokens[token]), "is_new": is_new}

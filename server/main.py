@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 from datetime import date, datetime, timedelta
 
 from fastapi import FastAPI, HTTPException, Request
@@ -140,8 +141,25 @@ async def _auth_session(request: Request, cap: str, name: str | None = None):
     return user, await _get_session(eff)
 
 
+_LOGIN_HITS: dict[str, list[float]] = {}
+
+
+def _login_throttle(ip: str) -> bool:
+    """每 IP 每分钟最多 30 次登录尝试，挡住脚本撞密码。"""
+    now = time.monotonic()
+    hits = [t for t in _LOGIN_HITS.get(ip, []) if now - t < 60]
+    ok = len(hits) < 30
+    if ok:
+        hits.append(now)
+    _LOGIN_HITS[ip] = hits
+    return ok
+
+
 @app.post("/api/auth/login")
-async def api_auth_login(req: AuthReq):
+async def api_auth_login(request: Request, req: AuthReq):
+    ip = request.client.host if request.client else "-"
+    if not _login_throttle(ip):
+        raise HTTPException(429, "尝试太频繁，歇一分钟再来")
     try:
         res = auth.login(req.username, req.password)
     except ValueError as e:
@@ -214,7 +232,7 @@ async def api_greeting(request: Request, name: str = ""):
         )
     except llm.LLMError as e:
         raise HTTPException(502, f"LLM 暂不可用：{e}")
-    return {"text": text.strip(), "reminders": sess.store.due_reminders(), "name": name}
+    return {"text": text.strip(), "reminders": sess.store.due_reminders(), "name": sess.name}
 
 
 @app.get("/api/suggest")
@@ -376,7 +394,12 @@ async def _settle_memory(sess, user_msg: str, reply: str, is_secret: bool = Fals
     return gdata
 
 
-async def _chat_stream(sess, raw_message: str):
+async def _chat_stream(sess, raw_message: str, ctx: dict):
+    """对话主链路的 SSE 流：跑到 done 为止，整个过程持有会话锁。
+
+    ctx 带出本轮的 reply_text / is_secret / message / intent，由调用方在锁释放后
+    接力跑 _chat_settle——沉淀与话题建议带 LLM 调用，占着锁会让下一条消息白吃 429。
+    """
     queue: asyncio.Queue[dict | None] = asyncio.Queue()
     is_secret = raw_message.startswith(SECRET_PREFIX)
     message = raw_message[len(SECRET_PREFIX):].strip() if is_secret else raw_message
@@ -437,7 +460,15 @@ async def _chat_stream(sess, raw_message: str):
                     "nodes": [{"id": n["id"], "title": n["title"], "tool": n["tool"],
                                "depends_on": n["depends_on"]} for n in plan["nodes"]],
                 })
-                results = await executor.run_plan(plan, sess.store, message, emit)
+                results, statuses = await executor.run_plan(plan, sess.store, message, emit)
+                if affair:
+                    # 执行链连同节点终态存进事务，详情抽屉的"DAG 回放"展示真链而非伪造
+                    a_store.update(affair["id"], {"plan": {
+                        "title": plan["title"],
+                        "nodes": [{"id": n["id"], "title": n["title"], "tool": n["tool"],
+                                   "depends_on": n["depends_on"],
+                                   "status": statuses.get(n["id"], "done")} for n in plan["nodes"]],
+                    }}, actor="butler", note="执行链已存档")
                 card = await synth.synthesize(sess.store, message, results)
             else:
                 card = await synth.direct_card(sess.store, message)
@@ -502,17 +533,35 @@ async def _chat_stream(sess, raw_message: str):
         if not task.done():
             task.cancel()
 
-    # ④ 回复已发完，再做记忆沉淀，并把结果作为 memory 事件补发
+    # ④ 本轮先写进会话历史（仍在锁内，保住先后顺序）；
+    #    耗时沉淀与话题建议交给 _chat_settle，在锁外接力。
     if reply_text:
         u_entry = {"role": "user", "content": raw_message if is_secret else message}
         a_entry = {"role": "assistant", "content": reply_text}
         if is_secret:
             u_entry["secret"] = a_entry["secret"] = True
         sess.history.extend([u_entry, a_entry])
-        # 悄悄话：把带 [[secret]] 标记的原文交给抽取器，它才知道要标成 private；
-        # is_secret 同时让文件层落盘走占位行——私密内容绝不写进 topics/daily/MEMORY.md
-        gdata = await _settle_memory(sess, raw_message if is_secret else message, reply_text,
-                                     is_secret)
+    ctx.update({"reply_text": reply_text, "is_secret": is_secret,
+                "message": message, "raw_message": raw_message,
+                "intent": last_turn.get("intent", "chat")})
+
+
+async def _chat_settle(sess, ctx: dict):
+    """会话锁外的收尾：记忆沉淀（LLM 抽取 + 落盘）→ memory/affair 事件 → 快捷话题。
+
+    悄悄话：把带 [[secret]] 标记的原文交给抽取器，它才知道要标成 private；
+    is_secret 同时让文件层落盘走占位行——私密内容绝不写进 topics/daily/MEMORY.md。
+    落盘安全由 store/目录写锁保证，不依赖会话锁。
+    """
+    reply_text = ctx.get("reply_text") or ""
+    is_secret = ctx.get("is_secret", False)
+    message = ctx.get("message") or ""
+    raw_message = ctx.get("raw_message") or message
+    g_store, a_store, _ = _stores(sess)
+
+    if reply_text:
+        gdata = await _settle_memory(sess, raw_message if is_secret else message,
+                                     reply_text, is_secret)
         if gdata:
             aff_ev = gdata.pop("affair_event", None)  # 事务阶段推进 → 看板实时刷新
             if aff_ev:
@@ -522,10 +571,10 @@ async def _chat_stream(sess, raw_message: str):
             if gdata.get("added_nodes") or gdata.get("added_edges") or gdata.get("updated"):
                 yield _sse({"type": "memory", **gdata})
 
-    # ⑤ 按这一轮的实际情况换一批快捷话题（确定性规则，不额外调 LLM）
+    # 按这一轮的实际情况换一批快捷话题（确定性规则，不额外调 LLM）
     if not is_secret:
         try:
-            chips = suggest.followups(last_turn.get("intent", "chat"), a_store, g_store)
+            chips = suggest.followups(ctx.get("intent") or "chat", a_store, g_store)
             if chips:
                 yield _sse({"type": "suggest", "chips": chips})
         except Exception as e:  # noqa: BLE001 话题建议是锦上添花
@@ -667,16 +716,25 @@ async def _execute_actions(sess, a_store, affair: dict, card: dict, message: str
             "detail": "管家已把行程与清单准备好，请家长确认交通与报名相关事项。",
         })
 
+    affair_dirty = False
     for act in to_run:
         try:
             result = await actions.run_action(sess.dir, affair, act)
             await emit({"type": "action", **result})
             if result.get("ok"):
-                a_store.update(affair["id"], {
-                    "actions": (affair.get("actions") or []) + [act],
-                }, actor="butler", note=f"执行了 {act['kind']}")
+                affair["actions"] = (affair.get("actions") or []) + [act]
+                patch = {"actions": affair["actions"]}
+                cid = (result.get("payload") or {}).get("checklist_id")
+                if act.get("kind") == "checklist" and cid:
+                    # 清单回挂到事务上——否则清单建了却永远够不着（详情抽屉按 checklist_id 取）
+                    patch["checklist_id"] = cid
+                affair = a_store.update(affair["id"], patch, actor="butler",
+                                      note=f"执行了 {act['kind']}")
+                affair_dirty = True
         except Exception as e:  # noqa: BLE001 单个动作失败不拖垮整链
             await emit({"type": "action", "kind": act.get("kind", "?"), "ok": False, "detail": str(e), "payload": {}})
+    if affair_dirty:
+        await emit({"type": "affair", "action": "update", "affair": affair})
 
 
 @app.post("/api/chat")
@@ -688,11 +746,15 @@ async def api_chat(request: Request, req: ChatReq):
         raise HTTPException(429, "管家还在回复上一条，稍等一下哦")
 
     async def guarded():
+        ctx: dict = {}
         try:
-            async for chunk in _chat_stream(sess, req.message):
+            async for chunk in _chat_stream(sess, req.message, ctx):
                 yield chunk
         finally:
             sess.lock.release()
+        # 锁外收尾：记忆沉淀与话题建议不再把下一条消息挡在 429 外面
+        async for chunk in _chat_settle(sess, ctx):
+            yield chunk
 
     return StreamingResponse(
         guarded(),
@@ -721,12 +783,14 @@ async def api_affairs(request: Request, name: str = ""):
 
 @app.post("/api/affairs")
 async def api_affairs_write(request: Request, req: AffairReq):
-    _, sess = await _auth_session(request, "affairs", req.name)
+    _, sess = await _auth_session(request, "affairs_write", req.name)
     _, a, _ = _stores(sess)
     patch = req.patch or req.data or {}
     try:
-        if req.id and a.get(req.id):
-            return {"affair": a.update(req.id, patch, actor="user", note="看板更新")}
+        if req.id:
+            if a.get(req.id):
+                return {"affair": a.update(req.id, patch, actor="user", note="看板更新")}
+            patch = {**patch, "id": req.id}  # 指定 id 建事务时保留请求方给的 id
         return {"affair": a.create(patch or {"title": "新的事"})}
     except ValueError as e:  # 非法 stage 等校验错误 → 400，而不是 500
         raise HTTPException(400, str(e))
@@ -754,7 +818,7 @@ async def api_checklist_get(request: Request, cid: str, name: str = ""):
 
 @app.post("/api/checklist/{cid}")
 async def api_checklist(request: Request, cid: str, req: ChecklistReq):
-    _, sess = await _auth_session(request, "checklist", req.name)
+    _, sess = await _auth_session(request, "checklist_write", req.name)
     _, a, _ = _stores(sess)
     try:
         return {"checklist": a.toggle_item(cid, req.index, req.done)}

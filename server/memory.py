@@ -275,6 +275,14 @@ async def extract_and_store(store: MemoryStore, user_msg: str, assistant_msg: st
             max_tokens=900,
             caller="extract_graph",
         )
+        if is_secret:
+            # 服务端强制兜底：悄悄话的图谱节点一律 private、事务进展一律丢弃，
+            # 不依赖模型自觉——模型漏标 private 时私密事实会混进公共节点，
+            # 家长图谱 / 晨报 / 传话筒 prompt 会全链路泄露。
+            for n in data.get("nodes") or []:
+                if isinstance(n, dict):
+                    n["private"] = True
+            data["affair"] = None
         await store.write_extraction(data, is_secret=is_secret)
         event = _graph_event(graph_store, graph_store.merge(data)) or {}
         affair = _valid_affair(data.get("affair"))

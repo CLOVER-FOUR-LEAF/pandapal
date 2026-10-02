@@ -52,11 +52,12 @@ async def run_plan(
     store: MemoryStore,
     event: str,
     emit: Emit,
-) -> dict[str, str]:
-    """按 depends_on 并行执行，emit 推送状态；返回 {node_id: 结果文本}。"""
+) -> tuple[dict[str, str], dict[str, str]]:
+    """按 depends_on 并行执行，emit 推送状态；返回 ({node_id: 结果文本}, {node_id: done|error})。"""
     nodes = plan["nodes"]
     done_events = {n["id"]: asyncio.Event() for n in nodes}
     results: dict[str, str] = {}
+    statuses: dict[str, str] = {}
 
     async def worker(node: dict):
         for dep in node["depends_on"]:
@@ -67,15 +68,17 @@ async def run_plan(
         try:
             text = await _run_node(store, event, node, results)
             results[node["id"]] = text
+            statuses[node["id"]] = "done"
             await emit({
                 "type": "node", "id": node["id"], "title": node["title"],
                 "status": "done", "detail": text[:400],
             })
         except Exception as e:  # noqa: BLE001 单节点失败不拖垮整链
             results[node["id"]] = f"（本环节查询失败：{e}，按常识处理）"
+            statuses[node["id"]] = "error"
             await emit({"type": "node", "id": node["id"], "title": node["title"], "status": "error"})
         finally:
             done_events[node["id"]].set()
 
     await asyncio.gather(*(worker(n) for n in nodes))
-    return results
+    return results, statuses

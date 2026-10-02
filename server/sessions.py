@@ -1,7 +1,8 @@
 """会话：登录名 → data/{child}/ 档案目录绑定 + 会话内短期历史。
 
-profiles.json 维护"登录名 → 档案目录"映射；未匹配的名字自动新建空白档案，
-保证评委各玩各的、互不污染演示档。
+profiles.json 维护"登录名 → 档案目录"映射（运行时文件，已被 .gitignore 排除）；
+profiles.seed.json 是入库的演示别名种子，读取时两者合并、运行时的条目优先。
+未匹配的名字自动新建空白档案，保证评委各玩各的、互不污染演示档。
 """
 from __future__ import annotations
 
@@ -17,14 +18,25 @@ from . import config
 from .memory import MemoryStore
 
 PROFILES_PATH = config.DATA_DIR / "profiles.json"
+SEED_PATH = config.DATA_DIR / "profiles.seed.json"
 _PROFILES_LOCK = threading.Lock()
 
 
 def _read_profiles() -> dict:
+    """种子别名 + 运行时注册合并；运行时条目优先。"""
     try:
-        return json.loads(PROFILES_PATH.read_text(encoding="utf-8"))
+        seed = json.loads(SEED_PATH.read_text(encoding="utf-8"))
+        if not isinstance(seed, dict):
+            seed = {}
     except (OSError, json.JSONDecodeError):
-        return {}
+        seed = {}
+    try:
+        runtime = json.loads(PROFILES_PATH.read_text(encoding="utf-8"))
+        if not isinstance(runtime, dict):
+            runtime = {}
+    except (OSError, json.JSONDecodeError):
+        runtime = {}
+    return {**seed, **runtime}
 
 
 def _write_profiles(profiles: dict) -> None:
@@ -64,6 +76,7 @@ class Session:
 
 
 _sessions: dict[str, Session] = {}
+_SESSIONS_LOCK = asyncio.Lock()
 
 
 def resolve(name: str) -> tuple[Path, bool]:
@@ -89,7 +102,12 @@ async def login(name: str) -> Session:
         raise ValueError("名字不能为空")
     if name in _sessions:
         return _sessions[name]
-    child_dir, is_new = await asyncio.to_thread(resolve, name)
-    sess = Session(name, child_dir, is_new)
-    _sessions[name] = sess
-    return sess
+    # 同一名字的并发首登要拿到同一个 Session——否则后写覆盖 _sessions，
+    # 先建者成孤儿（锁/历史不同步）
+    async with _SESSIONS_LOCK:
+        if name in _sessions:
+            return _sessions[name]
+        child_dir, is_new = await asyncio.to_thread(resolve, name)
+        sess = Session(name, child_dir, is_new)
+        _sessions[name] = sess
+        return sess
