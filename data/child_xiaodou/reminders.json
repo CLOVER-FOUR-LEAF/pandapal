@@ -1,5 +1,38 @@
 [
-  {"id": "r1", "text": "周六上午 9:30 机器人课", "time": "weekly:sat", "fired": false},
-  {"id": "r2", "text": "感冒恢复中，记得按时吃药、多喝水", "time": "daily", "fired": false},
-  {"id": "r3", "text": "西客松大赛（西安）比赛日", "time": "2026-10-18", "fired": false}
+  {
+    "id": "r1",
+    "text": "周六上午 9:30 机器人课",
+    "time": "weekly:sat",
+    "fired": false
+  },
+  {
+    "id": "r2",
+    "text": "感冒恢复中，记得按时吃药、多喝水",
+    "time": "daily",
+    "fired": false
+  },
+  {
+    "id": "r3",
+    "text": "西客松大赛（西安）比赛日",
+    "time": "2026-10-18",
+    "fired": false
+  },
+  {
+    "id": "r_8e57f6ea",
+    "text": "医生开的药要按时吃，不舒服就马上告诉妈妈。",
+    "time": "2026-10-18",
+    "fired": false
+  },
+  {
+    "id": "r_658af121",
+    "text": "多喝温水，早晚加外套，比赛那天也别一热就马上脱衣服。",
+    "time": "2026-10-18",
+    "fired": false
+  },
+  {
+    "id": "r_b7043e0b",
+    "text": "带点没有胡萝卜的小零食，比如小饼干、海苔、果冻。",
+    "time": "2026-10-18",
+    "fired": false
+  }
 ]

@@ -42,6 +42,28 @@
           "kind": "ics",
           "text": "导出比赛日日程（10-18 08:30 签到）",
           "at": "2026-10-02"
+        },
+        {
+          "kind": "parent_confirm",
+          "title": "西安西客松参赛：需要家长帮忙确认的事",
+          "detail": "管家已把行程与清单准备好，请家长确认交通与报名相关事项。"
+        },
+        {
+          "kind": "reminder",
+          "text": "医生开的药要按时吃，不舒服就马上告诉妈妈。"
+        },
+        {
+          "kind": "reminder",
+          "text": "多喝温水，早晚加外套，比赛那天也别一热就马上脱衣服。"
+        },
+        {
+          "kind": "reminder",
+          "text": "带点没有胡萝卜的小零食，比如小饼干、海苔、果冻。"
+        },
+        {
+          "kind": "parent_confirm",
+          "title": "西安西客松参赛：需要家长帮忙确认的事",
+          "detail": "管家已把行程与清单准备好，请家长确认交通与报名相关事项。"
         }
       ],
       "log": [
@@ -89,10 +111,113 @@
           "ts": "2026-10-02T17:50:10",
           "actor": "child",
           "text": "赛前有点紧张，做深呼吸缓解"
+        },
+        {
+          "ts": "2026-10-02T21:57:15",
+          "actor": "butler",
+          "text": "执行链已存档"
+        },
+        {
+          "ts": "2026-10-02T21:57:18",
+          "actor": "butler",
+          "text": "执行了 parent_confirm"
+        },
+        {
+          "ts": "2026-10-02T21:59:55",
+          "actor": "butler",
+          "text": "执行链已存档"
+        },
+        {
+          "ts": "2026-10-02T22:00:01",
+          "actor": "butler",
+          "text": "执行了 reminder"
+        },
+        {
+          "ts": "2026-10-02T22:00:01",
+          "actor": "butler",
+          "text": "执行了 reminder"
+        },
+        {
+          "ts": "2026-10-02T22:00:01",
+          "actor": "butler",
+          "text": "执行了 reminder"
+        },
+        {
+          "ts": "2026-10-02T22:00:01",
+          "actor": "butler",
+          "text": "执行了 parent_confirm"
+        },
+        {
+          "ts": "2026-10-02T22:00:12",
+          "actor": "child",
+          "text": "已确认10/18西安赛场，清单含学生证电脑"
+        },
+        {
+          "ts": "2026-10-02T22:01:16",
+          "actor": "child",
+          "text": "出发前紧张，第一次去这么远比赛"
         }
       ],
       "created": "2026-09-28",
-      "updated": "2026-10-02"
+      "updated": "2026-10-02",
+      "plan": {
+        "title": "小豆西客松西安参赛准备计划",
+        "nodes": [
+          {
+            "id": "n1",
+            "title": "查清西客松大赛要求",
+            "tool": "race_lookup",
+            "depends_on": [],
+            "status": "done"
+          },
+          {
+            "id": "n2",
+            "title": "查威海到西安的交通参考",
+            "tool": "transport_lookup",
+            "depends_on": [],
+            "status": "done"
+          },
+          {
+            "id": "n3",
+            "title": "查西安比赛期间天气",
+            "tool": "weather",
+            "depends_on": [],
+            "status": "done"
+          },
+          {
+            "id": "n4",
+            "title": "整理参赛装备与赛前练习清单",
+            "tool": "llm",
+            "depends_on": [
+              "n1"
+            ],
+            "status": "done"
+          },
+          {
+            "id": "n5",
+            "title": "健康与情绪准备提醒",
+            "tool": "llm",
+            "depends_on": [],
+            "status": "done"
+          },
+          {
+            "id": "n6",
+            "title": "汇总成给孩子的参赛准备方案",
+            "tool": "llm",
+            "depends_on": [
+              "n1",
+              "n2",
+              "n3",
+              "n4",
+              "n5"
+            ],
+            "status": "done"
+          }
+        ]
+      },
+      "draft_ids": [
+        "dr_xikesong_intro"
+      ]
     },
     {
       "id": "newpc_plan",

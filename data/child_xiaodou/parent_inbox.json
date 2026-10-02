@@ -19,6 +19,17 @@
       "created": "2026-10-02T09:34:00",
       "decided_at": null,
       "reply": ""
+    },
+    {
+      "id": "pi_997226ec",
+      "affair_id": "xikesong",
+      "title": "西安西客松参赛：需要家长帮忙确认的事",
+      "detail": "管家已把行程与清单准备好，请家长确认交通与报名相关事项。",
+      "status": "pending",
+      "created": "2026-10-02T21:57:18",
+      "decided_at": null,
+      "reply": "",
+      "action": ""
     }
   ]
 }
