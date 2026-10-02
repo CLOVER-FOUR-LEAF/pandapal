@@ -59,6 +59,13 @@ def test_braces_balanced() -> None:
                f"(={src.count('(')} )={src.count(')')}")
 
 
+def reset_src() -> str:
+    """resetUserUI 的函数体（断言"切账号时把上一轮状态清干净"）。"""
+    js = read("app.js")
+    start = js.find("function resetUserUI")
+    return js[start:start + 2000] if start >= 0 else ""
+
+
 def _rule_depth(css: str, selector: str) -> int | None:
     """选择器所在的大括号深度：0 = 顶层，1+ = 嵌在 @media 等块内。找不到返回 None。"""
     depth = 0
@@ -94,6 +101,21 @@ def test_wiring() -> None:
     record("degraded_note", "function degradedNote" in js and ".degraded-note" in css
            and js.count("degradedNote(") >= 4)
     record("degraded_greeting_not_in_chat", 'data && data.degraded ? "" : text' in js)
+
+    # 附件（多模态上传）
+    record("attach_btn_in_inputbar", 'id="attach-btn"' in inside)
+    record("attach_before_input",
+           inside.find('id="attach-btn"') < inside.find('id="file-input"') >= 0)
+    record("attach_list_above_inputbar", 'id="attach-list"' in html
+           and html.find('id="attach-list"') < html.find('<div class="inputbar">'))
+    record("attach_wired", 'on("#attach-btn"' in js and 'fileInput.addEventListener("change"' in js)
+    record("attach_upload_fn", "async function uploadFiles" in js)
+    record("attach_dropzone", "function setupDropZone" in js and "#chat.drop-active" in css)
+    record("attach_files_event", 'case "files":' in js and "filesRow" in js)
+    record("attach_private_image", "loadPrivateImage" in js and "URL.createObjectURL" in js)
+    record("attach_history_replay", "m.files || null" in js)
+    record("attach_reset", "state.attach = [];" in reset_src())
+    record("attach_css", ".attach-chip {" in css and ".msg-file {" in css)
 
 
 def test_pause_state_hygiene() -> None:

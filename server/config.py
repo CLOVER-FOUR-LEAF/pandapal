@@ -56,6 +56,41 @@ HISTORY_TAIL = int(os.getenv("HISTORY_TAIL", "8"))
 # 会话闲置回收：超过这么久没来消息的会话释放内存（历史已落盘，再登录照常恢复）
 SESSION_IDLE_S = float(os.getenv("PANDA_SESSION_IDLE", "1800"))
 
+# ---------------- 多模态上传（图片 / 文档） ----------------
+# 上传是公网可达的写入口：体积、数量、类型三道闸都要有，否则一个脚本就能把磁盘写满。
+UPLOAD_MAX_BYTES = int(os.getenv("PANDA_UPLOAD_MAX_MB", "10")) * 1024 * 1024
+UPLOAD_MAX_FILES_PER_REQUEST = 5     # 一问最多带几个附件
+UPLOAD_MAX_FILES_PER_CHILD = 60      # 单个孩子档案保留的文件数
+UPLOAD_MAX_TOTAL_BYTES = int(os.getenv("PANDA_UPLOAD_QUOTA_MB", "60")) * 1024 * 1024
+# 抽取出来的正文注入 prompt 时的预算（超了按字符截断并标注）
+FILE_TEXT_MAX_CHARS = 6000           # 单个文件注入上限
+FILE_TEXT_TOTAL_CHARS = 14000        # 一轮里所有文件合计上限
+# 正文进 index.json 前的落盘上限：抽取结果要复用不能丢，但一份 10MB 文档的全文
+# 塞索引里会让每次 list/get 都解析一大坨；注入本来也只吃 FILE_TEXT_MAX_CHARS。
+FILE_TEXT_STORE_CHARS = FILE_TEXT_MAX_CHARS * 2
+# 图片进模型前统一压到这个长边（视觉 token 与请求体大小都随分辨率涨）
+IMAGE_MAX_EDGE = 1280
+IMAGE_JPEG_QUALITY = 85
+IMAGE_MAX_BYTES = 4 * 1024 * 1024    # 压缩后仍超限就不带图，只留元信息
+
+# 允许的扩展名 → 处理方式（kind）。音频/视频不做：本期不引入转写链路，
+# 与其"看起来支持"却答不出内容，不如明确拒绝并提示。
+FILE_KINDS = {
+    "image": {"png", "jpg", "jpeg", "webp", "gif", "bmp"},
+    "pdf": {"pdf"},
+    "docx": {"docx"},
+    "xlsx": {"xlsx", "xlsm"},
+    "pptx": {"pptx"},
+    "text": {"txt", "md", "markdown", "csv", "tsv", "json", "log", "py", "js", "ts",
+             "html", "css", "xml", "yml", "yaml", "ini", "conf", "sql", "java", "c",
+             "cpp", "h", "go", "rs", "rb", "php", "sh", "bat", "ps1"},
+    "legacy_office": {"doc", "xls", "ppt"},   # 老二进制格式：只提示转换，不做解析
+}
+# 扩展名 → 前端图标/人类可读名（后端也用来生成文案）
+FILE_KIND_CN = {
+    "image": "图片", "pdf": "PDF", "docx": "Word 文档", "xlsx": "Excel 表格",
+    "pptx": "PPT", "text": "文本", "legacy_office": "旧版 Office 文件",
+}
 
 # ---------------------------------------------------------------- 后台运行时配置
 # data/settings.json：管理员在后台改的 Key/端点，优先级高于 .env 与环境变量；
