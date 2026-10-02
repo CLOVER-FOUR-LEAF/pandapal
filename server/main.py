@@ -122,9 +122,20 @@ class SessionReq(BaseModel):
     name: str = Field(default="", max_length=24)
 
 
+class ResumeReq(BaseModel):
+    """暂停后「继续」：客户端带回被打断那一轮的原问题和已经显示出来的半截回答。
+
+    被打断的那一轮没进会话历史（生成器在 yield 处被关掉），续写必须靠这两段上下文，
+    否则模型只看到一句"接着说"，只能凭空编。
+    """
+    question: str = Field(min_length=1, max_length=2000)
+    partial: str = Field(min_length=1, max_length=8000)
+
+
 class ChatReq(BaseModel):
     name: str = Field(default="", max_length=24)
     message: str = Field(min_length=1, max_length=2000)
+    resume: ResumeReq | None = None
 
 
 class AffairReq(BaseModel):
@@ -725,7 +736,7 @@ async def _settle_memory(sess, user_msg: str, reply: str, is_secret: bool = Fals
     return gdata
 
 
-async def _chat_stream(sess, raw_message: str, ctx: dict):
+async def _chat_stream(sess, raw_message: str, ctx: dict, resume: ResumeReq | None = None):
     """对话主链路的 SSE 流：跑到 done 为止，整个过程持有会话锁。
 
     ctx 带出本轮的 reply_text / is_secret / message / intent，由调用方在锁释放后
@@ -744,8 +755,28 @@ async def _chat_stream(sess, raw_message: str, ctx: dict):
     last_turn: dict = {"intent": "chat"}  # 本轮实际走了哪条链路，供⑤生成后续话题
     g_store, a_store, m_store = _stores(sess)
 
+    if resume:
+        # 续写：本轮记账用被打断那一轮的原问题（含悄悄话标记），而不是"继续"这句指令
+        q = resume.question
+        q_secret = q.startswith(SECRET_PREFIX)
+        is_secret = is_secret or q_secret
+        message = (q[len(SECRET_PREFIX):].strip() if q_secret else q) or message
+        raw_message = SECRET_PREFIX + message if is_secret else message
+
     async def work():
         nonlocal reply_text
+        if resume:
+            # 续写不分类、不建事务：带着原问题和半截回答直接接着往下说
+            last_turn["intent"] = "chat"
+            await emit({"type": "mode", "mode": "chat", "mood": "normal"})
+            hit = await asyncio.to_thread(g_store.recall, message, limit=4)
+            cont = (f"（我刚才问的是：{message}\n你回答到这里被我暂停了：\n{resume.partial}\n"
+                    "请从断点处直接接着往下说：不要重复已经说过的内容，不要加开场白，"
+                    "如果断在半句话里就把这句接完。）")
+            tail = await _chat_reply(sess, cont, hit, emit, use_tools=False)
+            # 历史里存完整的一问一答：原问题 + 半截 + 续写
+            reply_text = resume.partial + tail if tail else ""
+            return
         # 意图分类（LLM RTT，最慢的一段）与图谱检索并行：recall 不依赖分类结果，
         # 契约 §5 的事件顺序由后面的 emit 顺序保证（mode 仍最先下发）。
         brief = await asyncio.to_thread(_affairs_brief, a_store, limit=4)
@@ -1140,7 +1171,7 @@ async def api_chat(request: Request, req: ChatReq):
     async def guarded():
         ctx: dict = {}
         try:
-            async for chunk in _chat_stream(sess, req.message, ctx):
+            async for chunk in _chat_stream(sess, req.message, ctx, req.resume):
                 yield chunk
         finally:
             sess.lock.release()

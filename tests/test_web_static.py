@@ -82,7 +82,9 @@ def test_wiring() -> None:
            f"depth={_rule_depth(css, '.pause-btn {')}")
     record("send_hidden_when_busy", '.inputbar[data-busy="1"] .btn-send' in css)
     record("pause_wired", 'on("#pause-btn", pauseChat)' in js)
-    record("esc_pauses", "if (state.busy) { pauseChat(); return; }" in js)
+    record("esc_pauses", "if (!closed && state.busy) pauseChat();" in js)
+    record("esc_ignores_ime", "e.isComposing" in js)
+    record("resume_is_explicit", 'send("继续", { resume: true })' in js and "opts.resume &&" in js)
     record("resume_chip", "chip-resume" in js and ".chip-resume" in css)
     record("offline_bar", 'id="offline-bar"' in html and "setupOfflineBar" in js
            and ".offline-bar" in css)

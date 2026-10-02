@@ -1911,7 +1911,7 @@ function showResumeChip() {
   b.title = "接着没说完的往下说";
   b.onclick = () => {
     b.remove();
-    send("（刚才的回答被打断了，请接着上面的内容继续说，不要重复已经说过的部分。）");
+    send("继续", { resume: true });
   };
   box.insertBefore(b, box.firstChild);
   box.scrollLeft = 0;
@@ -1962,20 +1962,22 @@ function pauseChat() {
   }
   const ctx = state.chatCtx;
   if (ctx && ctx.aiRaw && ctx.aiBubble && ctx.aiBubble.isConnected) {
-    state.chatResume = { raw: ctx.aiRaw, bubble: ctx.aiBubble };
+    // 原问题跟着存：被打断那一轮没进服务端历史，续写要靠客户端把上下文带回去
+    state.chatResume = { raw: ctx.aiRaw, bubble: ctx.aiBubble, question: ctx.question };
   }
   addSys("回答已暂停");
   showResumeChip();
   chatStatus("已暂停");
   toast("已暂停回答");
   // 规划链跑到一半被叫停：事务/清单可能已经落盘，看板刷新一下，别让用户以为什么都没发生
+  // 只有服务端真的回过事务事件才这么说——规划还没落盘就被叫停时不能报喜
   if (ctx && ctx.tree) {
-    addSys("刚才那件事已经记到事务看板了");
     loadAffairs();
+    if (ctx.affairTouched) addSys("刚才那件事已经记到事务看板了");
   }
 }
 
-async function send(preset) {
+async function send(preset, opts = {}) {
   const input = $("#msg-input");
   const raw = preset !== undefined ? String(preset) : input ? input.value : "";
   const text = raw.trim();
@@ -2002,13 +2004,15 @@ async function send(preset) {
   if (sendBtn) sendBtn.disabled = true;
   if (input) input.placeholder = "管家正在想…";
 
-  // 暂停后接着往下说（「继续」入口）：把新内容追加进同一个气泡，而不是另起一条
-  const resume = state.chatResume
-    && state.chatResume.bubble && state.chatResume.bubble.isConnected
-    && state.chatResume.raw ? state.chatResume : null;
+  // 暂停后接着往下说：只有「继续」入口显式要求时才续写进同一个气泡。
+  // 暂停后孩子直接打了一句新问题，那就是新的一轮，旧的半截回答原样留着。
+  const r = state.chatResume;
+  const resume = opts.resume && r && r.bubble && r.bubble.isConnected && r.raw && r.question
+    ? r : null;
   state.chatResume = null;
 
-  const secret = state.secret;
+  // 续写沿用原问题的悄悄话状态，不看孩子此刻有没有切换开关
+  const secret = resume ? resume.question.startsWith("[[secret]]") : state.secret;
   if (input && preset === undefined) input.value = "";
   if (!resume) addMsg("me", text, secret);
   hideBubble($("#panda-bubble"));
@@ -2016,28 +2020,38 @@ async function send(preset) {
   if (pandaSvg) setMood(pandaSvg, "thinking");
   chatStatus("正在想…", true);
 
+  const payload = secret && !resume ? `[[secret]]${text}` : text;
   const ctx = { seq, typing: addTyping(), aiBubble: resume ? resume.bubble : null,
-                aiRaw: resume ? resume.raw : "", tree: null };
+                aiRaw: resume ? resume.raw : "", resumeBase: resume ? resume.raw : "",
+                question: resume ? resume.question : payload, tree: null, affairTouched: false };
   state.chatCtx = ctx; // 暂停时要按当前轮次的状态决定「继续」入口与看板刷新
   const dropTyping = () => {
     if (ctx.typing) { ctx.typing.remove(); ctx.typing = null; }
   };
 
-  const payload = secret ? `[[secret]]${text}` : text;
+  const body = { name: state.name, message: payload };
+  if (resume) body.resume = { question: resume.question, partial: resume.raw };
   try {
-    const resp = await api("/api/chat",
-      { ...jsonOpts({ name: state.name, message: payload }), signal: abort.signal });
+    const resp = await api("/api/chat", { ...jsonOpts(body), signal: abort.signal });
     await readSSE(resp, ctx, dropTyping);
   } catch (e) {
     dropTyping();
     if (state.chatPaused || e.name === "AbortError") {
       // 用户主动暂停：保留已生成的内容，不报错、不恢复草稿
     } else {
-      if (!ctx.aiRaw && input && preset === undefined && !input.value) {
+      // 续写时 aiRaw 一开始就是旧内容：判断"有没有新 token"要和起点比，不能只看是否为空
+      const gotNothing = ctx.aiRaw === ctx.resumeBase;
+      if (gotNothing && !resume && input && preset === undefined && !input.value) {
         input.value = text; // 一个 token 都没回来：请求根本没生效，恢复草稿免得重打
       }
       // 网络层失败（没有 HTTP 状态码）留一份原文，聊天区那条提示点一下就重发
-      state.retryText = !e.status && !ctx.aiRaw ? text : "";
+      state.retryText = !e.status && gotNothing && !resume ? text : "";
+      if (resume && gotNothing) {
+        // 续写没连上：把「继续」入口还回去，别让那半截回答再也接不上
+        state.chatResume = resume;
+        state.chatPaused = true;
+        showResumeChip();
+      }
       if (e.status === 429) addMsg("ai", "管家还在回上一条，稍等 1 秒再说～");
       else if (!e.status) retryableError("没能连上管家");
       else addMsg("ai", `唔……${e.message}`);
@@ -2132,6 +2146,7 @@ function handleEvent(ev, ctx, dropTyping) {
     }
 
     case "affair":
+      ctx.affairTouched = true;
       onAffairEvent(ev);
       break;
 
@@ -3323,13 +3338,14 @@ function bind() {
   }
   // ESC：回答进行中先停回答（和主流 agent 一致），否则关抽屉
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") {
-      if (state.busy) { pauseChat(); return; }
-      const drawer = $("#node-drawer");
-      if (drawer && !drawer.classList.contains("hidden")) drawer.classList.add("hidden");
-      const detail = $("#affair-detail");
-      if (detail && !detail.classList.contains("hidden")) detail.classList.add("hidden");
+    if (e.key !== "Escape" || e.isComposing || e.keyCode === 229) return; // 输入法里按 Esc 是取消候选字
+    // 先关开着的抽屉；没有可关的，回答进行中才是停回答
+    let closed = false;
+    for (const sel of ["#node-drawer", "#affair-detail"]) {
+      const d = $(sel);
+      if (d && !d.classList.contains("hidden")) { d.classList.add("hidden"); closed = true; }
     }
+    if (!closed && state.busy) pauseChat();
   });
   window.addEventListener("resize", () => {
     if (state.name) renderMiniGraph();

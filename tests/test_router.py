@@ -28,10 +28,11 @@ def record(name: str, ok: bool, note: str = "") -> None:
 
 
 def test_looks_like_continuation() -> None:
-    for text in ("接着说", "继续说完", "接着上面继续说", "往下说",
-                 "（刚才的回答被打断了，请接着上面的内容继续说，不要重复已经说过的部分。）"):
+    for text in ("接着说", "继续说完", "接着上面继续说", "往下说", "继续", "接着说吧！", "然后呢？"):
         record(f"continuation:{text[:8]}", router.looks_like_continuation(text))
-    for text in ("帮我准备下周的比赛", "什么是利息", "我今天有点难过", ""):
+    for text in ("帮我准备下周的比赛", "什么是利息", "我今天有点难过", "",
+                 # 带了新内容的话不能被短路成闲聊（会跳过建事务/情绪识别）
+                 "我想接着说说下周要准备的比赛", "接着上面的，明天要交作文和PPT", "继续练钢琴好累"):
         record(f"not_continuation:{text[:8]}", not router.looks_like_continuation(text))
     # 很长的话里恰好含"接着说"不算续写指令（避免误伤正常提问）
     long_text = "我想说的是" + "很多很多内容" * 12 + "接着说我自己的计划"
