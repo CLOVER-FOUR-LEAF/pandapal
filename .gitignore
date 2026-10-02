@@ -1,17 +1,36 @@
+# ---------- Python ----------
 __pycache__/
-*.pyc
+*.py[cod]
 .venv/
-.env
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# ---------- 前端 / 构建 ----------
 node_modules/
 dist/
+
+# ---------- 本地环境与密钥 ----------
+# .env.example 是入库的模板，其余 .env* 一律视为本地私密文件
+.env
+.env.*
+!.env.example
+
+# ---------- 系统与工具 ----------
 .DS_Store
 *.log
-.pytest_cache/
+*.tmp
+.idea/
+.vscode/
+.claude/settings.local.json
+
+# ---------- 运行时数据（不入库） ----------
+# 孩子档案默认全部忽略，演示档 child_xiaodou 例外保留入库
 data/child_*/
+!data/child_xiaodou/
 data/logs/
 data/users.json
 data/tokens.json
 data/profiles.json
-data/**/*.tmp
-daily_tmp/
-!data/child_xiaodou/
