@@ -1,0 +1,5 @@
+[
+  {"id": "r1", "text": "周六上午 9:30 机器人课", "time": "weekly:sat", "fired": false},
+  {"id": "r2", "text": "感冒恢复中，记得按时吃药、多喝水", "time": "daily", "fired": false},
+  {"id": "r3", "text": "西客松大赛（西安）比赛日", "time": "2026-10-18", "fired": false}
+]

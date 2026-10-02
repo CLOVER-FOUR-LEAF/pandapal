@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+node_modules/
+dist/
+.DS_Store
+*.log
+.pytest_cache/
+data/child_*/
+daily_tmp/
+!data/child_xiaodou/
