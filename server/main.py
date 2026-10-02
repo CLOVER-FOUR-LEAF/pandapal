@@ -44,7 +44,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import (actions, affairs, auth, config, executor, graph, llm, memory, planner,
-               prompts, router, sessions, store, suggest, synth)
+               prompts, router, sessions, store, suggest, synth, tools)
 
 
 @asynccontextmanager
@@ -518,9 +518,15 @@ async def api_briefing(request: Request, name: str = ""):
 
 # ---------------------------------------------------------------- 对话主流程
 
-def _chat_messages(sess, message: str, recall_block: str = "", extra_rule: str = "") -> list[dict]:
-    """人设 + 活跃关注点块 + 图谱检索 + 历史尾部。extra_rule 用于 explain 等分支追加讲解规则。"""
+def _chat_messages(sess, message: str, recall_block: str = "", extra_rule: str = "",
+                   tool_ctx: str = "") -> list[dict]:
+    """人设 + 当前时间 + 活跃关注点块 + 图谱检索 + 历史尾部。
+
+    extra_rule 用于 explain 等分支追加讲解规则；tool_ctx 是工具轮刚查到的
+    实时资料块（联网搜索/天气/看时间），有就直接摆给模型用。
+    """
     system = prompts.PERSONA.format(name=sess.name)
+    system += f"\n\n现在是 {_now_text()}（服务器本地时间），回答时间相关问题直接用，别说自己看不到时间。"
     if extra_rule:
         system += "\n\n" + extra_rule
     active = sess.store.active_block(message)
@@ -532,6 +538,9 @@ def _chat_messages(sess, message: str, recall_block: str = "", extra_rule: str =
         mem_parts.append(f"和这次聊天可能相关的记忆：\n{recall_block}")
     if related:
         mem_parts.append(f"（补充）{related}")
+    if tool_ctx:
+        mem_parts.append(
+            f"你刚刚为这句话查到的实时资料（工具真实返回，可直接引用；查得不准就如实说）：\n{tool_ctx}")
     if mem_parts:
         system += "\n\n" + "\n\n".join(mem_parts)
     msgs = [{"role": "system", "content": system}]
@@ -539,6 +548,70 @@ def _chat_messages(sess, message: str, recall_block: str = "", extra_rule: str =
     msgs.extend({"role": m["role"], "content": m["content"]} for m in sess.history)
     msgs.append({"role": "user", "content": message})
     return msgs
+
+
+_TOOL_MAX_CALLS = 2
+
+
+async def _tool_round(sess, message: str, emit) -> str:
+    """闲聊直答通道的工具轮：启发式命中 → 调度器挑工具 → 执行 → 结果块进 system。
+
+    返回 "" 表示本轮不需要工具（普通闲聊不白跑一次 LLM 判断）。
+    悄悄话不走这里——私密内容不能送进联网工具。
+    """
+    if not tools.might_need(message):
+        return ""
+    try:
+        pick = await llm.complete_json(
+            [{"role": "user", "content": prompts.TOOL_PICK.format(
+                name=sess.name, now=_now_text(),
+                tools_doc=tools.chat_docs(), max_calls=_TOOL_MAX_CALLS,
+                message=message)}],
+            max_tokens=400, caller="tool_pick")
+    except Exception as e:  # noqa: BLE001 选工具失败不挡聊天主路
+        print(f"[tools] 调度器判断失败，直接聊：{e}")
+        return ""
+    calls = [c for c in pick.get("calls") or [] if isinstance(c, dict)]
+    if not calls:
+        return ""
+    ctx = tools.ToolCtx(store=sess.store, event=message)
+    blocks = []
+    for c in calls[:_TOOL_MAX_CALLS]:
+        name = str(c.get("tool") or "")
+        args = c.get("args") if isinstance(c.get("args"), dict) else {}
+        t = tools.get(name)
+        if t is None or not t.chat:
+            continue
+        label = tools.describe(name, args)
+        await emit({"type": "tool", "tool": name, "label": label, "status": "running"})
+        try:
+            out = await tools.dispatch(name, args, ctx)
+            if out is None:
+                raise RuntimeError("工具不可用")
+            await emit({"type": "tool", "tool": name, "label": label, "status": "done"})
+            blocks.append(f"【{label}】\n{out}")
+        except Exception as e:  # noqa: BLE001 单个工具失败要让孩子看得见，但别中断回复
+            print(f"[tools] {name} 调用失败：{e}")
+            await emit({"type": "tool", "tool": name, "label": label, "status": "error"})
+            blocks.append(f"【{label}】查询没成功：{e}——回答时如实告诉孩子没查到")
+    return "\n\n".join(blocks)
+
+
+async def _chat_reply(sess, message: str, hit: dict, emit, *,
+                      extra_rule: str = "", caller: str = "chat",
+                      use_tools: bool = True) -> str:
+    """闲聊类分支共用：工具轮 → 拼消息 → 流式回复。返回回复全文。
+
+    use_tools=False 关掉工具轮（悄悄话：私密原话不能送进联网工具）。
+    """
+    tool_ctx = await _tool_round(sess, message, emit) if use_tools else ""
+    msgs = await asyncio.to_thread(
+        _chat_messages, sess, message, hit["block"], extra_rule, tool_ctx)
+    chunks = []
+    async for tok in llm.stream(msgs, max_tokens=600, caller=caller):
+        chunks.append(tok)
+        await emit({"type": "token", "text": tok})
+    return "".join(chunks)
 
 
 def _make_checklist_from_card(card: dict) -> list[str]:
@@ -690,31 +763,20 @@ async def _chat_stream(sess, raw_message: str, ctx: dict):
                 await emit({"type": "affair", "action": "update", "affair": updated})
             except Exception:  # noqa: BLE001 事务 id 失效时照常聊天
                 pass
-            chunks = []
-            msgs = await asyncio.to_thread(_chat_messages, sess, message, hit["block"])
-            async for tok in llm.stream(msgs, max_tokens=600, caller="chat"):
-                chunks.append(tok)
-                await emit({"type": "token", "text": tok})
-            reply_text = "".join(chunks)
+            reply_text = await _chat_reply(sess, message, hit, emit,
+                                           use_tools=not is_secret)
 
         elif intent == "explain":
             # 讲懂知识点：复用闲聊通道，但在人设后追加"用自己的经历打比方"的讲解规则
-            chunks = []
-            msgs = await asyncio.to_thread(
-                _chat_messages, sess, message, hit["block"],
-                extra_rule=prompts.EXPLAIN_RULE)
-            async for tok in llm.stream(msgs, max_tokens=600, caller="explain"):
-                chunks.append(tok)
-                await emit({"type": "token", "text": tok})
-            reply_text = "".join(chunks)
+            reply_text = await _chat_reply(
+                sess, message, hit, emit,
+                extra_rule=prompts.EXPLAIN_RULE, caller="explain",
+                use_tools=not is_secret)
 
         else:
-            chunks = []
-            msgs = await asyncio.to_thread(_chat_messages, sess, message, hit["block"])
-            async for tok in llm.stream(msgs, max_tokens=600, caller="chat"):
-                chunks.append(tok)
-                await emit({"type": "token", "text": tok})
-            reply_text = "".join(chunks)
+            # 悄悄话不走工具轮：私密原话不能送进联网工具（时间注入仍在）
+            reply_text = await _chat_reply(
+                sess, message, hit, emit, use_tools=not is_secret)
 
     async def runner():
         try:
@@ -793,8 +855,7 @@ async def _chat_settle(sess, ctx: dict):
 
 
 def _now_text() -> str:
-    now = datetime.now()
-    return now.strftime("%Y-%m-%d %H:%M 星期") + "一二三四五六日"[now.weekday()]
+    return tools.now_text()
 
 
 async def _triage(sess, a_store, message: str, hit: dict, emit) -> str:
