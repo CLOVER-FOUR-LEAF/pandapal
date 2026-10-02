@@ -571,8 +571,9 @@ function build(container, hiddenCanvas, OrbitControls, CSS2D, pandaMod, post) {
       pk.shadow.camera.far = 24;
       pk.shadow.normalBias = 0.035;
       pk.shadow.bias = -0.0001;
+      pk.shadow.radius = 2.5;
       renderer.shadowMap.enabled = true;
-      renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+      renderer.shadowMap.type = THREE.PCFShadowMap;
       pScene.add(pk.target);
       pScene.add(pk);
       const pkFill = new THREE.DirectionalLight(0xe4edf4, 0.38);
@@ -2079,6 +2080,7 @@ export const disposeScene = safe(function disposeScene() {
       for (const m of ms) {
         if (m.map && m.map !== S.tex.glow && m.map !== S.tex.ring && m.map !== S.tex.priv) disposeTexture(m.map);
         disposeTexture(m.bumpMap);
+        disposeTexture(m.normalMap);
         m.dispose();
       }
     }

@@ -59,6 +59,59 @@ function fabricTexture(t) {
   return texture;
 }
 
+function furTextures(t) {
+  const size = 256;
+  let seed = 2197;
+  const random = () => { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return seed / 4294967296; };
+  const field = (width, height) => ({ width, height, data: Float32Array.from({ length: width * height }, random) });
+  const broad = field(16, 16), tufts = field(64, 24), fine = field(128, 64);
+  const sample = (grid, u, v) => {
+    const x = u * grid.width, y = v * grid.height;
+    const ix = Math.floor(x), iy = Math.floor(y);
+    let fx = x - ix, fy = y - iy;
+    fx = fx * fx * (3 - 2 * fx); fy = fy * fy * (3 - 2 * fy);
+    const at = (a, b) => grid.data[((b % grid.height + grid.height) % grid.height) * grid.width + (a % grid.width + grid.width) % grid.width];
+    const top = at(ix, iy) * (1 - fx) + at(ix + 1, iy) * fx;
+    const bottom = at(ix, iy + 1) * (1 - fx) + at(ix + 1, iy + 1) * fx;
+    return top * (1 - fy) + bottom * fy;
+  };
+  const heights = new Float32Array(size * size);
+  const colorData = new Uint8Array(size * size * 4);
+  const normalData = new Uint8Array(size * size * 4);
+  for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+    const u = x / size, v = y / size;
+    const bend = Math.sin(v * Math.PI * 8) * 0.009 + Math.sin(v * Math.PI * 22) * 0.003;
+    const tuft = sample(tufts, u + bend, v), detail = sample(fine, u + bend, v);
+    const broadValue = sample(broad, u, v);
+    heights[y * size + x] = tuft * 0.65 + detail * 0.25 + broadValue * 0.1;
+    const i = (y * size + x) * 4;
+    const value = 243 + (broadValue - 0.5) * 5 + (tuft - 0.5) * 3;
+    colorData[i] = colorData[i + 1] = colorData[i + 2] = value;
+    colorData[i + 3] = 255;
+  }
+  const heightAt = (x, y) => heights[((y + size) % size) * size + (x + size) % size];
+  for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+    const dx = (heightAt(x - 1, y) - heightAt(x + 1, y)) * 0.38;
+    const dy = (heightAt(x, y - 1) - heightAt(x, y + 1)) * 0.38;
+    const inverseLength = 1 / Math.hypot(dx, dy, 1), i = (y * size + x) * 4;
+    normalData[i] = (dx * inverseLength * 0.5 + 0.5) * 255;
+    normalData[i + 1] = (dy * inverseLength * 0.5 + 0.5) * 255;
+    normalData[i + 2] = (inverseLength * 0.5 + 0.5) * 255;
+    normalData[i + 3] = 255;
+  }
+  const texture = data => {
+    const map = new t.DataTexture(data, size, size, t.RGBAFormat);
+    map.wrapS = map.wrapT = t.RepeatWrapping;
+    map.repeat.set(4, 4);
+    map.magFilter = t.LinearFilter;
+    map.minFilter = t.LinearMipmapLinearFilter;
+    map.generateMipmaps = true;
+    map.needsUpdate = true;
+    return map;
+  };
+  return { color: texture(colorData), normal: texture(normalData) };
+}
+
 function headGeometry(t) {
   const geometry = new t.SphereGeometry(1.72, 48, 36);
   const p = geometry.attributes.position;
@@ -112,14 +165,15 @@ function blushTexture(t) {
   return texture;
 }
 
-// Short tapered fibers follow the actual surface, including the cheek sculpture.
+// Bent ribbons follow a shared downward groom; their roots blend into the surface.
 function addPile(t, mesh, material, count, length, seed = 17) {
   const source = mesh.geometry, positions = source.attributes.position;
-  const normals = source.attributes.normal, index = source.index;
+  const normals = source.attributes.normal, uvs = source.attributes.uv, index = source.index;
   const triangleCount = (index ? index.count : positions.count) / 3;
   const cumulative = new Float32Array(triangleCount);
   const a = new t.Vector3(), b = new t.Vector3(), c = new t.Vector3();
   const edge = new t.Vector3(), normal = new t.Vector3(), tangent = new t.Vector3();
+  const groom = new t.Vector3(), uv = new t.Vector2();
   let area = 0;
   const vi = i => index ? index.getX(i) : i;
   const random = () => { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return seed / 4294967296; };
@@ -130,30 +184,46 @@ function addPile(t, mesh, material, count, length, seed = 17) {
     area += edge.subVectors(b, a).cross(c.sub(a)).length() * 0.5;
     cumulative[i] = area;
   }
-  const vertices = [], vertexNormals = [], colors = [];
+  const vertices = [], vertexNormals = [], surfaceUvs = [], furCoords = [];
   for (let i = 0; i < count; i++) {
     const sample = random() * area;
     let low = 0, high = triangleCount - 1;
     while (low < high) { const mid = (low + high) >>> 1; if (cumulative[mid] < sample) low = mid + 1; else high = mid; }
     const ids = [vi(low * 3), vi(low * 3 + 1), vi(low * 3 + 2)];
     const u = Math.sqrt(random()), v = random(), weights = [1 - u, u * (1 - v), u * v];
-    a.set(0, 0, 0); normal.set(0, 0, 0);
-    ids.forEach((id, j) => { a.addScaledVector(b.fromBufferAttribute(positions, id), weights[j]); normal.addScaledVector(b.fromBufferAttribute(normals, id), weights[j]); });
+    a.set(0, 0, 0); normal.set(0, 0, 0); uv.set(0, 0);
+    ids.forEach((id, j) => {
+      a.addScaledVector(b.fromBufferAttribute(positions, id), weights[j]);
+      normal.addScaledVector(b.fromBufferAttribute(normals, id), weights[j]);
+      if (uvs) { uv.x += uvs.getX(id) * weights[j]; uv.y += uvs.getY(id) * weights[j]; }
+    });
     normal.normalize();
-    tangent.set(random() - 0.5, random() - 0.5, random() - 0.5).cross(normal).normalize();
-    const height = length * (0.6 + random() * 0.65), width = height * 0.2;
-    const shade = 0.92 + random() * 0.08;
-    for (const [side, rise] of [[-1, 0], [1, 0], [0.35, 1]]) {
-      b.copy(a).addScaledVector(tangent, width * side).addScaledVector(normal, 0.003 + height * rise);
-      vertices.push(b.x, b.y, b.z); vertexNormals.push(normal.x, normal.y, normal.z); colors.push(shade, shade, shade);
+    groom.set(0.12 * Math.sin(a.x * 5 + a.z * 3), -1, 0.1);
+    groom.addScaledVector(normal, -groom.dot(normal));
+    if (groom.lengthSq() < 0.0001) groom.set(1, 0, 0).addScaledVector(normal, -normal.x);
+    groom.normalize();
+    tangent.crossVectors(normal, groom).normalize();
+    groom.addScaledVector(tangent, (random() - 0.5) * 0.16).normalize();
+    const height = length * (0.75 + random() * 0.4), width = height * 0.16;
+    const points = [[-1, 0], [1, 0], [-0.62, 0.48], [-0.62, 0.48], [1, 0], [0.62, 0.48], [-0.62, 0.48], [0.62, 0.48], [0, 1]];
+    for (const [side, rise] of points) {
+      b.copy(a).addScaledVector(tangent, width * side)
+        .addScaledVector(normal, 0.0015 + height * (rise - 0.28 * rise * rise))
+        .addScaledVector(groom, height * rise * rise * 0.9);
+      vertices.push(b.x, b.y, b.z);
+      vertexNormals.push(normal.x, normal.y, normal.z);
+      surfaceUvs.push(uv.x, uv.y);
+      furCoords.push(side < 0 ? 0 : side > 0 ? 1 : 0.5, rise);
     }
   }
   const geometry = new t.BufferGeometry();
   geometry.setAttribute('position', new t.Float32BufferAttribute(vertices, 3));
   geometry.setAttribute('normal', new t.Float32BufferAttribute(vertexNormals, 3));
-  geometry.setAttribute('color', new t.Float32BufferAttribute(colors, 3));
+  geometry.setAttribute('uv', new t.Float32BufferAttribute(surfaceUvs, 2));
+  geometry.setAttribute('furCoord', new t.Float32BufferAttribute(furCoords, 2));
   const pile = new t.Mesh(geometry, material);
   pile.name = 'felt-pile';
+  pile.receiveShadow = true;
   mesh.add(pile);
 }
 
@@ -186,6 +256,7 @@ export function createPanda(THREE, opts = {}) {
   root.add(rig);
 
   const fabric = fabricTexture(t);
+  const fur = furTextures(t);
   const blush = blushTexture(t);
   const mat = (color, o = {}) => new t.MeshPhysicalMaterial({
     color, roughness: 0.98, metalness: 0, specularIntensity: 0.12,
@@ -193,10 +264,14 @@ export function createPanda(THREE, opts = {}) {
     sheenColor: new t.Color(color).lerp(new t.Color(0xffffff), 0.16),
     map: fabric, bumpMap: fabric, bumpScale: 0.033, ...o,
   });
+  const skin = (color, o = {}) => mat(color, {
+    map: fur.color, normalMap: fur.normal, normalScale: new t.Vector2(0.18, 0.18),
+    bumpMap: null, roughness: 0.94, sheen: 0.24, sheenRoughness: 0.92, ...o,
+  });
   const M = {
-    white: mat(C.white),
-    black: mat(C.black, { sheen: 0.45, bumpScale: 0.026 }),
-    black2: mat(C.black2),
+    white: skin(C.white),
+    black: skin(C.black, { sheen: 0.34 }),
+    black2: skin(C.black2, { sheen: 0.3 }),
     pink: mat(C.pink, { map: blush, bumpMap: null, sheen: 0, transparent: true, opacity: 0.38, depthWrite: false }),
     bamboo: mat(C.bamboo, { bumpScale: 0.035 }),
     paper: mat(C.paper, { sheen: 0, bumpScale: 0.009 }),
@@ -207,16 +282,33 @@ export function createPanda(THREE, opts = {}) {
     nose: mat(0x253032, { roughness: 0.62, sheen: 0, map: null, bumpMap: null }),
     thread: mat(0xb9c9b9, { sheen: 0.2, bumpMap: null }),
   };
-  const pileMat = color => {
-    const material = new t.MeshStandardMaterial({ color, roughness: 1, metalness: 0, envMapIntensity: 0.22, vertexColors: true, side: t.DoubleSide });
-    // Both sides of a fiber use the underlying plush surface normal, avoiding dark speckles.
+  const pileMat = surface => {
+    const material = surface.clone();
+    material.name = 'panda-groomed-fur';
+    material.normalMap = null;
+    material.side = t.DoubleSide;
+    material.transparent = true;
+    material.depthWrite = false;
+    material.forceSinglePass = true;
+    // Match the parent lighting and shadows, with soft edges and restrained frontal coverage.
     material.onBeforeCompile = shader => {
+      shader.vertexShader = shader.vertexShader
+        .replace('#include <common>', '#include <common>\nattribute vec2 furCoord;\nvarying vec2 vPandaFurCoord;')
+        .replace('#include <begin_vertex>', '#include <begin_vertex>\nvPandaFurCoord = furCoord;');
+      shader.fragmentShader = shader.fragmentShader.replace('#include <common>', '#include <common>\nvarying vec2 vPandaFurCoord;');
       shader.fragmentShader = shader.fragmentShader.replace('#include <normal_fragment_begin>', t.ShaderChunk.normal_fragment_begin.replace('normal *= faceDirection;', ''));
+      shader.fragmentShader = shader.fragmentShader.replace('#include <opaque_fragment>', [
+        'float fiberEdge = smoothstep(0.0, 0.24, vPandaFurCoord.x) * (1.0 - smoothstep(0.76, 1.0, vPandaFurCoord.x));',
+        'float fiberTip = smoothstep(0.0, 0.16, vPandaFurCoord.y) * (1.0 - smoothstep(0.55, 1.0, vPandaFurCoord.y));',
+        'float fiberRim = pow(1.0 - abs(dot(normalize(vNormal), normalize(vViewPosition))), 1.5);',
+        'diffuseColor.a *= fiberEdge * fiberTip * (0.16 + 0.64 * fiberRim);',
+        '#include <opaque_fragment>',
+      ].join('\n'));
     };
-    material.customProgramCacheKey = () => 'felt-surface-normals-v1';
+    material.customProgramCacheKey = () => 'groomed-fur-soft-coverage-v2';
     return material;
   };
-  const lightPile = pileMat(C.white), darkPile = pileMat(C.black);
+  const lightPile = pileMat(M.white), darkPile = pileMat(M.black), softBlackPile = pileMat(M.black2);
 
   // 小工具：造 mesh 并摆位
   const mk = (geo, material, x = 0, y = 0, z = 0) => {
@@ -389,13 +481,13 @@ export function createPanda(THREE, opts = {}) {
   armL.add(padGroup);
   armL.add(scale(mk(new t.SphereGeometry(0.17, 20, 16), M.black, 0.47, -1.39, 1.07), 0.85, 1.12, 0.72));
 
-  addPile(t, head, lightPile, 9000, 0.027);
-  addPile(t, body, lightPile, 6500, 0.03, 42);
+  addPile(t, head, lightPile, 5200, 0.024);
+  addPile(t, body, lightPile, 3200, 0.026, 42);
   for (const [i, mesh] of [earL, earR, footL, footR, ...armL.children.filter(o => o.isMesh), ...armR.children.filter(o => o.isMesh)].entries()) {
-    addPile(t, mesh, darkPile, 900, 0.026, 53 + i);
+    addPile(t, mesh, mesh.material === M.black2 ? softBlackPile : darkPile, 330, 0.022, 53 + i);
   }
-  addPile(t, patchL, darkPile, 1200, 0.012, 71);
-  addPile(t, patchR, darkPile, 1200, 0.012, 72);
+  addPile(t, patchL, darkPile, 420, 0.01, 71);
+  addPile(t, patchR, darkPile, 420, 0.01, 72);
 
   root.scale.setScalar(s);
   root.userData = {
@@ -409,7 +501,7 @@ export function createPanda(THREE, opts = {}) {
     blinkUntil: -1,
     waveUntil: -1,
     pageUntil: -1,
-    textures: [fabric, blush],
+    textures: [fabric, blush, fur.color, fur.normal],
     parts: {
       rig, body, tail, armL, armR, legL, legR, footL, footR,
       headGroup, head, earL, earR, eyeL, eyeR, mouth, smile, browL, browR, padGroup, pagePivot, penGroup,

@@ -68,3 +68,28 @@ test('felt assets stay nonmetallic, locally generated and within geometry budget
     }
   } finally { dispose(panda); }
 });
+
+test('fur receives the same shadows and surface color as the skin', () => {
+  const panda = createPanda(THREE);
+  try {
+    panda.traverse(object => {
+      if (object.name !== 'felt-pile') return;
+      const skin = object.parent.material;
+      assert.ok(object.receiveShadow, 'unshadowed fibers create bright dots in shade');
+      assert.ok(object.material.color.equals(skin.color));
+      assert.equal(object.material.map, skin.map);
+      assert.equal(object.material.roughness, skin.roughness);
+      assert.equal(object.material.depthWrite, false);
+      for (const name of ['normal', 'uv', 'furCoord']) {
+        assert.ok(object.geometry.attributes[name].array.every(Number.isFinite), name);
+      }
+    });
+    const { material } = panda.userData.parts.head;
+    assert.equal(material.bumpMap, null);
+    assert.ok(panda.userData.textures.includes(material.normalMap));
+    const { data } = material.map.image;
+    for (let i = 0; i < data.length; i += 4) {
+      assert.ok(data[i] >= 235 && data[i] <= 250, 'fur albedo contains a high-contrast fleck');
+    }
+  } finally { dispose(panda); }
+});
