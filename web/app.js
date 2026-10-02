@@ -1227,7 +1227,27 @@ async function openAffairDetail(aid) {
   const icsBtn = el("button", "btn-approve");
   icsBtn.type = "button";
   append(icsBtn, icon("i-cal"), document.createTextNode("导出日历"));
-  icsBtn.onclick = () => window.open(`${BASE}/api/ics/${encodeURIComponent(aff.id)}?${q(state.name)}&token=${encodeURIComponent(state.token || "")}`, "_blank");
+  // fetch + Authorization + blob 下载：window.open 带不了头只能 ?token=，
+  // URL 会留浏览器历史/反代日志——token 等于账号本身，不能这么给。
+  icsBtn.onclick = async () => {
+    icsBtn.disabled = true;
+    try {
+      const resp = await api(`/api/ics/${encodeURIComponent(aff.id)}?${q(state.name)}`);
+      const blob = await resp.blob();
+      const url = URL.createObjectURL(blob);
+      const a = el("a");
+      a.href = url;
+      a.download = `${aff.id || "affair"}.ics`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (e) {
+      addSys(`日历导出失败：${e.message}`);
+    } finally {
+      icsBtn.disabled = false;
+    }
+  };
   const closeBtn = el("button", "btn-reject", "关闭");
   closeBtn.type = "button";
   closeBtn.onclick = () => holder.wrap.classList.add("hidden");

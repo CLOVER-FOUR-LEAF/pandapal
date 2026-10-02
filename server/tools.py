@@ -1,6 +1,8 @@
 """规划链路可用工具：本地赛事库、本地交通参考库、wttr.in 天气、可选联网搜索。"""
 from __future__ import annotations
 
+from urllib.parse import quote
+
 import json
 import re
 
@@ -47,7 +49,7 @@ def race_lookup(query: str) -> str:
 
 async def weather(city: str) -> str:
     """wttr.in 免费天气服务，无需 Key。"""
-    url = f"https://wttr.in/{city}?format=j1&lang=zh"
+    url = f"https://wttr.in/{quote(city.strip()[:40], safe='')}?format=j1&lang=zh"
     resp = await shared_client().get(
         url, headers={"User-Agent": "curl/8"}, timeout=config.TOOL_TIMEOUT)
     resp.raise_for_status()

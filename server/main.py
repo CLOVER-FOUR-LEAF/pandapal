@@ -31,6 +31,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import re
 import time
@@ -55,12 +56,25 @@ async def _lifespan(_app: FastAPI):
 app = FastAPI(title="PandaButler", docs_url=None, redoc_url=None, lifespan=_lifespan)
 
 
+# 前端无内联脚本/事件处理器，全部资源同源：CSP 可以直接收口到 'self'；
+# style 留 'unsafe-inline'（app.js 大量 el.style 赋值），img 放 data:（favicon 是内嵌 SVG）。
+_CSP = (
+    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data:; connect-src 'self'; font-src 'self'; "
+    "object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
+)
+
+
 @app.middleware("http")
 async def _security_headers(request: Request, call_next):
     resp = await call_next(request)
     resp.headers["X-Content-Type-Options"] = "nosniff"
     resp.headers["Referrer-Policy"] = "same-origin"
     resp.headers["X-Frame-Options"] = "DENY"
+    resp.headers["Content-Security-Policy"] = _CSP
+    # vendored 依赖版本固定，长缓存安全；其余静态文件交给 ETag/304
+    if request.url.path.startswith("/static/vendor/"):
+        resp.headers["Cache-Control"] = "public, max-age=86400, immutable"
     return resp
 
 
@@ -186,6 +200,14 @@ async def _auth_session(request: Request, cap: str, name: str | None = None):
 _LOGIN_HITS: dict[str, list[float]] = {}
 
 
+def _cap_table(table: dict, limit: int) -> None:
+    """清完过期项仍超限（被刷）时，按最近一次访问时间淘汰最旧的，保证内存有硬上限。"""
+    if len(table) <= limit:
+        return
+    for k in sorted(table, key=lambda k: table[k][-1] if table[k] else 0)[:len(table) - limit]:
+        table.pop(k, None)
+
+
 def _login_throttle(ip: str) -> bool:
     """每 IP 每分钟最多 30 次登录尝试，挡住脚本撞密码。"""
     now = time.monotonic()
@@ -198,6 +220,7 @@ def _login_throttle(ip: str) -> bool:
         # 表只增不减会渗漏内存：超过阈值时惰性清掉一分钟内没来过的 IP
         for k in [k for k, v in _LOGIN_HITS.items() if not v or now - v[-1] >= 60]:
             _LOGIN_HITS.pop(k, None)
+        _cap_table(_LOGIN_HITS, 2000)
     return ok
 
 
@@ -215,10 +238,26 @@ async def _auth_response(res: dict) -> dict:
     }
 
 
+def _trusted_proxy(host: str) -> bool:
+    """直连对端是回环/私网/链路本地地址才视为可信反代（本机 uvicorn 或内网 nginx）。"""
+    try:
+        ip = ipaddress.ip_address(host or "")
+    except ValueError:
+        return False
+    return ip.is_loopback or ip.is_private or ip.is_link_local
+
+
 def _client_ip(request: Request) -> str:
-    """真实客户端 IP：nginx 反代后 client.host 全是回环地址，取 X-Forwarded-For 首跳。"""
-    fwd = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
-    return fwd or (request.client.host if request.client else "-")
+    """真实客户端 IP：仅在直连对端可信时采信 X-Forwarded-For 首跳。
+
+    公网直连部署（无反代）时 client.host 就是真实地址——无条件信 XFF 会让
+    撞库脚本伪造 IP 绕过登录限流。"""
+    peer = request.client.host if request.client else "-"
+    if _trusted_proxy(peer):
+        fwd = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+        if fwd:
+            return fwd
+    return peer
 
 
 def _throttled(request: Request) -> None:
@@ -241,6 +280,7 @@ def _chat_throttle(key: str) -> bool:
     if len(_CHAT_HITS) > 500:
         for k in [k for k, v in _CHAT_HITS.items() if not v or now - v[-1] >= _CHAT_WIN]:
             _CHAT_HITS.pop(k, None)
+        _cap_table(_CHAT_HITS, 5000)
     return ok
 
 

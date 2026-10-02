@@ -60,13 +60,18 @@ CAP_NAMES = {
 # 口令可用环境变量覆盖——README 是公开的，线上部署务必改掉 PANDA_ADMIN_PASSWORD
 SEED_QA = ("熊猫最爱吃什么？", "竹子")
 SEED_ACCOUNTS = [
-    ("小豆", os.getenv("PANDA_CHILD_PASSWORD", "panda123"), "child", "小豆"),
-    ("豆豆妈", os.getenv("PANDA_PARENT_PASSWORD", "mama123"), "parent", "小豆"),
-    ("admin", os.getenv("PANDA_ADMIN_PASSWORD", "admin123"), "admin", "小豆"),
+    ("小豆", os.getenv("PANDA_CHILD_PASSWORD") or "panda123", "child", "小豆"),
+    ("豆豆妈", os.getenv("PANDA_PARENT_PASSWORD") or "mama123", "parent", "小豆"),
+    ("admin", os.getenv("PANDA_ADMIN_PASSWORD") or "admin123", "admin", "小豆"),
 ]
 
-# token -> {"username", "role", "child", "ts"}；落盘 data/tokens.json，重启不掉线
+# sha256(token) -> {"username", "role", "child", "ts"}；落盘 data/tokens.json，重启不掉线。
+# 只存哈希：tokens.json 即使泄露也拿不到可用的 Bearer 凭证。
 _tokens: dict[str, dict] = {}
+
+
+def _tkey(token: str) -> str:
+    return hashlib.sha256((token or "").encode("utf-8")).hexdigest()
 
 
 def _read_tokens() -> dict:
@@ -101,9 +106,10 @@ def _load_tokens() -> None:
     now = time.time()
     with _LOCK:
         _tokens.clear()
-        for token, u in _read_tokens().items():
+        for key, u in _read_tokens().items():
             if isinstance(u, dict) and not _expired(u, now):
-                _tokens[token] = u
+                # 旧版本存的是 48 位明文 token：读回时就地换成哈希，下次落盘即脱敏
+                _tokens[key if len(key) == 64 else _tkey(key)] = u
 
 
 def _hash(password: str, salt: str) -> str:
@@ -197,12 +203,13 @@ def _issue_token(username: str, rec: dict) -> dict:
     with _LOCK:
         for t in [t for t, u in _tokens.items() if _expired(u, now)]:
             _tokens.pop(t, None)
-        _tokens[token] = {
+        _tokens[_tkey(token)] = {
             "username": username, "role": rec["role"],
             "child": rec["child"], "ts": now,
         }
         _save_tokens()
-    return {"token": token, "user": dict(_tokens[token])}
+        user = dict(_tokens[_tkey(token)])
+    return {"token": token, "user": user}
 
 
 def login(username: str, password: str) -> dict:
@@ -322,17 +329,18 @@ def reset_password(username: str, answer: str, new_password: str) -> None:
 
 def logout(token: str) -> None:
     with _LOCK:
-        if _tokens.pop(token, None) is not None:
+        if _tokens.pop(_tkey(token), None) is not None:
             _save_tokens()
 
 
 def user_for_token(token: str) -> dict | None:
-    u = _tokens.get(token or "")
+    key = _tkey(token)
+    u = _tokens.get(key)
     if not u:
         return None
     if _expired(u, time.time()):
         with _LOCK:
-            _tokens.pop(token, None)
+            _tokens.pop(key, None)
             _save_tokens()
         return None
     return u
