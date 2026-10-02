@@ -8,6 +8,7 @@
   write_lock    按目录共享的可重入线程锁（同步 read-modify-write，如 graph 合并）
   slug          文件名 / id 安全的短标识（保留中文，ASCII 转小写）
   bigrams       中文 bigram + 英文数字整词，memory 主题检索与 graph 节点检索共用
+  clamp_lines   按字符预算保留最新的若干行，并显式标注折叠了多少行（注入 prompt 的体积上限）
 """
 from __future__ import annotations
 
@@ -25,6 +26,7 @@ _GUARD = threading.Lock()
 
 _SLUG_BAD = re.compile(r"[^\w一-鿿]+")
 _CJK_RUN = re.compile(r"[一-鿿]+")
+_CJK_CHAR = re.compile(r"[一-鿿]")
 _WORD = re.compile(r"[A-Za-z0-9]+")
 
 
@@ -79,12 +81,51 @@ def slug(text: str, maxlen: int = 40) -> str:
 
 
 def bigrams(text: str) -> set[str]:
-    """检索特征：中文按二元组切，英文/数字整词小写。"""
+    """检索特征：中文按二元组切，英文/数字整词小写。
+
+    中文单字也进特征集，否则"猫""琴"这类单字主题名切不出二元组、永远检索不到；
+    单字命中天然比二元组弱，是否注入由调用方的相关度门槛决定。
+    """
     text = text or ""
     runs = _CJK_RUN.findall(text)
-    return {r[i : i + 2] for r in runs for i in range(len(r) - 1)} | {
-        w.lower() for w in _WORD.findall(text)
-    }
+    return (
+        {r[i : i + 2] for r in runs for i in range(len(r) - 1)}
+        | {c for c in _CJK_CHAR.findall(text)}
+        | {w.lower() for w in _WORD.findall(text)}
+    )
+
+
+def clamp_lines(text: str, max_chars: int, keep: str = "tail") -> str:
+    """把多行文本压进字符预算，超出的部分显式标注折叠行数。
+
+    文件式记忆只增不减：注入 prompt 的正文若不封顶，一条 200 行的主题档案就会把
+    整段上下文吃掉。这里按"行"折叠（不打散单行语义），keep="tail" 保最新（事实流、
+    日记），keep="head" 保最前（结构化说明）。
+    """
+    body = (text or "").strip()
+    if max_chars <= 0:
+        return ""
+    if len(body) <= max_chars:
+        return body
+    lines = [ln for ln in body.splitlines() if ln.strip()]
+    if len(lines) <= 1:
+        return body[: max(max_chars - 1, 1)] + "…"
+    order = list(range(len(lines) - 1, -1, -1)) if keep == "tail" else list(range(len(lines)))
+    picked: list[int] = []
+    total = 0
+    for i in order:
+        cost = len(lines[i]) + 1
+        if picked and total + cost > max_chars:
+            break
+        picked.append(i)
+        total += cost
+    dropped = len(lines) - len(picked)
+    if dropped <= 0:
+        return body
+    mark = "- （更早的 {} 行已折叠）".format(dropped) if keep == "tail" else \
+        "- （更靠后的 {} 行已折叠）".format(dropped)
+    kept = [lines[i] for i in sorted(picked)]
+    return "\n".join([mark] + kept if keep == "tail" else kept + [mark])
 
 
 _FENCE_TAG = "memory_data"

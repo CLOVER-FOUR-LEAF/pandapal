@@ -85,10 +85,15 @@ cp .env.example .env   # 然后填入你的 LLM_API_KEY 等
 ## 七、测试说明
 
 ```bash
+# 离线自检：monkeypatch LLM，不联网跑通全链路
+.venv/bin/python tests/test_offline.py
+# 记忆层自检：不联网不起服务，直接打 MemoryStore 读写（41 项）
+.venv/bin/python tests/test_memory.py
 # 服务启动后：
 .venv/bin/python tests/test_api.py --base http://localhost:8000
 ```
-覆盖：健康检查、登录、问候、闲聊流式、规划链全链路（plan→node→card）、记忆本、记忆沉淀落盘、双会话并发隔离。
+覆盖：健康检查、登录、问候、闲聊流式、规划链全链路（plan→node→card）、记忆本、记忆沉淀落盘、双会话并发隔离；
+记忆层另测：注入字符预算与活跃主题择优、检索相关度/门槛/去重、归档累计计数与行数上限、读缓存写后失效。
 
 ## 八、团队成员
 
