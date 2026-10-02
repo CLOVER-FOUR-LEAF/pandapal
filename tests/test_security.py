@@ -63,5 +63,5 @@ def test_weather_city_quoted(monkeypatch):
             return _Resp()
 
     monkeypatch.setattr(tools, "shared_client", lambda: _Client())
-    asyncio.run(tools.weather("a/b?x=1"))
+    asyncio.run(tools.dispatch("weather", {"city": "a/b?x=1"}, tools.ToolCtx()))
     assert seen["url"].startswith("https://wttr.in/a%2Fb%3Fx%3D1?")

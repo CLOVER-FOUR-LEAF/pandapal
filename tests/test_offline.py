@@ -256,6 +256,27 @@ async def _run(client: httpx.AsyncClient) -> None:
                          for p in (CHILD_DIR / "topics").glob("*.md"))
     record("secret_not_in_files", "原神" not in topic_text and "秘密心事" not in topic_text)
 
+    # 5.5 会话历史落盘 + 重启恢复：history.json 已写 → 清内存会话 → 重登录仍能取回
+    hist_file = CHILD_DIR / "history.json"
+    hist_items = []
+    if hist_file.exists():
+        try:
+            hist_items = json.loads(hist_file.read_text(encoding="utf-8")).get("history", [])
+        except (OSError, json.JSONDecodeError):
+            hist_items = []
+    secret_kept = any(isinstance(m, dict) and m.get("secret") for m in hist_items)
+    record("history_persisted",
+           any(isinstance(m, dict) and m.get("role") == "user" for m in hist_items)
+           and secret_kept,
+           f"entries={len(hist_items)} secret={secret_kept}")
+    from server import sessions as _sess_mod  # noqa: E402
+    _sess_mod._sessions.clear()  # 模拟服务重启：内存会话清空，history.json 顶上
+    await post(client, "/api/session", {"name": NAME})
+    h = await get_json(client, f"/api/history{q}")
+    record("history_restored",
+           any("机器人比赛" in str(m.get("content", "")) for m in h.get("history", [])),
+           f"restored={len(h.get('history', []))}")
+
     # 6. 非法输入：stage 校验 → 400 而不是 500
     aid = aff["affairs"][0]["id"]
     r = await post(client, "/api/affairs",
@@ -378,6 +399,63 @@ async def _run(client: httpx.AsyncClient) -> None:
     record("exec_ancestor_scope",
            "结果#根" in ctx_s and "结果#甲支" in ctx_s and "结果#乙支" not in ctx_s,
            f"s_ctx={'根' if '结果#根' in ctx_s else '?'}/{'甲' if '结果#甲支' in ctx_s else '?'}/{'乙!' if '结果#乙支' in ctx_s else '乙ok'}")
+
+    # 10. 安全/缓存响应头：CSP 收口 'self'；vendor 依赖 immutable 长缓存
+    r = await client.get("/")
+    csp = r.headers.get("content-security-policy", "")
+    r2 = await client.get("/static/vendor/marked.esm.js")
+    cc = r2.headers.get("cache-control", "")
+    record("security_headers",
+           r.status_code == 200 and "script-src 'self'" in csp
+           and r2.status_code == 200 and "immutable" in cc,
+           f"csp={'y' if csp else 'n'} vendor_cache={cc[:36]}")
+
+    # 11. XFF 信任收窄：回环/私网可信，公网/非法值不信
+    from server import main as _main  # noqa: E402
+    record("xff_trust",
+           _main._trusted_proxy("127.0.0.1") and _main._trusted_proxy("::1")
+           and _main._trusted_proxy("192.168.1.5")
+           and not _main._trusted_proxy("8.8.8.8") and not _main._trusted_proxy("bogus"),
+           "")
+
+    # 12. 收件箱裁决联动：admin approve  pending → approved + 事务推进 followup
+    client.headers["Authorization"] = f"Bearer {token}"
+    inbox_items = (await get_json(client, f"/api/parent/inbox{q}")).get("items", [])
+    pend = next((i for i in inbox_items if i.get("status") == "pending"), None)
+    if pend is None:
+        record("inbox_decide", False, "无 pending 项")
+    else:
+        r = await post(client, f"/api/parent/inbox/{pend['id']}",
+                       {"name": NAME, "action": "approve"})
+        item = r.json().get("item", {})
+        aff = (await get_json(
+            client, f"/api/affairs/{item.get('affair_id')}{q}")).get("affair", {})
+        record("inbox_decide",
+               r.status_code == 200 and item.get("status") == "approved"
+               and aff.get("stage") == "followup",
+               f"status={r.status_code} item={item.get('status')} stage={aff.get('stage')}")
+
+    # 13. _open_affair 去重：bigram 覆盖命中认领旧事务，无关话题另开新单
+    sess2 = await _sess_mod.login(NAME)
+    _, aff_store, _ = _main._stores(sess2)
+    existing = await asyncio.to_thread(aff_store.list)
+    aid0 = existing[0]["id"] if existing else ""
+    hit_none = {"nodes": [], "edges": [], "block": ""}
+    claimed = await _main._open_affair(
+        sess2, aff_store, "离线筹备计划还差什么没弄", hit_none)
+    record("affair_dedup_claim",
+           bool(claimed[0]) and not claimed[1] and claimed[0]["id"] == aid0,
+           f"claimed={claimed[0]['id'] if claimed[0] else None} want={aid0}")
+    created = await _main._open_affair(
+        sess2, aff_store, "周末想去露营需要带啥", hit_none)
+    record("affair_dedup_new",
+           bool(created[0]) and created[1] and created[0]["id"] != aid0,
+           f"new={created[0]['id'] if created[0] else None}")
+
+
+def test_offline():
+    """pytest 入口：整套离线自检跑完且无 FAIL。"""
+    assert asyncio.run(main()) == 0, [r for r in RESULTS if not r[1]]
 
 
 if __name__ == "__main__":

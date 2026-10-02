@@ -348,6 +348,25 @@ def _run(base: str) -> int:
     except Exception as e:
         record("register_parent", False, str(e))
 
+    # 10.8 历史回读（重启示例）+ 传话筒 + 收件箱裁决路由
+    try:
+        st1, h = get(base, "/api/history?name=小豆", tk_child)
+        st2, rl = post_json(base, "/api/relay",
+                            {"name": "小豆", "direction": "teacher2parent",
+                             "text": "小豆今天主动举手回答问题，作业也提前交了。"}, tk_parent)
+        ok = (st1 == 200 and isinstance(h.get("history"), list) and len(h["history"]) >= 2
+              and st2 == 200 and bool(rl.get("parent_text") or rl.get("message")))
+        record("history_relay", ok, f"hist={len(h.get('history', []))} relay={st2}")
+    except Exception as e:
+        record("history_relay", False, str(e))
+    # 裁决路由鉴权可达性：不存在的 iid → 404（过了能力关）；不点真条目，不动演示档
+    try:
+        st, _ = post_json(base, "/api/parent/inbox/nonexistent",
+                          {"name": "小豆", "action": "approve"}, tk_parent)
+        record("inbox_decide_route", st == 404, f"status={st}")
+    except Exception as e:
+        record("inbox_decide_route", False, str(e))
+
     # 11. 会话隔离 + 并发不崩（自动注册的新孩子账号 + 小豆同时聊）
     try:
         guest = login(base, GUEST, "pw123")  # 未知名 → 自动注册 child

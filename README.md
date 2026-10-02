@@ -25,7 +25,7 @@
 ### 安装步骤
 ```bash
 python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
+.venv/bin/pip install -r requirements-dev.txt   # 仅运行服务可用 requirements.txt
 cp .env.example .env   # 然后填入你的 LLM_API_KEY 等
 ```
 
@@ -43,9 +43,9 @@ cp .env.example .env   # 然后填入你的 LLM_API_KEY 等
 |---|---|---|---|
 | `小豆` | `panda123` | 孩子 | 聊天 / 悄悄话 / 梦想 / 星球 / 事务 / 记忆本 / 成长（自己的完整档案） |
 | `豆豆妈` | `mama123` | 家长 | 收件箱确认、传话筒 + 孩子档案的只读视图（悄悄话服务端强制过滤） |
-| `admin` | `admin123` | 评委 | 全部能力 + `/api/logs` 调用留痕 + 孩子/家长视角切换 |
+| `admin` | `admin123`（登录页不再提供一键入口，手动输入） | 评委 | 全部能力 + `/api/logs` 调用留痕 + 孩子/家长视角切换 |
 
-输入未注册的用户名会自动创建「孩子」账号并绑定同名空白档案。登录卡还有**注册**（选孩子/家长身份，家长需填孩子登录名绑定档案）与**忘记密码**（答对注册时设的密保问题即可重置，旧 token 全部作废）两个面板；演示账号统一预置密保「熊猫最爱吃什么？/ 竹子」，开箱可演找回流程。种子账号口令可用 `PANDA_CHILD/PARENT/ADMIN_PASSWORD` 覆盖（仅首次生成 users.json 时生效，线上部署务必改掉）；`data/aliases.seed.json` 可配登录名别名（如 `xiaodou`→`小豆`），别名只解析到已存在的账号、照常校验密码，绝不会绕过密码或蹭到别人的档案。除 `/api/health`、`/api/auth/*` 与静态页外，全部接口要求 `Authorization: Bearer <token>`；非 admin 只能访问自己绑定的孩子档案，越权一律 403；家长账号是孩子档案的只读视图（收件箱确认与传话筒除外）。密码与密保答案 PBKDF2 加盐存 `data/users.json`，token 落 `data/tokens.json`（均不入库），默认 7 天有效、重启不掉登录。
+输入未注册的用户名会自动创建「孩子」账号并绑定同名空白档案。登录卡还有**注册**（选孩子/家长身份，家长需填孩子登录名绑定档案）与**忘记密码**（答对注册时设的密保问题即可重置，旧 token 全部作废）两个面板；演示账号统一预置密保「熊猫最爱吃什么？/ 竹子」，开箱可演找回流程。种子账号口令可用 `PANDA_CHILD/PARENT/ADMIN_PASSWORD` 覆盖（仅首次生成 users.json 时生效，线上部署务必改掉）；`data/aliases.seed.json` 可配登录名别名（如 `xiaodou`→`小豆`），别名只解析到已存在的账号、照常校验密码，绝不会绕过密码或蹭到别人的档案。除 `/api/health`、`/api/auth/*` 与静态页外，全部接口要求 `Authorization: Bearer <token>`；非 admin 只能访问自己绑定的孩子档案，越权一律 403；家长账号是孩子档案的只读视图（收件箱确认与传话筒除外）。密码与密保答案 PBKDF2 加盐存 `data/users.json`，token 仅以 SHA-256 哈希落 `data/tokens.json`（均不入库），默认 7 天有效、重启不掉登录。
 
 ## 四、核心功能
 
@@ -59,6 +59,7 @@ cp .env.example .env   # 然后填入你的 LLM_API_KEY 等
 | 任务拆解：LLM 输出 JSON DAG，校验去环重试 | `server/planner.py` |
 | 按依赖并行执行 + SSE 实时状态 | `server/executor.py` |
 | 结构化卡片合成 | `server/synth.py` |
+| 代办文书（"帮我写份自我介绍/发言稿"→LLM 真写全文→文稿卡+落盘 `drafts.json` 挂回事务） | `server/actions.py` `draft` |
 | 文件式记忆读写：轮后 LLM 抽取→topics/daily/MEMORY；单写锁+原子写 | `server/memory.py` |
 | 工具：本地赛事库 / wttr.in 天气 / 可选联网搜索 | `server/tools.py` |
 | 记忆本页：主题分组+时间线+长期记忆 | `web/` + `GET /api/memory` |
@@ -85,10 +86,16 @@ cp .env.example .env   # 然后填入你的 LLM_API_KEY 等
 ## 七、测试说明
 
 ```bash
-# 服务启动后：
+# 不花 Key 的离线自检（monkeypatch LLM，跑在临时数据目录）：
+.venv/bin/python tests/test_offline.py
+
+# 服务启动后的端到端用例（真实调 LLM）：
 .venv/bin/python tests/test_api.py --base http://localhost:8000
 ```
-覆盖：健康检查、登录、问候、闲聊流式、规划链全链路（plan→node→card）、记忆本、记忆沉淀落盘、双会话并发隔离。
+离线覆盖：登录 → 晨报 → plan 全链路 SSE 事件顺序 → 记忆/事务/清单落盘 → 悄悄话 private 强制 →
+图谱视角白名单 → 家长只读边界 → 别名防绕过 → 撞档隔离 → query token 收窄 → 限频 →
+历史落盘与重启恢复 → 收件箱裁决联动 → 事务去重 → 安全/缓存响应头。
+在线覆盖：以上真实链路 + 问候、记忆沉淀、双会话并发、注册/密保找回、成长雷达、传话筒。
 
 ## 八、团队成员
 
