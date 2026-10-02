@@ -1652,6 +1652,32 @@ body[data-theme="dark"] .btn-reject { color: #fb7185; background: rgba(251, 113,
   border-radius: 0 var(--r-sm) var(--r-sm) 0;
 }
 
+/* 家长周报：在收件箱/传话筒上方，按需生成，内容多时自身滚动不挤压下面两栏 */
+#weekly-panel { flex: none; }
+#weekly-panel .panel-head { flex-wrap: wrap; }
+.weekly-out { padding: 4px 18px 16px; max-height: 42vh; overflow-y: auto; }
+.weekly-headline { font-size: 15.5px; font-weight: 700; color: var(--ink); line-height: 1.6; margin: 6px 0 10px; }
+.weekly-stats { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.weekly-stat {
+  font-size: 12px; color: var(--ink-dim);
+  padding: 5px 11px; border-radius: 999px;
+  background: var(--card-2); border: 1px solid var(--line-strong);
+}
+.weekly-stat b { color: var(--bamboo); font-size: 14px; margin-right: 3px; font-variant-numeric: tabular-nums; }
+.weekly-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.weekly-sec-head { font-size: 12px; font-weight: 750; letter-spacing: .06em; color: var(--bamboo-deep); margin-bottom: 6px; }
+.weekly-sec.is-watch .weekly-sec-head { color: var(--amber); }
+.weekly-sec ul { margin: 0; padding-left: 18px; }
+.weekly-sec li { font-size: 13.5px; color: var(--ink-2); line-height: 1.7; }
+.weekly-praise { font-size: 13.5px; color: var(--ink-2); margin: 10px 0 0; }
+.weekly-foot { font-size: 11.5px; color: var(--ink-dim); margin: 10px 0 0; }
+#memory-view .topbar #export-btn { margin-left: 10px; }
+@media (max-width: 720px) {
+  .weekly-grid { grid-template-columns: 1fr; }
+  #memory-view .topbar #export-btn { margin-left: 0; }
+  #parent-view .seg { flex-wrap: wrap; border-radius: var(--r); }
+}
+
 /* --------------------------- 13 成长视图 */
 #growth-view { display: flex; flex-direction: column; gap: var(--gap); padding: var(--gap); min-height: 100dvh; }
 #growth-view .topbar { flex: none; }

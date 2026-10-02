@@ -901,6 +901,8 @@ function resetUserUI() {
   setHidden("#secret-note", true);
   setRelayCol("#relay-t2p", "");
   setRelayCol("#relay-c2t", "");
+  set("#weekly-out", "");
+  setHidden("#weekly-out", true);
   const ri = $("#relay-input");
   if (ri) ri.value = "";
   set("#growth-radar", "");
@@ -2707,6 +2709,11 @@ async function runRelay() {
   }
   if (btn) btn.disabled = true;
   try {
+    if (state.relayDir === "notice") {
+      await runNotice(text);
+      if (input) input.value = "";
+      return;
+    }
     const resp = await api("/api/relay", jsonOpts({ name: state.name, direction: state.relayDir, text }));
     renderRelay(await resp.json());
     if (input) input.value = "";
@@ -2752,10 +2759,32 @@ function setRelayCol(sel, text, advice) {
 const RELAY_HEADS = {
   teacher2parent: ["给家长", "给孩子"],
   child2teacher: ["给老师", "备注建议"],
+  notice: ["给家长 · 专属版", "给孩子 · 已落成待办"],
+};
+const RELAY_PLACEHOLDERS = {
+  teacher2parent: "把老师的话粘进来，管家翻成家长能听懂的话…",
+  child2teacher: "把孩子的原话写进来，管家整理成得体的话发给老师…",
+  notice: "把学校/机构的通知原文粘进来，管家结合孩子的情况出专属版，并建好事务、清单和提醒…",
 };
 
+/** 通知落地：专属版文案 + 事务/清单/提醒真落盘，结果分两栏展示 */
+async function runNotice(text) {
+  const resp = await api("/api/notice", jsonOpts({ name: state.name, text }));
+  const data = await resp.json();
+  const res = (data && data.results && data.results[0]) || {};
+  const personal = (res.personal || []).map((p) => `· ${p}`).join("\n");
+  setRelayCol("#relay-t2p", [res.parent_text, personal && `只针对${state.name}：\n${personal}`]
+    .filter(Boolean).join("\n\n"));
+  const aff = res.affair || {};
+  const done = (res.actions || []).filter((a) => a.ok).map((a) => a.detail).join("；");
+  setRelayCol("#relay-c2t", res.child_text || "",
+    `${res.created ? "已新建" : "已更新"}事务「${aff.title || ""}」${done ? `：${done}` : ""}`);
+  toast(res.created ? `管家接下了「${aff.title || "这件事"}」` : `「${aff.title || "这件事"}」已更新`);
+  loadAffairs();
+}
+
 function setRelayDir(dir) {
-  state.relayDir = dir === "child2teacher" ? "child2teacher" : "teacher2parent";
+  state.relayDir = RELAY_HEADS[dir] ? dir : "teacher2parent";
   document.querySelectorAll("#parent-view .seg-btn").forEach((b) => {
     b.classList.toggle("active", b.dataset.direction === state.relayDir);
   });
@@ -2765,10 +2794,68 @@ function setRelayDir(dir) {
   if (c1) c1.textContent = heads[0];
   if (c2) c2.textContent = heads[1];
   const input = $("#relay-input");
-  if (input) {
-    input.placeholder = state.relayDir === "child2teacher"
-      ? "把孩子的原话写进来，管家整理成得体的话发给老师…"
-      : "把老师的话粘进来，管家翻成家长能听懂的话…";
+  if (input) input.placeholder = RELAY_PLACEHOLDERS[state.relayDir];
+  const btn = $("#relay-btn");
+  if (btn) btn.textContent = state.relayDir === "notice" ? "交给管家落地" : "翻译转达";
+}
+
+/* 家长周报：按需生成（一次 LLM 调用），不随进入页面自动跑 */
+async function loadWeekly() {
+  const box = $("#weekly-out");
+  const btn = $("#weekly-btn");
+  if (!box) return;
+  if (btn) btn.disabled = true;
+  box.classList.remove("hidden");
+  box.innerHTML = '<p class="empty-hint">管家正在翻这一周的记录…</p>';
+  try {
+    const resp = await api(`/api/parent/weekly?${q(state.name)}`);
+    renderWeekly(box, await resp.json());
+    if (btn) btn.textContent = "重新生成";
+  } catch (e) {
+    box.innerHTML = `<p class="empty-hint">周报暂时生成不了：${escapeHtml(e.message)}</p>`;
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function renderWeekly(box, data) {
+  const r = (data && data.report) || {};
+  const s = (data && data.stats) || {};
+  const list = (title, items, cls) => (items && items.length
+    ? `<div class="weekly-sec ${cls}"><div class="weekly-sec-head">${title}</div><ul>${
+      items.map((i) => `<li>${escapeHtml(i)}</li>`).join("")}</ul></div>` : "");
+  const stat = (n, label) => `<span class="weekly-stat"><b>${int(n, 0)}</b>${label}</span>`;
+  box.innerHTML =
+    `<p class="weekly-headline">${escapeHtml(r.headline || "")}</p>
+     <div class="weekly-stats">${stat(s.affairs_open, "件在办")}${stat(s.moved, "件推进")}${
+       stat(s.closed, "件办完")}${stat(s.new_memories, "条新变化")}${stat(s.inbox_pending, "件待你确认")}</div>
+     <div class="weekly-grid">${list("这周的进展", r.highlights, "")}${list("接下来留意", r.watch, "is-watch")}</div>
+     ${r.suggestion ? `<div class="relay-advice">周末可以做：${escapeHtml(r.suggestion)}</div>` : ""}
+     ${r.praise ? `<p class="weekly-praise">可以当面夸 TA：“${escapeHtml(r.praise)}”</p>` : ""}
+     <p class="weekly-foot">${escapeHtml(data.since || "")} ~ ${escapeHtml(data.until || "")}${
+       s.secret_count ? ` · 另有 ${int(s.secret_count, 0)} 条悄悄话，管家替 TA 保密，未计入` : ""}${
+       r.llm === false ? " · 管家的大脑暂时连不上，以上是统计数据" : ""}</p>`;
+}
+
+/* 童年备忘录：整份档案打包下载（fetch + Blob，token 不进 URL） */
+async function exportMemoir() {
+  const btn = $("#export-btn");
+  if (btn) btn.disabled = true;
+  try {
+    const resp = await api(`/api/export?${q(state.name)}`);
+    const url = URL.createObjectURL(await resp.blob());
+    const a = el("a");
+    a.href = url;
+    a.download = `童年备忘录-${state.name}.zip`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    toast("档案已打包下载：数据即文件，它属于你自己");
+  } catch (e) {
+    toast(`导出失败：${e.message}`);
+  } finally {
+    if (btn) btn.disabled = false;
   }
 }
 
@@ -3026,6 +3113,7 @@ async function loadLogs() {
 }
 
 async function loadMemory() {
+  setHidden("#export-btn", state.authRole === "parent"); // 档案里有悄悄话，只交还给孩子本人
   const md = $("#memory-md");
   const topicsBox = $("#memory-topics");
   const dailyBox = $("#memory-daily");
@@ -3273,6 +3361,8 @@ function bind() {
   on("#secret-btn", toggleSecret);
   on("#dream-btn", runDream);
   on("#relay-btn", runRelay);
+  on("#weekly-btn", loadWeekly);
+  on("#export-btn", exportMemoir);
   on("#memory-back", () => go("main"));
   on("#logs-back", () => go("main"));
   // 退出按钮：主视图顶栏 + 各子视图导航里的 [data-act="logout"] 统一生效
@@ -3361,7 +3451,13 @@ function bind() {
   });
 }
 
+function registerSW() {
+  if (!("serviceWorker" in navigator) || !window.isSecureContext) return;
+  navigator.serviceWorker.register("sw.js").catch((e) => console.warn("[app] SW 注册失败：", e && e.message));
+}
+
 function boot() {
+  registerSW();
   if ($("#login-panda")) {
     try {
       loginPanda = mountPanda($("#login-panda"));

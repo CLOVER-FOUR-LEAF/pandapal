@@ -1,0 +1,16 @@
+{
+  "name": "PandaButler 熊猫管家",
+  "short_name": "熊猫管家",
+  "description": "孩子的终身陪伴成长管家：记住你的一切、听懂你的意图、主动把事办了",
+  "lang": "zh-CN",
+  "start_url": "../",
+  "scope": "../",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0a1310",
+  "theme_color": "#0c1512",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "maskable" }
+  ]
+}

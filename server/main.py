@@ -33,6 +33,7 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import json
+import mimetypes
 import re
 import time
 from contextlib import asynccontextmanager
@@ -52,6 +53,8 @@ async def _lifespan(_app: FastAPI):
     yield
     await llm.close_shared_clients()
 
+
+mimetypes.add_type("application/manifest+json", ".webmanifest")  # PWA 清单，默认会被当成 octet-stream
 
 app = FastAPI(title="PandaButler", docs_url=None, redoc_url=None, lifespan=_lifespan)
 
@@ -1570,6 +1573,18 @@ async def api_health():
 async def index():
     return FileResponse(config.WEB_DIR / "index.html")
 
+
+@app.get("/sw.js")
+async def service_worker():
+    """PWA service worker 必须从根路径下发，作用域才能覆盖整个应用；no-cache 保证升级及时生效。"""
+    return FileResponse(config.WEB_DIR / "sw.js", media_type="text/javascript",
+                        headers={"Cache-Control": "no-cache"})
+
+
+# 家庭侧服务（周报 / 通知落地 / 导出）在独立模块里，复用本文件的鉴权与会话辅助，故放在末尾挂载
+from .family import router as _family_router  # noqa: E402
+
+app.include_router(_family_router)
 
 app.mount("/static", StaticFiles(directory=config.WEB_DIR), name="static")
 
