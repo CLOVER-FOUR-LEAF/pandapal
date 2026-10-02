@@ -68,3 +68,32 @@ def test_weather_city_quoted(monkeypatch):
     monkeypatch.setattr(tools, "shared_client", lambda: _Client())
     asyncio.run(tools.dispatch("weather", {"city": "a/b?x=1"}, tools.ToolCtx()))
     assert seen["url"].startswith("https://wttr.in/a%2Fb%3Fx%3D1?")
+
+
+def test_admin_cannot_be_reset_with_public_seed_answer():
+    """README 公开了演示密保「竹子」：它绝不能拿来重置 admin（否则能接管全部档案）。"""
+    auth.ensure_seed()
+    users = auth._read_users()
+    assert not users["admin"].get("ahash"), "admin 不该挂公开演示密保"
+    import pytest
+    with pytest.raises(ValueError):
+        auth.reset_password("admin", auth.SEED_QA[1], "hacked123")
+    # 孩子演示号仍可开箱演示找回流程
+    assert users["小豆"].get("ahash")
+
+
+def test_backfill_strips_seed_answer_from_existing_admin():
+    """老部署的 users.json 里 admin 已经挂上了公开密保：启动时要摘掉。"""
+    auth.ensure_seed()
+    users = auth._read_users()
+    auth._with_question(users["admin"], auth.SEED_QA[0], auth.SEED_QA[1])
+    auth._write_users(users)
+    auth._backfill_seed_qa()
+    assert not auth._read_users()["admin"].get("ahash")
+
+
+def test_seed_with_custom_password_gets_no_public_answer(monkeypatch):
+    monkeypatch.setenv("PANDA_CHILD_PASSWORD", "s3cret-pw")
+    assert not auth._seed_gets_qa("小豆", "child")
+    monkeypatch.delenv("PANDA_CHILD_PASSWORD")
+    assert auth._seed_gets_qa("小豆", "child")

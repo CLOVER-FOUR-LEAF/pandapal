@@ -60,6 +60,17 @@ CAP_NAMES = {
 # (用户名, 密码, 角色, 绑定档案)；种子账号统一带演示密保，忘密码流程开箱可演
 # 口令可用环境变量覆盖——README 是公开的，线上部署务必改掉 PANDA_ADMIN_PASSWORD
 SEED_QA = ("熊猫最爱吃什么？", "竹子")
+# 密保答案是公开的，所以只能挂在"本来口令就公开"的演示号上：
+#   * admin 一律不挂——否则任何人用「竹子」就能重置管理员密码、接管全部档案；
+#   * 用环境变量改过口令的种子号也不挂——改口令就是为了不让外人进，公开密保会把它白白送回去。
+_SEED_PW_ENV = {"小豆": "PANDA_CHILD_PASSWORD", "豆豆妈": "PANDA_PARENT_PASSWORD",
+                "admin": "PANDA_ADMIN_PASSWORD"}
+
+
+def _seed_gets_qa(username: str, role: str) -> bool:
+    return role != "admin" and not os.getenv(_SEED_PW_ENV.get(username, ""), "")
+
+
 SEED_ACCOUNTS = [
     ("小豆", os.getenv("PANDA_CHILD_PASSWORD") or "panda123", "child", "小豆"),
     ("豆豆妈", os.getenv("PANDA_PARENT_PASSWORD") or "mama123", "parent", "小豆"),
@@ -169,21 +180,32 @@ def ensure_seed() -> None:
         users = {}
         for username, password, role, child in SEED_ACCOUNTS:
             rec = _new_user(password, role, child)
-            _with_question(rec, SEED_QA[0], SEED_QA[1])
+            if _seed_gets_qa(username, role):
+                _with_question(rec, SEED_QA[0], SEED_QA[1])
             users[username] = rec
         _write_users(users)
 
 
 def _backfill_seed_qa() -> None:
-    """老 users.json 里已存在的种子账号补上演示密保，忘密码流程开箱可演。"""
-    seeds = {name for name, *_ in SEED_ACCOUNTS}
+    """老 users.json 里的种子账号对齐演示密保：该有的补上，不该有的（admin / 改过口令的）摘掉。
+
+    摘掉只针对仍是公开演示答案的记录——用户自己设过的密保不动。
+    """
     with _LOCK:
         users = _read_users()
         dirty = False
-        for name in seeds:
+        for name, _pw, role, _child in SEED_ACCOUNTS:
             rec = users.get(name)
-            if rec and not rec.get("q"):
-                _with_question(rec, SEED_QA[0], SEED_QA[1])
+            if not rec:
+                continue
+            if _seed_gets_qa(name, rec.get("role", role)):
+                if not rec.get("q"):
+                    _with_question(rec, SEED_QA[0], SEED_QA[1])
+                    dirty = True
+            elif rec.get("ahash") and rec.get("asalt") and hmac.compare_digest(
+                    rec["ahash"], _hash_answer(SEED_QA[1], rec["asalt"])):
+                for k in ("q", "asalt", "ahash"):
+                    rec.pop(k, None)
                 dirty = True
         if dirty:
             try:
@@ -314,6 +336,9 @@ def reset_password(username: str, answer: str, new_password: str) -> None:
         rec = users.get(username)
         if rec is None:
             raise ValueError("没有这个账号，先去注册吧")
+        if rec.get("role") == "admin":
+            # 管理员能看全部孩子的档案：不走密保这条弱通道，只能在服务器上改
+            raise ValueError("管理员账号不支持密保找回，请在服务器上重置")
         if not rec.get("ahash"):
             raise ValueError("这个账号注册时没设密保，找管理员帮忙改吧")
         if not hmac.compare_digest(rec["ahash"], _hash_answer(answer, rec["asalt"])):

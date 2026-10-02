@@ -3,6 +3,8 @@
 # 线上形态：systemd 单元 pandapal.service，uvicorn 绑 127.0.0.1:8017，
 # nginx xustalis.site 443 把 /pandapal/ 反代过去（前缀剥离）。
 # 用法：./deploy.sh
+# 注意：.env 只存在于服务端（LLM 密钥、演示口令），rsync 必须排除它——
+# 否则 --delete 会在本地没有 .env 时把服务端的删掉，有时则用本地值覆盖。
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -14,6 +16,7 @@ echo "==> 同步代码到 ${REMOTE}:~/${APP_DIR}"
 rsync -avz --delete \
   --exclude='.git/' --exclude='.venv/' --exclude='__pycache__/' \
   --exclude='.DS_Store' --exclude='*.log' \
+  --exclude='.env' --exclude='.env.*' \
   --exclude='data/logs/' --exclude='data/users.json' \
   --exclude='data/tokens.json' --exclude='data/profiles.json' \
   --exclude='history.json' \
