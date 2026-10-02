@@ -9,6 +9,9 @@ from .memory import MemoryStore
 
 Emit = Callable[[dict], Awaitable[None]]
 
+NODE_TIMEOUT_S = 75   # 单节点总时限：一个卡死的联网工具不能拖住整条链
+NODE_RETRIES = 1      # 瞬时失败（网络抖动/限流）重试次数；超时不重试，直接降级
+
 
 async def _run_llm_node(ctx: tuple[str, str], event: str, node: dict, results: dict) -> str:
     context = "\n\n".join(f"【{nid}】{text}" for nid, text in results.items())
@@ -76,8 +79,19 @@ async def run_plan(
         await emit({"type": "node", "id": node["id"], "title": node["title"], "status": "running"})
         try:
             anc = _ancestors(node)
-            text = await _run_node(ctx, store, event, node,
-                                   {k: v for k, v in results.items() if k in anc})
+            upstream = {k: v for k, v in results.items() if k in anc}
+            text = ""
+            for attempt in range(NODE_RETRIES + 1):
+                try:
+                    text = await asyncio.wait_for(
+                        _run_node(ctx, store, event, node, upstream), NODE_TIMEOUT_S)
+                    break
+                except asyncio.TimeoutError:
+                    raise
+                except Exception:
+                    if attempt >= NODE_RETRIES:
+                        raise
+                    await asyncio.sleep(0.8)
             results[node["id"]] = text
             statuses[node["id"]] = "done"
             await emit({
@@ -85,7 +99,8 @@ async def run_plan(
                 "status": "done", "detail": text[:400],
             })
         except Exception as e:  # noqa: BLE001 单节点失败不拖垮整链
-            results[node["id"]] = f"（本环节查询失败：{e}，按常识处理）"
+            reason = "超时" if isinstance(e, asyncio.TimeoutError) else str(e)
+            results[node["id"]] = f"（本环节查询失败：{reason}，按常识处理）"
             statuses[node["id"]] = "error"
             await emit({"type": "node", "id": node["id"], "title": node["title"], "status": "error"})
         finally:

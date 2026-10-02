@@ -9,3 +9,6 @@ pymupdf>=1.24,<2
 python-docx>=1.1,<2
 openpyxl>=3.1,<4
 python-pptx>=1.0,<2
+# 时区数据：Windows 的 Python 不自带 zoneinfo 数据库，不装这条 tools.now 的
+# tz= 参数（Asia/Shanghai 之类）在 Windows 上会直接抛 ZoneInfoNotFoundError
+tzdata>=2024.1

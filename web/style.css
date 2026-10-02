@@ -193,6 +193,33 @@ a { color: var(--bamboo); }
 .panel-sub {
   margin-left: auto; font-size: 11px; color: var(--ink-dim); white-space: nowrap;
 }
+
+/* 朗读开关：跟副标题并排。副标题用 margin-left:auto 顶到右边，
+   喇叭按钮排它后面，整块靠右对齐。 */
+.voice-btn {
+  display: inline-grid; place-items: center; flex: none;
+  width: 26px; height: 26px; margin-left: 8px; padding: 0;
+  border-radius: 9px; cursor: pointer; color: var(--ink-dim);
+  background: transparent; border: 1px solid transparent;
+  transition: color .16s, background .16s, border-color .16s;
+}
+.voice-btn:hover { background: rgba(95, 211, 155, .10); color: var(--bamboo); }
+.voice-btn:focus-visible { outline: 2px solid var(--bamboo); outline-offset: 2px; }
+.voice-btn .ic { width: 15px; height: 15px; }
+.voice-btn[aria-pressed="true"] {
+  color: var(--bamboo);
+  background: rgba(95, 211, 155, .12);
+  border-color: rgba(95, 211, 155, .24);
+}
+/* 正在出声：喇叭轻轻呼吸，和面板副标题的"进行中"呼吸点同一套语言 */
+.voice-btn[aria-pressed="true"].speaking .ic { animation: voice-pulse 1.1s ease-in-out infinite; }
+@keyframes voice-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: .55; transform: scale(.9); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .voice-btn[aria-pressed="true"].speaking .ic { animation: none; }
+}
 .panel-body { padding: 12px 16px; }
 .panel-body.scroll { overflow-y: auto; }
 
@@ -2155,3 +2182,33 @@ button.admin-row:hover, .admin-pick:hover { background: var(--card-2); }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .001s !important; transition-duration: .001s !important; }
 }
+
+/* 和管家说：项目 / 清空 */
+.chat-tools { display: inline-flex; gap: 4px; margin-left: 8px; }
+.chat-tool {
+  font: inherit; font-size: 12px; padding: 3px 8px; cursor: pointer;
+  border-radius: 9px; color: var(--ink-dim); background: transparent;
+  border: 1px solid rgba(255, 255, 255, .12);
+  transition: color .16s, background .16s, border-color .16s;
+}
+.chat-tool:hover { color: var(--bamboo); border-color: var(--bamboo); background: rgba(95, 211, 155, .10); }
+.chat-tool.danger:hover { color: #ff7b7b; border-color: #ff7b7b; background: rgba(255, 123, 123, .10); }
+.chat-tool:focus-visible { outline: 2px solid var(--bamboo); outline-offset: 2px; }
+.chat-tool:disabled { opacity: .45; cursor: not-allowed; }
+.proj-menu {
+  margin: 0 12px 6px; padding: 6px; max-height: 220px; overflow: auto;
+  border-radius: 12px; border: 1px solid rgba(255, 255, 255, .12);
+  background: rgba(20, 28, 34, .96);
+}
+.proj-menu.hidden { display: none; }
+.proj-item { display: flex; align-items: center; gap: 6px; padding: 4px 6px; border-radius: 8px; }
+.proj-item:hover { background: rgba(95, 211, 155, .08); }
+.proj-item .pi-main {
+  flex: 1; min-width: 0; text-align: left; font: inherit; font-size: 13px; cursor: pointer;
+  color: inherit; background: none; border: 0; padding: 2px 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.proj-item .pi-meta { font-size: 11px; color: var(--ink-dim); flex: none; }
+.proj-item .pi-del { font: inherit; font-size: 12px; cursor: pointer; color: var(--ink-dim); background: none; border: 0; }
+.proj-item .pi-del:hover { color: #ff7b7b; }
+.proj-empty { padding: 8px; font-size: 12px; color: var(--ink-dim); text-align: center; }

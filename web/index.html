@@ -178,6 +178,16 @@
   <symbol id="i-x" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round">
     <path d="M6 6l12 12M18 6L6 18"/>
   </symbol>
+  <symbol id="i-sound" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M4 9.5h3l4.5-3.5v12L7 14.5H4z"/>
+    <path d="M15 9.2a4 4 0 0 1 0 5.6"/>
+    <path d="M17.8 6.6a7.7 7.7 0 0 1 0 10.8"/>
+  </symbol>
+  <symbol id="i-sound-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M4 9.5h3l4.5-3.5v12L7 14.5H4z"/>
+    <path d="M15.5 9.8l5 4.4"/>
+    <path d="M20.5 9.8l-5 4.4"/>
+  </symbol>
   <symbol id="i-spark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
     <path d="M12 3.5l1.9 4.6 4.6 1.9-4.6 1.9L12 16.5l-1.9-4.6-4.6-1.9 4.6-1.9z"/>
     <path d="M18.5 15.5l.9 2.1 2.1.9-2.1.9-.9 2.1-.9-2.1-2.1-.9 2.1-.9z"/>
@@ -547,8 +557,19 @@
       <div class="panel-head">
         <h2 id="chat-head"><svg class="ic" aria-hidden="true"><use href="#i-chat"/></svg> 和管家说</h2>
         <span id="chat-sub" class="panel-sub" aria-live="polite">回复即生成</span>
+        <span id="chat-tools" class="chat-tools">
+          <button id="proj-new" class="chat-tool" type="button" title="新建项目：当前对话自动归档，开一个空白对话">＋ 新项目</button>
+          <button id="proj-list" class="chat-tool" type="button" aria-expanded="false" title="切换到之前归档的项目">项目</button>
+          <button id="chat-clear" class="chat-tool danger" type="button" title="清空当前对话记录（不影响已记住的记忆）">清空</button>
+        </span>
+        <button id="voice-btn" class="voice-btn hidden" type="button"
+                aria-label="朗读：点一下打开管家的声音" aria-pressed="false"
+                title="管家的声音">
+          <svg class="ic" aria-hidden="true"><use href="#i-sound-off"/></svg>
+        </button>
       </div>
 
+      <div id="proj-menu" class="proj-menu hidden" role="menu" aria-label="历史项目"></div>
       <div id="chat" class="chat scroll" role="log" aria-live="polite" aria-label="对话流">
         <div class="chat-welcome">
           <div class="cw-logo" aria-hidden="true"><svg class="ic"><use href="#i-logo"/></svg></div>

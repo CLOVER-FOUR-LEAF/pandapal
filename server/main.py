@@ -48,13 +48,14 @@ from fastapi.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, Field
 
 from . import (actions, affairs, auth, config, executor, files, graph, llm, memory, planner,
-               prompts, router, sessions, store, suggest, synth, tools)
+               prompts, router, sessions, store, suggest, synth, tools, tts, voice)
 
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
     yield
     await llm.close_shared_clients()
+    await tts.close_clients()
 
 
 mimetypes.add_type("application/manifest+json", ".webmanifest")  # PWA 清单，默认会被当成 octet-stream
@@ -206,6 +207,15 @@ class DreamReq(BaseModel):
     text: str = Field(default="", max_length=1000)
 
 
+class VoiceReq(BaseModel):
+    """手动改音色：朗读总开关、内置音色名，或直接写一段音色描述。"""
+    name: str = Field(default="", max_length=24)
+    enabled: bool | None = None
+    mode: str | None = Field(default=None, pattern="^(design|builtin)$")
+    style: str | None = Field(default=None, max_length=600)
+    voice: str | None = Field(default=None, max_length=24)
+
+
 def _sse(event: dict) -> str:
     return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
@@ -213,8 +223,81 @@ def _sse(event: dict) -> str:
 _SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
 
 
+def _rules(*parts: str) -> str:
+    """把若干条追加规则拼成 system 追加段（跳过空串）。"""
+    return "\n\n".join(p for p in parts if p)
+
+
+def _card_spoken(card: dict) -> str:
+    """卡片的口播稿：标题 + 第一条要点 + 收尾。
+
+    整张方案卡念出来是一分多钟的流水账，孩子听两秒就划走了——只留一句
+    "我给你理好了什么、接下来先做什么"的引导语。
+    """
+    parts = [str(card.get("title") or "").strip()]
+    for sec in card.get("sections") or []:
+        items = [str(i).strip() for i in (sec.get("items") or []) if str(i).strip()]
+        if items:
+            parts.append(items[0])
+            break
+    closing = str(card.get("closing") or "").strip()
+    if closing:
+        parts.append(closing)
+    return "。".join(p for p in parts if p)
+
+
+# 对话音优先级（高于问候/晨报这类环境音）
+P_CHAT = 2
+P_AMBIENT = 1
+
+# 语音轮次序号：进程内单调递增。作用有两个——
+#   1. 前端认出"迟到的旧一轮"并丢掉（问候 30 秒才合成完，期间可能已聊了两轮）
+#   2. 同优先级里更新的一轮覆盖上一条
+_voice_turn = 0
+
+
+def _next_turn() -> int:
+    global _voice_turn
+    _voice_turn += 1
+    return _voice_turn
+
+
+async def _speak_event(sess, text: str, *, caller: str, turn: int = 0,
+                       priority: int = P_AMBIENT,
+                       max_chars: int | None = None) -> dict | None:
+    """合成一段语音并返回 voice 事件载荷；不可用/失败返回 None。
+
+    turn 与 priority 一起决定"这条该不该播"：
+      priority —— 对话音（聊天/试音）= 2，环境音（问候/晨报）= 1。
+                  孩子主动发消息时，正在放的环境音要让路，别拿十秒前的晨报
+                  压着他刚问的问题。
+      turn     —— 轮次序号，在轮次开始时就分配好（见 _next_turn），不是合成完再发：
+                  问候要等 30 秒 LLM + 4 秒 TTS，聊天可能 5 秒就结束——按合成
+                  完成时间排的话，先开始的问候反而拿到更大的号，会把已经播完
+                  的聊天语音顶掉。
+    前端按 (priority, turn) 字典序比较，先比优先级再比轮次。
+
+    失败静默是刻意的：语音是锦上添花，没配 Key、额度用完、网关抽风都不该
+    让一次正常对话变成报错。
+    """
+    try:
+        prof = await asyncio.to_thread(voice.load, sess.dir)
+        if not prof.get("enabled", True):
+            return None
+        ev = await tts.speak(sess.dir, text, prof, caller=caller, max_chars=max_chars)
+        if ev is not None:
+            ev["turn"] = turn
+            ev["priority"] = priority
+        return ev
+    except Exception as e:  # noqa: BLE001
+        print(f"[tts] {caller} 合成失败：{e}")
+        return None
+
+
 async def _stream_text(messages: list[dict], *, max_tokens: int, caller: str,
-                       done: dict | None = None, fallback: str = ""):
+                       done: dict | None = None, fallback: str = "",
+                       sess=None, speak: bool = False, turn: int = 0,
+                       priority: int = P_AMBIENT):
     """把一次 LLM 补全转成 SSE：逐 token 下发，末尾补一个 done 事件（可夹带本地数据）。
 
     晨报/问候的首屏等待全压在 LLM 上，逐字下发配合前端扫描动画能把等待盖住。
@@ -238,6 +321,15 @@ async def _stream_text(messages: list[dict], *, max_tokens: int, caller: str,
     text = "".join(got) if got else fallback
     extra = {"degraded": True, "degraded_reason": err or "大模型没有返回内容"} if degraded else {}
     yield _sse({"type": "done", "text": text, **extra, **(done or {})})
+    # 语音放在 done 之后：正文早就上屏了，合成慢一点也不影响孩子看字。
+    # 客户端读完 done 只是解锁输入，后面的事件照收（和 memory 事件同理）。
+    # 降级稿不念——那是"大模型没接上"的本地兜底，念出来只会让孩子以为
+    # 管家真的在说话，而界面明明标着"已降级"。
+    if speak and sess is not None and text and not degraded:
+        ev = await _speak_event(sess, text, caller=f"{caller}_voice", turn=turn,
+                                priority=priority)
+        if ev:
+            yield _sse({"type": "voice", **ev})
 
 
 async def _get_session(name: str):
@@ -751,6 +843,9 @@ async def api_session(request: Request, req: SessionReq):
 async def api_greeting(request: Request, name: str = "", stream: bool = False):
     user, sess = await _auth_session(request, "greeting", name)
     _, a, _ = _stores(sess)
+    # 轮次序号在请求开始时就定下来：问候这条链路要 30 秒才合成完语音，
+    # 期间孩子很可能已经聊了好几轮，不能让它事后反过来盖掉更新的语音
+    turn = _next_turn()
     block, brief, reminders = await asyncio.to_thread(
         lambda: (sess.store.active_block(), _affairs_brief(a), sess.store.due_reminders()))
     messages = [{"role": "user", "content": prompts.GREETING.format(
@@ -768,7 +863,8 @@ async def api_greeting(request: Request, name: str = "", stream: bool = False):
         return StreamingResponse(
             _stream_text(messages if quota else None, max_tokens=600, caller="greeting",
                          done={"reminders": reminders, "name": sess.name},
-                         fallback=fallback),
+                         fallback=fallback, sess=sess, speak=config.TTS_SPEAK_GREETING,
+                         turn=turn),
             media_type="text/event-stream", headers=_SSE_HEADERS)
     if not quota:
         return {"text": fallback, "reminders": reminders, "name": sess.name}
@@ -872,6 +968,7 @@ def _briefing_fallback(name: str, snapshot: dict, due: list[dict]) -> str:
 @app.get("/api/briefing")
 async def api_briefing(request: Request, name: str = "", stream: bool = False):
     user, sess = await _auth_session(request, "briefing", name)
+    turn = _next_turn()  # 同 greeting：序号在请求开始时定，不按合成完成时间排
     g, a, m = _stores(sess)
     data = await asyncio.to_thread(_briefing_collect, a, g, m)
     snapshot, due = data["snapshot"], data["due"]
@@ -893,7 +990,8 @@ async def api_briefing(request: Request, name: str = "", stream: bool = False):
         return StreamingResponse(
             _stream_text(messages if quota else None, max_tokens=800, caller="briefing",
                          done=payload,
-                         fallback=_briefing_fallback(sess.name, snapshot, due)),
+                         fallback=_briefing_fallback(sess.name, snapshot, due),
+                         sess=sess, speak=config.TTS_SPEAK_BRIEFING, turn=turn),
             media_type="text/event-stream", headers=_SSE_HEADERS)
 
     degraded = False
@@ -1168,11 +1266,18 @@ async def _chat_stream(sess, raw_message: str, ctx: dict, resume: ResumeReq | No
     attachments = [] if is_secret else (attachments or [])
 
     async def emit(event: dict) -> None:
+        # 卡片类回复不念全卡：出卡片时顺手把"口播稿"记下来给语音合成用
+        if event.get("type") == "card" and event.get("card"):
+            state["spoken"] = _card_spoken(event["card"])
         await queue.put(event)
 
     reply_text = ""
     last_turn: dict = {"intent": "chat"}  # 本轮实际走了哪条链路，供⑤生成后续话题
     g_store, a_store, m_store = _stores(sess)
+    state: dict = {"spoken": ""}  # 本轮口播稿（卡片分支才有，普通闲聊用回复全文）
+    # 轮次序号在这条流的最开头就定下来（比任何一次 LLM 调用都早），
+    # 后面的语音事件靠它判断自己是"当前这轮"还是"迟到的旧轮次"
+    state["turn"] = _next_turn()
 
     if resume:
         # 续写：本轮记账用被打断那一轮的原问题（含悄悄话标记），而不是"继续"这句指令
@@ -1220,6 +1325,19 @@ async def _chat_stream(sess, raw_message: str, ctx: dict, resume: ResumeReq | No
                 "relay": "relay", "explain": "explain"}.get(intent, "chat")
         await emit({"type": "mode", "mode": mode, "mood": mood})
 
+        # 换音色：确定性正则锚点，命中就让管家自己把需求扩写成音色提示词并落档，
+        # 再把确认规则注进人设——本轮对话照常往下走，不新增意图、不改 ROUTER。
+        voice_rule = ""
+        if voice.asked(message):
+            try:
+                changed = await voice.reconfigure(sess, message)
+            except Exception as e:  # noqa: BLE001 改音色失败不该打断聊天
+                print(f"[voice] 改音色失败：{e}")
+                changed = None
+            if changed:
+                prof, voice_rule = changed
+                await emit({"type": "voice_profile", "profile": voice.public_view(prof)})
+
         # ① 想起来了：图谱检索 → recall 事件（同时注入 prompt）
         if hit["nodes"]:
             await emit({"type": "recall", "nodes": hit["nodes"], "edges": hit["edges"]})
@@ -1241,17 +1359,26 @@ async def _chat_stream(sess, raw_message: str, ctx: dict, resume: ResumeReq | No
                 last_turn["intent"] = "chat"
 
         if intent == "new_affair":
-            # ② 接下这件事：建事务（或认领已存在的同题事务，不重复开单）
-            affair, created = await _open_affair(sess, a_store, message, hit)
-            if affair:
-                await emit({"type": "affair", "action": "create" if created else "update",
-                            "affair": await asyncio.to_thread(a_store.get, affair["id"])})
-            try:
-                await emit({"type": "phase", "phase": "planning"})
+            # ② 接下这件事：建事务（或认领已存在的同题事务，不重复开单）。
+            # 规划（LLM RTT）不依赖事务落盘，与建单并行，省掉一段串行等待。
+            attach_ctx = _attach_digest(_file_store(sess), attachments)
+
+            async def _plan_job():
                 snapshot = await asyncio.to_thread(a_store.snapshot)
-                plan = await planner.make_plan(
-                    sess.store, message, snapshot,
-                    attach_ctx=_attach_digest(_file_store(sess), attachments))
+                return await planner.make_plan(sess.store, message, snapshot, attach_ctx=attach_ctx)
+
+            plan_task = asyncio.create_task(_plan_job())
+            try:
+                affair, created = await _open_affair(sess, a_store, message, hit)
+                if affair:
+                    await emit({"type": "affair", "action": "create" if created else "update",
+                                "affair": await asyncio.to_thread(a_store.get, affair["id"])})
+                await emit({"type": "phase", "phase": "planning"})
+            except BaseException:
+                plan_task.cancel()
+                raise
+            try:
+                plan = await plan_task
             except planner.PlanError:
                 plan = None
             if plan:
@@ -1308,19 +1435,21 @@ async def _chat_stream(sess, raw_message: str, ctx: dict, resume: ResumeReq | No
             except Exception:  # noqa: BLE001 事务 id 失效时照常聊天
                 pass
             reply_text = await _chat_reply(sess, message, hit, emit,
+                                           extra_rule=voice_rule,
                                            use_tools=not is_secret, attachments=attachments)
 
         elif intent == "explain":
             # 讲懂知识点：复用闲聊通道，但在人设后追加"用自己的经历打比方"的讲解规则
             reply_text = await _chat_reply(
                 sess, message, hit, emit,
-                extra_rule=prompts.EXPLAIN_RULE, caller="explain",
+                extra_rule=_rules(prompts.EXPLAIN_RULE, voice_rule), caller="explain",
                 use_tools=not is_secret, attachments=attachments)
 
         else:
             # 悄悄话不走工具轮：私密原话不能送进联网工具（时间注入仍在）
             reply_text = await _chat_reply(
-                sess, message, hit, emit, use_tools=not is_secret, attachments=attachments)
+                sess, message, hit, emit, extra_rule=voice_rule,
+                use_tools=not is_secret, attachments=attachments)
 
     async def runner():
         try:
@@ -1362,17 +1491,23 @@ async def _chat_stream(sess, raw_message: str, ctx: dict, resume: ResumeReq | No
             print(f"[history] 落盘失败：{e}")
     ctx.update({"reply_text": reply_text, "is_secret": is_secret,
                 "message": message, "raw_message": raw_message,
+                "spoken": state["spoken"], "turn": state.get("turn", 0),
                 "intent": last_turn.get("intent", "chat"),
                 # 附件摘要随 ctx 带出锁外：记忆沉淀也在锁外跑，别在这里再读一次磁盘
                 "attach_note": "" if is_secret else _attach_memory_note(_file_store(sess), attachments)})
 
 
 async def _chat_settle(sess, ctx: dict):
-    """会话锁外的收尾：记忆沉淀（LLM 抽取 + 落盘）→ memory/affair 事件 → 快捷话题。
+    """会话锁外的收尾：记忆沉淀（LLM 抽取 + 落盘）→ memory/affair 事件 → 语音合成 → 话题建议。
 
     悄悄话：把带 [[secret]] 标记的原文交给抽取器，它才知道要标成 private；
     is_secret 同时让文件层落盘走占位行——私密内容绝不写进 topics/daily/MEMORY.md。
     落盘安全由 store/目录写锁保证，不依赖会话锁。
+
+    记忆沉淀与语音合成是两条互不相干的链路，并发跑：串行的话孩子得先等抽取
+    完（好几秒）才听见声音，白等一段。两边都只往同一个队列丢结果，谁先好谁
+    先发；消费方数着两个结束标记收口——所以任何一边抛异常都必须在 finally
+    里投标记，否则另一边的结果会把响应吊在半路不关。
     """
     reply_text = ctx.get("reply_text") or ""
     is_secret = ctx.get("is_secret", False)
@@ -1380,28 +1515,63 @@ async def _chat_settle(sess, ctx: dict):
     raw_message = ctx.get("raw_message") or message
     g_store, a_store, _ = _stores(sess)
 
-    if reply_text:
-        gdata = await _settle_memory(sess, raw_message if is_secret else message,
-                                     reply_text, is_secret,
-                                     attach_note=ctx.get("attach_note") or "")
-        if gdata:
-            aff_ev = gdata.pop("affair_event", None)  # 事务阶段推进 → 看板实时刷新
-            if aff_ev:
-                yield _sse(aff_ev)
-            if is_secret:
-                gdata["secret"] = True
-            if gdata.get("added_nodes") or gdata.get("added_edges") or gdata.get("updated"):
-                yield _sse({"type": "memory", **gdata})
+    out: asyncio.Queue[str | None] = asyncio.Queue()
 
-    # 按这一轮的实际情况换一批快捷话题（确定性规则，不额外调 LLM）
-    if not is_secret:
+    async def _speak_into_queue():
         try:
-            chips = await asyncio.to_thread(
-                suggest.followups, ctx.get("intent") or "chat", a_store, g_store)
-            if chips:
-                yield _sse({"type": "suggest", "chips": chips})
-        except Exception as e:  # noqa: BLE001 话题建议是锦上添花
-            print(f"[suggest] 生成失败：{e}")
+            # 卡片分支只念口播稿（且可整体关掉）；普通闲聊念回复全文
+            if is_secret:  # 悄悄话不外送：和"私密原话不进联网工具"同一条红线
+                return
+            spoken = ctx.get("spoken") or ""
+            if spoken and not config.TTS_SPEAK_CARD:
+                return
+            text = spoken or reply_text
+            if not text:
+                return
+            ev = await _speak_event(
+                sess, text, caller="tts_chat", turn=ctx.get("turn", 0),
+                priority=P_CHAT,
+                max_chars=config.TTS_CARD_MAX_CHARS if spoken else None)
+            if ev:
+                await out.put(_sse({"type": "voice", **ev}))
+        except Exception as e:  # noqa: BLE001
+            print(f"[tts] 收尾合成失败：{e}")
+        finally:
+            await out.put(None)
+
+    # _bg 持有任务引用直到跑完：没有外部引用的 task 可能在执行中被 GC 掉
+    _bg(asyncio.create_task(_speak_into_queue()))
+    try:
+        if reply_text:
+            gdata = await _settle_memory(sess, raw_message if is_secret else message,
+                                         reply_text, is_secret,
+                                         attach_note=ctx.get("attach_note") or "")
+            if gdata:
+                aff_ev = gdata.pop("affair_event", None)  # 事务阶段推进 → 看板实时刷新
+                if aff_ev:
+                    await out.put(_sse(aff_ev))
+                if is_secret:
+                    gdata["secret"] = True
+                if gdata.get("added_nodes") or gdata.get("added_edges") or gdata.get("updated"):
+                    await out.put(_sse({"type": "memory", **gdata}))
+
+        # 按这一轮的实际情况换一批快捷话题（确定性规则，不额外调 LLM）
+        if not is_secret:
+            try:
+                chips = await asyncio.to_thread(
+                    suggest.followups, ctx.get("intent") or "chat", a_store, g_store)
+                if chips:
+                    await out.put(_sse({"type": "suggest", "chips": chips}))
+            except Exception as e:  # noqa: BLE001 话题建议是锦上添花
+                print(f"[suggest] 生成失败：{e}")
+    finally:
+        # 记忆链路的结束标记；异常照旧往上抛给 guarded 的 _settle 兜底
+        await out.put(None)
+    for _ in range(2):
+        chunk = await out.get()
+        if chunk is None:
+            continue
+        yield chunk
 
 
 def _now_text() -> str:
@@ -1737,6 +1907,64 @@ async def api_chat(request: Request, req: ChatReq):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+# ---------------------------------------------------------------- 音色 / 语音
+
+@app.get("/api/voice")
+async def api_voice(request: Request, name: str = ""):
+    """当前音色档案：前端用它显示"现在是什么声音"，并按 available 决定要不要露开关。"""
+    _, sess = await _auth_session(request, "voice", name)
+    prof = await asyncio.to_thread(voice.load, sess.dir)
+    return {"profile": voice.public_view(prof), "available": tts.available()}
+
+
+@app.post("/api/voice")
+async def api_voice_write(request: Request, req: VoiceReq):
+    """手动改音色：朗读总开关、切内置音色、或直接粘一段音色描述。
+
+    与"跟管家说想换什么音色"写的是同一个 voice.json，两条路互不冲突。
+    """
+    _, sess = await _auth_session(request, "voice", req.name)
+    patch = {k: v for k, v in (("enabled", req.enabled), ("mode", req.mode),
+                               ("style", req.style), ("voice", req.voice))
+             if v is not None}
+    if not patch:
+        raise HTTPException(400, "没有要更新的字段")
+    prof = await asyncio.to_thread(voice.save, sess.dir, patch, by="ui")
+    return {"profile": voice.public_view(prof)}
+
+
+@app.post("/api/voice/preview")
+async def api_voice_preview(request: Request, req: SessionReq):
+    """试音：点开朗读开关时立刻合成一句短的，让用户当场听见。
+
+    没有这一步的话，用户打开开关后只能等下一条消息才能确认声音能不能放出来；
+    浏览器要是拦了自动播放或没有音频设备，干等也等不到，只会以为功能坏了。
+    """
+    _, sess = await _auth_session(request, "voice", req.name)
+    ev = await _speak_event(
+        sess, config.TTS_PREVIEW_TEXT, caller="tts_preview", turn=_next_turn(),
+        priority=P_CHAT, max_chars=config.TTS_PREVIEW_MAX_CHARS)
+    if not ev:
+        raise HTTPException(503, "试音没成功：检查 Key、配额，或浏览器有没有拦播放")
+    return {"voice": ev}
+
+
+@app.get("/api/voice/{vid}")
+async def api_voice_audio(request: Request, vid: str, name: str = ""):
+    """播放已合成的语音片段。
+
+    走 Bearer 鉴权，前端必须用 fetch + blob 取再用 <audio>/Web Audio 播——裸
+    <audio src> 带不了 Authorization 头，套 ?token= 又会把 token 漏进浏览器历史
+    和反代日志（和 /api/ics 一个道理）。文件名只允许缓存目录下的单段文件名。
+    """
+    _, sess = await _auth_session(request, "tts", name)
+    path = await asyncio.to_thread(tts.resolve, sess.dir, vid)
+    if path is None:
+        raise HTTPException(404, "这段语音已经不在了")
+    return FileResponse(path, media_type=tts.mime_for(vid),
+                        headers={"Cache-Control": "private, max-age=300"})
 
 
 # ---------------------------------------------------------------- 附件（多模态上传）
@@ -2182,6 +2410,101 @@ async def api_history(request: Request, name: str = ""):
         hist = [m for m in hist if not m.get("secret")
                 and not str(m.get("content", "")).startswith(SECRET_PREFIX)]
     return {"history": hist}
+
+
+def _archive_history(sess) -> str | None:
+    """把当前对话存成一个"项目"归档（同步，调用方 to_thread）；空对话不归档。"""
+    hist = list(sess.history)
+    if not hist:
+        return None
+    first = next((m for m in hist if m["role"] == "user"), hist[0])
+    title = re.sub(r"\s+", " ", str(first.get("content", "")).replace(SECRET_PREFIX, "")).strip()[:20] or "对话"
+    if any(m.get("secret") for m in hist):
+        hist = [m for m in hist if not m.get("secret")]
+    aid = datetime.now().strftime("%Y%m%d-%H%M%S")
+    if hist:
+        store.atomic_write(sess.dir / "chats" / f"{aid}.json", json.dumps(
+            {"id": aid, "title": title, "ts": datetime.now().isoformat(timespec="seconds"),
+             "history": hist}, ensure_ascii=False, indent=1))
+    return aid
+
+
+@app.post("/api/history/new")
+async def api_history_new(request: Request, name: str = ""):
+    """新建项目：当前对话归档，开一个空白对话（记忆与事务不动）。"""
+    _, sess = await _auth_session(request, "history_write", name)
+    if sess.lock.locked():
+        raise HTTPException(429, "管家还在回复，等说完再新建吧")
+    aid = await asyncio.to_thread(_archive_history, sess)
+    sess.history.clear()
+    await asyncio.to_thread(sessions.persist_history, sess)
+    return {"ok": True, "archived": aid}
+
+
+@app.get("/api/history/archives")
+async def api_history_archives(request: Request, name: str = ""):
+    _, sess = await _auth_session(request, "history_write", name)
+
+    def _list():
+        out = []
+        for f in sorted((sess.dir / "chats").glob("*.json"), reverse=True)[:50]:
+            d = store.read_json(f, {})
+            if isinstance(d, dict) and d.get("id"):
+                out.append({"id": d["id"], "title": d.get("title", ""), "ts": d.get("ts", ""),
+                            "count": len(d.get("history") or [])})
+        return out
+    return {"archives": await asyncio.to_thread(_list)}
+
+
+@app.post("/api/history/archives/{aid}/restore")
+async def api_history_restore(request: Request, aid: str, name: str = ""):
+    """切回某个归档项目：当前对话先归档，再载入目标。"""
+    _, sess = await _auth_session(request, "history_write", name)
+    if not re.fullmatch(r"[\d-]{15}", aid):
+        raise HTTPException(400, "非法的项目 id")
+    if sess.lock.locked():
+        raise HTTPException(429, "管家还在回复，等说完再切换吧")
+    path = sess.dir / "chats" / f"{aid}.json"
+    data = await asyncio.to_thread(store.read_json, path, None)
+    if not isinstance(data, dict):
+        raise HTTPException(404, "没有这个项目")
+    await asyncio.to_thread(_archive_history, sess)
+    sess.history.clear()
+    sess.history.extend(data.get("history") or [])
+    await asyncio.to_thread(sessions.persist_history, sess)
+    await asyncio.to_thread(path.unlink, True)
+    return {"ok": True, "history": list(sess.history)}
+
+
+@app.delete("/api/history/archives/{aid}")
+async def api_history_archive_delete(request: Request, aid: str, name: str = ""):
+    _, sess = await _auth_session(request, "history_write", name)
+    if not re.fullmatch(r"[\d-]{15}", aid):
+        raise HTTPException(400, "非法的项目 id")
+    await asyncio.to_thread((sess.dir / "chats" / f"{aid}.json").unlink, True)
+    return {"ok": True}
+
+
+@app.delete("/api/history")
+async def api_history_clear(request: Request, name: str = "", index: int | None = None):
+    """删除历史：带 index 删单轮（该条及其配对回复），不带则清空当前对话。
+    只动对话记录，不碰已沉淀的记忆与事务。"""
+    _, sess = await _auth_session(request, "history_write", name)
+    if sess.lock.locked():
+        raise HTTPException(429, "管家还在回复，等说完再删吧")
+    if index is None:
+        sess.history.clear()
+    else:
+        items = list(sess.history)
+        if not 0 <= index < len(items):
+            raise HTTPException(404, "没有这条记录")
+        lo = index if items[index]["role"] == "user" else index - 1
+        hi = lo + 2 if lo + 1 < len(items) and items[lo + 1]["role"] == "assistant" else lo + 1
+        del items[max(lo, 0):hi]
+        sess.history.clear()
+        sess.history.extend(items)
+    await asyncio.to_thread(sessions.persist_history, sess)
+    return {"ok": True, "history": list(sess.history)}
 
 
 @app.get("/api/logs")
