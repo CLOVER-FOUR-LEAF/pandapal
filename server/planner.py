@@ -1,6 +1,7 @@
 """规划器：事件 → LLM 输出 JSON DAG，校验（环/未知依赖/未知工具）后返回。"""
 from __future__ import annotations
 
+import asyncio
 from datetime import date
 
 from . import llm, prompts
@@ -61,14 +62,15 @@ async def make_plan(store: MemoryStore, message: str, affairs_snapshot: dict | N
         rows = affairs_snapshot.get("board") or []
         if rows:
             brief = "\n".join(f"- {r['title']}（{r.get('stage')}）" for r in rows[:5])
+    name, mem = await asyncio.to_thread(lambda: (store.child_name, store.active_block()))
     try:
         plan = await llm.complete_json(
             [
                 {"role": "system", "content": "你是任务规划模块，只输出 JSON。"},
                 {"role": "user", "content": prompts.PLANNER.format(
-                    name=store.child_name,
+                    name=name,
                     today=date.today().isoformat(),
-                    memory_block=store.active_block() or "（暂无记忆）",
+                    memory_block=mem or "（暂无记忆）",
                     affairs_brief=brief,
                     message=message,
                 )},

@@ -245,12 +245,14 @@ async def extract_and_store(store: MemoryStore, user_msg: str, assistant_msg: st
     """
     try:
         if graph_store is None:
+            name, topic_names = await asyncio.to_thread(
+                lambda: (store.child_name, store.topic_names()))
             data = await llm.complete_json(
                 [
                     {"role": "system", "content": "你是记忆整理模块，只输出 JSON。"},
                     {"role": "user", "content": prompts.EXTRACT.format(
-                        name=store.child_name,
-                        topic_names=store.topic_names(),
+                        name=name,
+                        topic_names=topic_names,
                         user=user_msg,
                         assistant=assistant_msg,
                     )},
@@ -261,12 +263,14 @@ async def extract_and_store(store: MemoryStore, user_msg: str, assistant_msg: st
             await store.write_extraction(data, is_secret=is_secret)
             return None
 
+        name, graph_brief = await asyncio.to_thread(
+            lambda: (store.child_name, graph_store.brief_block(limit=24)))
         data = await llm.complete_json(
             [
                 {"role": "system", "content": "你是记忆整理模块，只输出 JSON。"},
                 {"role": "user", "content": prompts.EXTRACT_GRAPH.format(
-                    name=store.child_name,
-                    graph_brief=graph_store.brief_block(limit=24) or "（还没有图谱，这是第一批节点）",
+                    name=name,
+                    graph_brief=graph_brief or "（还没有图谱，这是第一批节点）",
                     affairs_brief=affairs_brief or "（目前没有正在跟进的事）",
                     user=user_msg,
                     assistant=assistant_msg,
@@ -275,8 +279,20 @@ async def extract_and_store(store: MemoryStore, user_msg: str, assistant_msg: st
             max_tokens=900,
             caller="extract_graph",
         )
-        await store.write_extraction(data, is_secret=is_secret)
-        event = _graph_event(graph_store, graph_store.merge(data)) or {}
+        if is_secret:
+            # 服务端强制兜底：悄悄话的图谱节点一律 private、事务进展一律丢弃，
+            # 不依赖模型自觉——模型漏标 private 时私密事实会混进公共节点，
+            # 家长图谱 / 晨报 / 传话筒 prompt 会全链路泄露。
+            for n in data.get("nodes") or []:
+                if isinstance(n, dict):
+                    n["private"] = True
+            data["affair"] = None
+        # 记忆文件与 graph.json 是两份独立存储，写盘并行（各自内部已 to_thread + 目录锁）
+        _, merged = await asyncio.gather(
+            store.write_extraction(data, is_secret=is_secret),
+            asyncio.to_thread(graph_store.merge, data),
+        )
+        event = await asyncio.to_thread(_graph_event, graph_store, merged) or {}
         affair = _valid_affair(data.get("affair"))
         if affair:
             event["affair"] = affair

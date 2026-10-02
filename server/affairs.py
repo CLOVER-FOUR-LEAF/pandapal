@@ -331,14 +331,15 @@ class AffairStore:
         self._save(root)
         return affair
 
-    def due_soon(self, days: int = 7) -> list[dict]:
+    def due_soon(self, days: int = 7, items: list[dict] | None = None) -> list[dict]:
         """due 在 days 天内或已过期的事务（不含 done），按紧急度升序。
 
         `days` 为负数即已过期，`overdue` 同步标出来，前端直接显示"逾期 N 天"。
+        `items` 传入已加载的事务列表时不再重复读盘（调用方刚 list() 过）。
         """
         today = date.today()
         out: list[dict] = []
-        for a in self._load()["affairs"]:
+        for a in (self._load()["affairs"] if items is None else items):
             if not isinstance(a, dict) or a.get("stage") == "done":
                 continue
             d = _parse_date(a.get("due"))

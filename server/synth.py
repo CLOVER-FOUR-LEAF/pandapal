@@ -1,6 +1,7 @@
 """合成器：节点结果 → 结构化卡片 JSON；含"单 LLM 直出卡片"保底路径。"""
 from __future__ import annotations
 
+import asyncio
 from datetime import date
 
 from . import llm, prompts
@@ -28,13 +29,14 @@ def _normalize_card(data: dict) -> dict:
 async def synthesize(store: MemoryStore, event: str, results: dict[str, str]) -> dict:
     """正常路径：汇总节点结果出卡片。"""
     results_text = "\n\n".join(f"【{nid}】{text}" for nid, text in results.items())
+    name, mem = await asyncio.to_thread(lambda: (store.child_name, store.active_block()))
     data = await llm.complete_json(
         [
             {"role": "system", "content": "你是方案整理模块，只输出 JSON。"},
             {"role": "user", "content": prompts.SYNTH.format(
-                name=store.child_name,
+                name=name,
                 event=event,
-                memory_block=store.active_block() or "（暂无记忆）",
+                memory_block=mem or "（暂无记忆）",
                 results=results_text,
             )},
         ],
@@ -46,14 +48,15 @@ async def synthesize(store: MemoryStore, event: str, results: dict[str, str]) ->
 
 async def direct_card(store: MemoryStore, event: str) -> dict:
     """保底路径：跳过 DAG，单次调用直出卡片（仍是真实 LLM 生成）。"""
+    name, mem = await asyncio.to_thread(lambda: (store.child_name, store.active_block()))
     data = await llm.complete_json(
         [
             {"role": "system", "content": "你是方案整理模块，只输出 JSON。"},
             {"role": "user", "content": prompts.CARD_DIRECT.format(
-                name=store.child_name,
+                name=name,
                 event=event,
                 today=date.today().isoformat(),
-                memory_block=store.active_block() or "（暂无记忆）",
+                memory_block=mem or "（暂无记忆）",
             )},
         ],
         max_tokens=3000,

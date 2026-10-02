@@ -1,5 +1,13 @@
 // web/scene3d.js —— 记忆星球 3D 场景（PandaButler / 熊猫管家）
 //
+// v2「星球」重构：
+//   · 星球是主角：一颗有海陆/极冰/云带/大气辉光/经纬球网的行星，自转；孩子本人就是这颗星球
+//   · 五领域（德智体美劳）= 球面上按斐波那契螺旋钉住的五颗次行星，各带领域色轨道环与记忆计数
+//   · 记忆节点 = 沿"领域法线"浮起的记忆星：球坐标分层 + 切平面黄金角螺旋 + 局部松弛，
+//     互不重叠、不穿模；布局是确定性的（不是逐帧力导向），只在数据变化时算一次
+//   · 每帧只做一次 O(n) 的位置阻尼插值，静止时降到 ~30fps
+//   · 深浅色统一切换：画布内（着色器 uniform）与 DOM 标签（CSS 变量）同源
+//
 // 技术选型：three.js r160（web/vendor/three.module.min.js）+ 官方 addons
 //   OrbitControls（阻尼轨道/触控）、CSS2DRenderer（HTML 中文标签，清晰可选中样式）
 // 全部本地 vendor、原生 ES Module、动态 import：任何模块加载失败只会让 initScene reject，
@@ -9,8 +17,9 @@
 //   initScene(containerEl)            async，失败 reject（调用方切 2D）
 //   setGraphData({nodes, edges})
 //   setRole("child"|"parent")
+//   setTheme("dark"|"light")          跟随界面深浅色
 //   setTimeline(null|"YYYY-MM"|"YYYY-MM-DD")
-//   setFilter({domain, status})
+//   setFilter({domain, status}) / setDomainFilter(domain, status)
 //   setNodeClickHandler(cb)
 //   highlightRecall({nodes, edges})
 //   spawnMemory({added_nodes, added_edges, updated})
@@ -40,16 +49,46 @@ const BAMBOO = 0x3fae74;
 const GOLD = 0xf3c65c;
 const PLAN_COLOR = { pending: 0x5f7d78, running: AMBER, done: BAMBOO, error: 0xf07a6a };
 
-const ANCHOR_R = 8.5;
-const ANCHOR_Y = [1.4, -0.4, 0.9, -1.1, 0.2];
+const R_PLANET = 9.4;        // 星球半径
+const RING_R = 4.15;         // 领域轨道环半径
+const PATCH_EDGE = 5.7;      // 领域星团在切平面上的活动半径
+const SHELL_H0 = 1.05;       // 记忆星最小浮起高度（贴着球面外侧）
+const SHELL_STEP = 1.45;      // 每层递增的浮起高度
+const FOV = 42;
 const RECENT_DAYS = 540;
-const FOV = 45;
 const IDLE_RESUME_MS = 20000;
 const RECALL_MS = 3200;
+const SPIN = 0.035;          // 星球自转 rad/s
+const IDLE_FPS = 30;         // 静止时降到这个帧率（省电，肉眼几乎无差）
 
+// 场景明暗只跟界面主题走（key 是 "dark"/"light"，不是角色）——
+// 角色只决定"看得到哪些节点"，不改场景明暗（否则切视角时整屏闪）。
+// 浅色底上 AdditiveBlending 只会更亮、等于隐形，additive:false 时统一换 NormalBlending。
 const THEMES = {
-  child: { top: "#0b1a1f", bottom: "#10302a", glow: "rgba(63,174,116,0.16)", fog: 0x0d2224, fogD: 0.014, hemi: 0.85, edge: 0.34 },
-  parent: { top: "#12303a", bottom: "#1a4a3e", glow: "rgba(120,210,170,0.20)", fog: 0x173a3a, fogD: 0.011, hemi: 1.15, edge: 0.42 },
+  dark: {
+    top: "#08161c", bottom: "#0f2c26", glow: "rgba(63,174,116,0.16)",
+    fog: 0x0b1e22, fogD: 0.0115, hemi: 0.85, hemiGround: 0x0b1a1f, hemiSky: 0xcdeee2,
+    keyI: 2.0, rimI: 1.0, fillI: 18,
+    edge: 0.34, additive: true, bloom: 0.55, bloomTh: 0.72,
+    dust: 0xb9e8d3, dustOp: 0.62,
+    ring: 0x8fd9b6, ringOp: 0.18, grid: 0x7fc9a8, gridOp: 0.10,
+    haloOp: 0.30,
+    sea: 0x0d3f4a, land: 0x2f7d58, land2: 0x7fb46a, ice: 0xdfeee6, cloud: 0x8fd9c4,
+    atmo: 0x64d8a8, atmoI: 0.95, planetRim: 0.55, shellI: 0.85, planetHaloOp: 0.28,
+    starA: 0xdfeee9, starB: 0x9fd9c4, starC: 0x7fbde0,
+  },
+  light: {
+    top: "#f2f7f3", bottom: "#c3dccb", glow: "rgba(72,160,110,0.20)",
+    fog: 0xdceade, fogD: 0.010, hemi: 1.30, hemiGround: 0x9db8a8, hemiSky: 0xffffff,
+    keyI: 2.1, rimI: 0.55, fillI: 6,
+    edge: 0.44, additive: false, bloom: 0.14, bloomTh: 0.85,
+    dust: 0x3d7d5e, dustOp: 0.34,
+    ring: 0x4a9a72, ringOp: 0.32, grid: 0x3f8a66, gridOp: 0.20,
+    haloOp: 0.16,
+    sea: 0x8fc3d8, land: 0x63a87c, land2: 0x8fc98c, ice: 0xf4fbf7, cloud: 0xffffff,
+    atmo: 0x4fae86, atmoI: 0.42, planetRim: 0.30, shellI: 0.40, planetHaloOp: 0.10,
+    starA: 0xffffff, starB: 0x63a87c, starC: 0x4a8fc0,
+  },
 };
 
 const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
@@ -61,6 +100,8 @@ const easeOutBack = (t) => {
 const nowMs = () => (typeof performance !== "undefined" ? performance.now() : Date.now());
 const idOf = (x) => (x && typeof x === "object" ? x.id : x);
 const str = (x) => (x == null ? "" : String(x));
+const reduceMotion = () =>
+  typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 // ============================================================
 // 1. 配置状态（initScene 之前也能设置）
@@ -69,6 +110,7 @@ const str = (x) => (x == null ? "" : String(x));
 const cfg = {
   graph: { nodes: [], edges: [] },
   role: "child",
+  theme: "dark",
   timeline: null,
   filter: { domain: "", status: "" },
   onClick: null,
@@ -88,20 +130,32 @@ const STYLE_ID = "s3d-style";
 const CSS = `
 .s3d-root{position:absolute;inset:0;overflow:hidden;border-radius:inherit;background:#0b1a1f;user-select:none;-webkit-user-select:none}
 .s3d-root>canvas{position:absolute;inset:0;display:block;width:100%;height:100%;outline:none;touch-action:none}
-.s3d-vignette{position:absolute;inset:0;pointer-events:none;background:radial-gradient(ellipse 75% 70% at 50% 46%,rgba(0,0,0,0) 55%,var(--s3d-vignette,rgba(2,9,10,.55)) 100%)}
+.s3d-vignette{position:absolute;inset:0;pointer-events:none;background:radial-gradient(ellipse 78% 72% at 50% 44%,rgba(0,0,0,0) 52%,var(--s3d-vignette,rgba(2,9,10,.55)) 100%)}
 .s3d-css2d{position:absolute;inset:0;pointer-events:none;overflow:hidden}
 .s3d-css2d>div{pointer-events:none}
-.s3d-label{font:600 12px/1.25 var(--s3d-font,"PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans SC",system-ui,sans-serif);color:var(--s3d-ink,#e8f1ec);background:var(--s3d-label-bg,rgba(7,20,22,.72));border:1px solid var(--s3d-label-border,rgba(232,241,236,.12));padding:3px 9px 3px 7px;border-radius:999px;white-space:nowrap;display:flex;align-items:center;gap:6px;transform:translateY(-16px);animation:s3d-in .28s ease-out both;text-shadow:0 1px 2px rgba(0,0,0,.45);letter-spacing:.02em}
-.s3d-label .s3d-dot{width:7px;height:7px;border-radius:50%;background:var(--c,#8fa7a0);box-shadow:0 0 6px var(--c,#8fa7a0);flex:none}
-.s3d-label.is-private{border-style:dashed;border-color:var(--s3d-private,rgba(180,205,198,.55))}
-.s3d-label.is-dropped{color:var(--s3d-ink-dim,rgba(232,241,236,.6))}
-.s3d-label.is-done{border-color:rgba(243,198,92,.55)}
-.s3d-label.is-hl{border-color:var(--s3d-amber,#f0a24a);color:var(--s3d-ink-strong,#fff6ea);box-shadow:0 0 0 1px rgba(240,162,74,.35),0 0 14px rgba(240,162,74,.45)}
-.s3d-label.is-hover{border-color:rgba(232,241,236,.4)}
-.s3d-cluster{display:flex;flex-direction:column;align-items:center;gap:1px;font-family:var(--s3d-font,"PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans SC",system-ui,sans-serif);transition:opacity .35s;animation:s3d-in .4s ease-out both}
-.s3d-cluster-ch{font-size:22px;font-weight:700;line-height:1;color:var(--c);text-shadow:0 0 16px var(--c),0 1px 2px rgba(0,0,0,.5)}
-.s3d-cluster-name{font-size:10.5px;letter-spacing:.24em;padding-left:.24em;color:var(--s3d-ink,#e8f1ec);opacity:.62}
-.s3d-cluster.is-dim{opacity:.25}
+
+/* 节点标签：胶囊在上、细尾在下，尾端圆点落在节点上（CSS2DObject.center=(.5,1)） */
+.s3d-label{display:flex;flex-direction:column;align-items:center;font:600 12px/1.2 var(--s3d-font,"PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans SC",system-ui,sans-serif);animation:s3d-in .28s ease-out both;will-change:transform}
+.s3d-pill{display:flex;align-items:center;gap:6px;max-width:200px;padding:3px 9px 3px 7px;border-radius:999px;background:var(--s3d-label-bg,rgba(7,20,22,.74));border:1px solid var(--s3d-label-border,rgba(232,241,236,.14));color:var(--s3d-ink,#e8f1ec);white-space:nowrap;text-shadow:0 1px 2px rgba(0,0,0,.45);letter-spacing:.02em}
+.s3d-txt{overflow:hidden;text-overflow:ellipsis}
+.s3d-dot{width:7px;height:7px;border-radius:50%;background:var(--c,#8fa7a0);box-shadow:0 0 6px var(--c,#8fa7a0);flex:none}
+.s3d-tail{width:1px;height:10px;background:linear-gradient(to bottom,var(--s3d-label-border,rgba(232,241,236,.28)),transparent);position:relative}
+.s3d-tail::after{content:"";position:absolute;left:50%;bottom:-1px;width:5px;height:5px;margin-left:-2.5px;border-radius:50%;background:var(--c,#8fa7a0);box-shadow:0 0 8px var(--c,#8fa7a0)}
+.s3d-label.is-private .s3d-pill{border-style:dashed;border-color:var(--s3d-private,rgba(180,205,198,.55))}
+.s3d-label.is-dropped .s3d-pill{color:var(--s3d-ink-dim,rgba(232,241,236,.6))}
+.s3d-label.is-done .s3d-pill{border-color:rgba(243,198,92,.6)}
+.s3d-label.is-hl .s3d-pill{border-color:var(--s3d-amber,#f0a24a);color:var(--s3d-ink-strong,#fff6ea);box-shadow:0 0 0 1px rgba(240,162,74,.35),0 0 14px rgba(240,162,74,.45)}
+.s3d-label.is-hover .s3d-pill{border-color:rgba(232,241,236,.45)}
+/* 星球自己的名字：浮在球体上方 */
+.s3d-self{display:flex;flex-direction:column;align-items:center;gap:1px;animation:s3d-in .5s ease-out both;font-family:var(--s3d-font,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif);pointer-events:none}
+.s3d-self-name{font-size:15px;font-weight:700;color:var(--s3d-ink-strong,#fff6ea);letter-spacing:.06em;padding:1px 10px;border-radius:999px;background:var(--s3d-self-bg,rgba(6,18,20,.42));text-shadow:0 0 14px rgba(243,198,92,.5),0 1px 2px rgba(0,0,0,.6)}
+.s3d-self-sub{font-size:10px;letter-spacing:.24em;padding-left:.24em;margin-top:2px;color:var(--s3d-ink-dim,rgba(232,241,236,.78))}
+/* 领域次行星标签 */
+.s3d-planet{display:flex;flex-direction:column;align-items:center;gap:1px;font-family:var(--s3d-font,"PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans SC",system-ui,sans-serif);transition:opacity .35s;animation:s3d-in .4s ease-out both}
+.s3d-planet-ch{font-size:23px;font-weight:700;line-height:1;color:var(--c);text-shadow:0 0 16px var(--c),0 1px 2px rgba(0,0,0,.5)}
+.s3d-planet-nm{font-size:10.5px;letter-spacing:.24em;padding-left:.24em;color:var(--s3d-ink,#e8f1ec);opacity:.66}
+.s3d-planet-n{font-size:10px;font-weight:600;color:var(--s3d-ink-dim,rgba(232,241,236,.72));letter-spacing:.06em}
+.s3d-planet.is-dim{opacity:.25}
 .s3d-sat{display:flex;align-items:center;gap:6px;transform:translateY(-15px);font:600 11px/1.2 var(--s3d-font,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif);color:var(--s3d-ink,#e8f1ec);white-space:nowrap;animation:s3d-in .3s ease-out both}
 .s3d-sat-n{min-width:17px;height:17px;border-radius:50%;display:grid;place-items:center;font-size:10px;background:rgba(7,20,22,.8);border:1px solid var(--c,#5f7d78);color:var(--c,#cfe)}
 .s3d-sat-t{display:none;background:rgba(7,20,22,.78);border:1px solid var(--c,#5f7d78);padding:2px 8px;border-radius:999px;max-width:180px;overflow:hidden;text-overflow:ellipsis}
@@ -115,7 +169,18 @@ const CSS = `
 .s3d-tip-lock{display:inline-block;width:8px;height:6px;border:1.5px solid currentColor;border-radius:2px;position:relative;margin:4px 2px 0 1px}
 .s3d-tip-lock::before{content:"";position:absolute;left:0;top:-6px;width:4px;height:5px;border:1.5px solid currentColor;border-bottom:0;border-radius:4px 4px 0 0}
 @keyframes s3d-in{from{opacity:0;filter:blur(2px)}to{opacity:1;filter:none}}
-@media (prefers-reduced-motion:reduce){.s3d-label,.s3d-cluster,.s3d-sat{animation:none}}
+/* 无障碍：画布是块"图像"，给它一段读屏说明；里面的标签不参与朗读 */
+.s3d-a11y{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+@media (prefers-reduced-motion:reduce){.s3d-label,.s3d-planet,.s3d-sat,.s3d-self{animation:none}}
+/* 浅色主题：CSS2D 标签/提示/卫星编号随界面切浅（画布内颜色由 applyTheme 换） */
+body[data-theme="light"] .s3d-root{background:#e3ede4;--s3d-ink:#22332b;--s3d-ink-dim:rgba(34,51,43,.66);--s3d-ink-strong:#141f18;--s3d-label-bg:rgba(255,255,255,.86);--s3d-label-border:rgba(24,44,36,.16);--s3d-private:rgba(120,85,140,.55);--s3d-tip-bg:rgba(255,255,255,.95);--s3d-vignette:rgba(255,255,255,.30)}
+body[data-theme="light"] .s3d-pill{text-shadow:none}
+body[data-theme="light"] .s3d-label.is-hl .s3d-pill{color:#7a4a12;border-color:#e0a04a}
+body[data-theme="light"] .s3d-self-name{color:#22332b;background:rgba(255,255,255,.72);text-shadow:none}
+body[data-theme="light"] .s3d-planet-ch{text-shadow:0 0 12px var(--c),0 1px 0 rgba(255,255,255,.5)}
+body[data-theme="light"] .s3d-sat{color:#22332b}
+body[data-theme="light"] .s3d-sat-n,body[data-theme="light"] .s3d-sat-t{background:rgba(255,255,255,.84);color:#3c5546}
+body[data-theme="light"] .s3d-tip{box-shadow:0 8px 24px rgba(24,44,36,.18)}
 `;
 
 function injectStyle() {
@@ -127,16 +192,16 @@ function injectStyle() {
 }
 
 // ============================================================
-// 3. 小工具：贴图
+// 3. 小工具：贴图 / 着色器片段
 // ============================================================
 
-function canvasTex(size, draw) {
+function canvasTex(size, draw, srgb = true) {
   const c = document.createElement("canvas");
   c.width = c.height = size;
   const g = c.getContext("2d");
   draw(g, size);
   const t = new THREE.CanvasTexture(c);
-  t.colorSpace = THREE.SRGBColorSpace;
+  if (srgb) t.colorSpace = THREE.SRGBColorSpace;
   return t;
 }
 
@@ -186,7 +251,18 @@ function makeTextures() {
     g.fillStyle = "rgba(6,18,20,0.9)";
     g.fillRect(cx - 1.5, cy, 3, 6);
   });
-  return { glow, ring, priv };
+  // 轨道环：内虚外亮的一圈细环（行星轨道 / 赤道环共用）
+  const orbit = canvasTex(256, (g, s) => {
+    const gr = g.createRadialGradient(s / 2, s / 2, s * 0.3, s / 2, s / 2, s * 0.5);
+    gr.addColorStop(0, "rgba(255,255,255,0)");
+    gr.addColorStop(0.72, "rgba(255,255,255,0.10)");
+    gr.addColorStop(0.86, "rgba(255,255,255,0.72)");
+    gr.addColorStop(0.94, "rgba(255,255,255,0.18)");
+    gr.addColorStop(1, "rgba(255,255,255,0)");
+    g.fillStyle = gr;
+    g.fillRect(0, 0, s, s);
+  });
+  return { glow, ring, priv, orbit };
 }
 
 function makeBackground(theme) {
@@ -196,13 +272,35 @@ function makeBackground(theme) {
     lin.addColorStop(1, theme.bottom);
     g.fillStyle = lin;
     g.fillRect(0, 0, s, s);
-    const rad = g.createRadialGradient(s * 0.5, s * 0.62, 0, s * 0.5, s * 0.62, s * 0.6);
+    const rad = g.createRadialGradient(s * 0.5, s * 0.6, 0, s * 0.5, s * 0.6, s * 0.62);
     rad.addColorStop(0, theme.glow);
     rad.addColorStop(1, "rgba(0,0,0,0)");
     g.fillStyle = rad;
     g.fillRect(0, 0, s, s);
-  });
+  }, false);
 }
+
+/** 三维值噪声 + fbm（星球的海陆/云带在片段着色器里算，不依赖任何贴图下载） */
+const GLSL_NOISE = `
+float s3dHash(vec3 p){
+  p = fract(p * 0.3183099 + vec3(0.1, 0.2, 0.3));
+  p *= 17.0;
+  return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+}
+float s3dNoise(vec3 x){
+  vec3 i = floor(x), f = fract(x);
+  f = f * f * (3.0 - 2.0 * f);
+  return mix(mix(mix(s3dHash(i + vec3(0.0,0.0,0.0)), s3dHash(i + vec3(1.0,0.0,0.0)), f.x),
+                 mix(s3dHash(i + vec3(0.0,1.0,0.0)), s3dHash(i + vec3(1.0,1.0,0.0)), f.x), f.y),
+             mix(mix(s3dHash(i + vec3(0.0,0.0,1.0)), s3dHash(i + vec3(1.0,0.0,1.0)), f.x),
+                 mix(s3dHash(i + vec3(0.0,1.0,1.0)), s3dHash(i + vec3(1.0,1.0,1.0)), f.x), f.y), f.z);
+}
+float s3dFbm(vec3 p){
+  float a = 0.5, s = 0.0;
+  for (int i = 0; i < 5; i++) { s += a * s3dNoise(p); p *= 2.02; a *= 0.5; }
+  return s;
+}
+`;
 
 // ============================================================
 // 4. 节点数据辅助
@@ -212,16 +310,36 @@ function domainOf(key) {
   return DOMAINS[key] || OTHER_DOMAIN;
 }
 
+/** 球面五锚点：都放在朝向默认相机的前半球，但高低/左右错开——
+ *  开场一眼能看全五科，又不会像等距五边形那样挤成一条竖线。 */
+const ANCHOR_DIRS = [
+  [0.00, 0.72, 0.69],   // 德 顶部
+  [-0.80, 0.30, 0.52],  // 智 左上
+  [0.78, 0.42, 0.46],   // 体 右上
+  [0.72, -0.55, 0.42],  // 美 右下
+  [-0.18, -0.72, 0.67], // 劳 下方
+];
+
+function computeDomainDirs() {
+  const out = new Map();
+  DOMAIN_KEYS.forEach((k, i) => {
+    const v = ANCHOR_DIRS[i % ANCHOR_DIRS.length];
+    out.set(k, new THREE.Vector3(v[0], v[1], v[2]).normalize());
+  });
+  return out;
+}
+
+/** 领域锚点（球面上的落点，随聚焦时的 pull 微调） */
 function anchorOf(key, out) {
-  const i = DOMAIN_KEYS.indexOf(key);
-  if (i < 0) return out.set(0, -3.2, 0);
-  const a = -Math.PI / 2 + (i * Math.PI * 2) / DOMAIN_KEYS.length;
-  return out.set(Math.cos(a) * ANCHOR_R, ANCHOR_Y[i] || 0, Math.sin(a) * ANCHOR_R);
+  const dir = R && R.domain ? R.domain.dir.get(key) : null;
+  if (!dir) return out.set(0, -R_PLANET * 0.5, 0);
+  const pull = R.domain.pull.get(key) || 1;
+  return out.copy(dir).multiplyScalar(R_PLANET * pull);
 }
 
 function radiusOf(w) {
   const x = Number(w);
-  return 0.2 + 0.085 * Math.sqrt(Number.isFinite(x) && x > 0 ? Math.min(x, 400) : 1);
+  return 0.24 + 0.1 * Math.sqrt(Number.isFinite(x) && x > 0 ? Math.min(x, 400) : 1);
 }
 
 function timeOf(s) {
@@ -307,7 +425,7 @@ export function initScene(containerEl) {
     (e) => {
       initPromise = null;
       try { if (R) disposeScene(); } catch (_) {}
-      console.warn("[scene3d] 初始化失败：", e && e.message);
+      console.warn("[scene3d] 初始化失败：", e && e.message, e && e.stack);
     }
   );
   return p;
@@ -315,6 +433,7 @@ export function initScene(containerEl) {
 
 function build(container, hiddenCanvas, OrbitControls, CSS2D, pandaMod, post) {
   injectStyle();
+  const th0 = THEMES[cfg.theme === "light" ? "light" : "dark"];
 
   // ---- WebGL ----
   const canvas = document.createElement("canvas");
@@ -331,6 +450,7 @@ function build(container, hiddenCanvas, OrbitControls, CSS2D, pandaMod, post) {
     throw new Error("WebGL 不可用");
   }
   if (!renderer.getContext()) throw new Error("WebGL 不可用");
+  canvas.tabIndex = 0;   // 可聚焦 → 方向键旋转 / 加减缩放
 
   // ---- DOM ----
   if (hiddenCanvas) {
@@ -360,198 +480,372 @@ function build(container, hiddenCanvas, OrbitControls, CSS2D, pandaMod, post) {
   const tip = document.createElement("div");
   tip.className = "s3d-tip";
   root.appendChild(tip);
+  const a11y = document.createElement("p");
+  a11y.className = "s3d-a11y";
+  a11y.textContent = "记忆星球：中心是孩子本人，五颗次行星分别是德智体美劳，悬浮的星星是记忆节点。" +
+    "方向键旋转、+/- 缩放、Home 回到全景；点击星星查看详情。";
+  root.appendChild(a11y);
+  canvas.setAttribute("aria-label", "记忆星球三维视图");
+  canvas.setAttribute("aria-describedby", "s3d-desc-a11y");
+  a11y.id = "s3d-desc-a11y";
   container.appendChild(root);
 
   renderer.setClearColor(0x0b1a1f, 1);
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 1.12;
+  renderer.toneMappingExposure = 1.08;
 
   // ---- 场景 ----
   const scene = new THREE.Scene();
-  const camera = new THREE.PerspectiveCamera(FOV, 1, 0.1, 400);
-  camera.position.set(0, 9, 30);
+  const camera = new THREE.PerspectiveCamera(FOV, 1, 0.1, 700);
+  camera.position.set(0, 12, 34);
   const tex = makeTextures();
-  const bgTex = { child: makeBackground(THEMES.child), parent: makeBackground(THEMES.parent) };
-  scene.background = bgTex.child;
-  scene.fog = new THREE.FogExp2(THEMES.child.fog, THEMES.child.fogD);
+  const bgTex = { dark: makeBackground(THEMES.dark), light: makeBackground(THEMES.light) };
+  scene.background = cfg.theme === "light" ? bgTex.light : bgTex.dark;
+  scene.fog = new THREE.FogExp2(th0.fog, th0.fogD);
 
   // PMREM 环境反射：让 PBR 材质有商业级高光层次（失败则跳过）
   let envTex = null, pmrem = null;
   if (post && post[4] && post[4].RoomEnvironment) {
     try {
       pmrem = new THREE.PMREMGenerator(renderer);
-      envTex = pmrem.fromScene(new post[4].RoomEnvironment(renderer), 0.06).texture;
+      envTex = pmrem.fromScene(new post[4].RoomEnvironment(renderer), 0.04).texture;
       scene.environment = envTex;
     } catch (_) { envTex = null; }
   }
 
-  const hemi = new THREE.HemisphereLight(0xcdeee2, 0x0b1a1f, THEMES.child.hemi);
+  const hemi = new THREE.HemisphereLight(th0.hemiSky, th0.hemiGround, th0.hemi);
   scene.add(hemi);
-  const key = new THREE.DirectionalLight(0xfff4e0, 1.9);   // 月光主光（暖白）
-  key.position.set(6, 12, 9);
+  const key = new THREE.DirectionalLight(0xfff4e0, th0.keyI);  // 恒星主光（暖白）
+  key.position.set(7, 11, 9);
   scene.add(key);
-  const rim = new THREE.DirectionalLight(0x8fe0bc, 0.9);   // 冷绿轮廓光
-  rim.position.set(-8, 3, -10);
+  const rim = new THREE.DirectionalLight(0x8fe0bc, th0.rimI);  // 冷绿轮廓光
+  rim.position.set(-9, 3, -10);
   scene.add(rim);
-  const fill = new THREE.PointLight(0xf0a24a, 22, 30, 1.8); // 暖色底光（灯笼感）
-  fill.position.set(0, -4.2, 6);
+  const fill = new THREE.PointLight(0xf0a24a, th0.fillI, 46, 1.7); // 暖色补光
+  fill.position.set(0, -6, 8);
   scene.add(fill);
-
-  // 中心"星球"柔光核：远处看是一颗微光星球
-  const core = new THREE.Sprite(new THREE.SpriteMaterial({
-    map: tex.glow, color: 0x7fd8ae, transparent: true, opacity: 0.16,
-    blending: THREE.AdditiveBlending, depthWrite: false, fog: false,
-  }));
-  core.scale.setScalar(11);
-  scene.add(core);
 
   const world = new THREE.Group();
   scene.add(world);
 
-  // 地台：柔光圆盘 + 同心圆
-  const ground = new THREE.Group();
-  ground.position.y = -6.5;
-  const discMat = new THREE.MeshBasicMaterial({
-    map: tex.glow, color: BAMBOO, transparent: true, opacity: 0.22,
+  // 领域锚点（球面斐波那契）
+  const dirs = computeDomainDirs();
+  const domain = {
+    dir: dirs,        // key -> 球面单位方向
+    pull: new Map(),  // key -> 半径倍率（聚焦时略抬）
+  };
+  for (const k of DOMAIN_KEYS) domain.pull.set(k, 1);
+
+  // ---------------------------------------------------------
+  // 星球本体：海陆/极冰/云带 + 昼夜分界 + 边缘辉光（全在着色器里算）
+  // ---------------------------------------------------------
+  // ShaderMaterial 要自己带上 three 的雾 uniform（fog:true 时 renderer 会去更新它们）
+  const planetUniforms = Object.assign(THREE.UniformsUtils.clone(THREE.UniformsLib.fog), {
+    uTime: { value: 0 },
+    uSea: { value: new THREE.Color(th0.sea) },
+    uLand: { value: new THREE.Color(th0.land) },
+    uLand2: { value: new THREE.Color(th0.land2) },
+    uIce: { value: new THREE.Color(th0.ice) },
+    uCloud: { value: new THREE.Color(th0.cloud) },
+    uRim: { value: new THREE.Color(th0.atmo) },
+    uRimI: { value: th0.planetRim },
+    uLight: { value: new THREE.Vector3(7, 11, 9).normalize() },
+  });
+  const planetMat = new THREE.ShaderMaterial({
+    uniforms: planetUniforms,
+    fog: true,
+    vertexShader: `
+      varying vec3 vN;
+      varying vec3 vWorld;
+      #include <fog_pars_vertex>
+      void main(){
+        vec4 wp = modelMatrix * vec4(position, 1.0);
+        vWorld = wp.xyz;
+        vN = normalize(mat3(modelMatrix) * normal);
+        vec4 mvPosition = viewMatrix * wp;
+        gl_Position = projectionMatrix * mvPosition;
+        #include <fog_vertex>
+      }`,
+    fragmentShader: `
+      uniform float uTime;
+      uniform vec3 uSea; uniform vec3 uLand; uniform vec3 uLand2; uniform vec3 uIce; uniform vec3 uCloud;
+      uniform vec3 uRim; uniform float uRimI; uniform vec3 uLight;
+      varying vec3 vN;
+      varying vec3 vWorld;
+      #include <fog_pars_fragment>
+      ${GLSL_NOISE}
+      void main(){
+        vec3 n = normalize(vN);
+        vec3 p = normalize(vWorld) * 2.6;
+        float c = s3dFbm(p + vec3(uTime * 0.012, 0.0, uTime * 0.006));
+        float land = smoothstep(0.46, 0.58, c);
+        float detail = s3dFbm(p * 3.1);
+        vec3 col = mix(uSea, mix(uLand, uLand2, clamp(detail * 1.4 - 0.25, 0.0, 1.0)), land);
+        float coast = smoothstep(0.40, 0.46, c) * (1.0 - land);
+        col = mix(col, uLand2, coast * 0.35);
+        float ice = smoothstep(0.80, 0.94, abs(n.y) + (detail - 0.5) * 0.10);
+        col = mix(col, uIce, ice);
+        float cl = s3dFbm(vec3(p.x * 1.3 + uTime * 0.02, p.y * 3.4, p.z * 1.3 - uTime * 0.014));
+        float cloud = smoothstep(0.52, 0.72, cl) * (1.0 - ice * 0.5);
+        col = mix(col, uCloud, cloud * 0.42);
+        float lam = dot(n, normalize(uLight));
+        float day = smoothstep(-0.22, 0.55, lam);
+        col *= 0.30 + 0.92 * day;
+        vec3 vd = normalize(cameraPosition - vWorld);
+        float fres = pow(1.0 - clamp(dot(n, vd), 0.0, 1.0), 2.6);
+        col += uRim * fres * uRimI;
+        gl_FragColor = vec4(col, 1.0);
+        #include <fog_fragment>
+      }`,
+  });
+  const planetGeo = new THREE.SphereGeometry(R_PLANET, 96, 64);
+  const planet = new THREE.Mesh(planetGeo, planetMat);
+  planet.name = "s3d-planet";
+  world.add(planet);
+
+  // 大气壳：外层辉光，背面渲染 + 叠加混合
+  const atmoMat = new THREE.ShaderMaterial({
+    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.BackSide,
+    uniforms: {
+      uColor: { value: new THREE.Color(th0.atmo) },
+      uIntensity: { value: th0.atmoI },
+      uPower: { value: 3.1 },
+      uLight: { value: planetUniforms.uLight.value },
+    },
+    vertexShader: `
+      varying vec3 vN; varying vec3 vWorld;
+      void main(){
+        vec4 wp = modelMatrix * vec4(position, 1.0);
+        vWorld = wp.xyz; vN = normalize(mat3(modelMatrix) * normal);
+        gl_Position = projectionMatrix * viewMatrix * wp;
+      }`,
+    fragmentShader: `
+      uniform vec3 uColor; uniform float uIntensity; uniform float uPower; uniform vec3 uLight;
+      varying vec3 vN; varying vec3 vWorld;
+      void main(){
+        vec3 n = normalize(vN);
+        vec3 vd = normalize(cameraPosition - vWorld);
+        float f = pow(clamp(dot(n, vd) + 1.0, 0.0, 1.0), uPower);
+        float lit = 0.42 + 0.58 * smoothstep(-0.5, 0.9, dot(-n, normalize(uLight)));
+        gl_FragColor = vec4(uColor, f * uIntensity * lit);
+      }`,
+  });
+  const atmo = new THREE.Mesh(new THREE.SphereGeometry(R_PLANET * 1.055, 64, 48), atmoMat);
+  world.add(atmo);
+
+  // 星球外层柔光（bloom 拾取用；浅色主题下换普通混合，靠颜色本身出层次）
+  const haloMat = new THREE.SpriteMaterial({
+    map: tex.glow, color: th0.atmo, transparent: true, opacity: th0.planetHaloOp,
     blending: THREE.AdditiveBlending, depthWrite: false, fog: false,
   });
-  const disc = new THREE.Mesh(new THREE.PlaneGeometry(34, 34), discMat);
-  disc.rotation.x = -Math.PI / 2;
-  ground.add(disc);
-  const circleMat = new THREE.LineBasicMaterial({ color: 0x8fd9b6, transparent: true, opacity: 0.1, depthWrite: false });
-  for (const r of [6, 10.5, 15]) {
-    const pts = [];
-    for (let i = 0; i <= 96; i++) {
-      const a = (i / 96) * Math.PI * 2;
-      pts.push(new THREE.Vector3(Math.cos(a) * r, 0, Math.sin(a) * r));
-    }
-    ground.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), circleMat));
-  }
-  world.add(ground);
+  const planetHalo = new THREE.Sprite(haloMat);
+  planetHalo.scale.setScalar(R_PLANET * 3.1);
+  world.add(planetHalo);
 
-  // 星尘
-  const DUST = 260;
+  // 经纬球网：让球体"读得出来是个球"
+  const gridMat = new THREE.LineBasicMaterial({
+    color: th0.grid, transparent: true, opacity: th0.gridOp, depthWrite: false,
+  });
+  const gridGroup = new THREE.Group();
+  for (const lat of [-45, 0, 45]) {
+    const y = Math.sin((lat * Math.PI) / 180) * R_PLANET;
+    const r = Math.cos((lat * Math.PI) / 180) * R_PLANET;
+    const pts = [];
+    for (let i = 0; i <= 128; i++) {
+      const a = (i / 128) * Math.PI * 2;
+      pts.push(new THREE.Vector3(Math.cos(a) * r, y, Math.sin(a) * r));
+    }
+    gridGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), gridMat));
+  }
+  for (let m = 0; m < 4; m++) {
+    const pts = [];
+    const a = (m / 4) * Math.PI;
+    for (let i = 0; i <= 128; i++) {
+      const t = (i / 128) * Math.PI * 2;
+      pts.push(new THREE.Vector3(
+        Math.cos(t) * R_PLANET * Math.cos(a),
+        Math.sin(t) * R_PLANET,
+        Math.cos(t) * R_PLANET * Math.sin(a)
+      ));
+    }
+    gridGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), gridMat));
+  }
+  world.add(gridGroup);
+
+  // ---------------------------------------------------------
+  // 星空：三层，远近不同大小与漂移速度（深空靠"深度"而不是数量堆）
+  // ---------------------------------------------------------
+  const starLayers = [];
+  const starSpecs = [
+    { r0: 46, r1: 96, size: 0.55, op: 0.85, drift: 0.006, n: 520 },
+    { r0: 96, r1: 170, size: 0.95, op: 0.70, drift: 0.003, n: 300 },
+    { r0: 170, r1: 280, size: 1.70, op: 0.55, drift: 0.0016, n: 160 },
+  ];
+  starSpecs.forEach((sp, li) => {
+    const pos = new Float32Array(sp.n * 3);
+    for (let i = 0; i < sp.n; i++) {
+      const r = sp.r0 + Math.random() * (sp.r1 - sp.r0);
+      const th = Math.random() * Math.PI * 2;
+      const ph = Math.acos(2 * Math.random() - 1);
+      pos[i * 3] = r * Math.sin(ph) * Math.cos(th);
+      pos[i * 3 + 1] = r * Math.cos(ph);
+      pos[i * 3 + 2] = r * Math.sin(ph) * Math.sin(th);
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+    const mat = new THREE.PointsMaterial({
+      size: sp.size, map: tex.glow, transparent: true, opacity: sp.op,
+      depthWrite: false, blending: THREE.AdditiveBlending, sizeAttenuation: true, fog: false,
+      color: li === 2 ? th0.starC : li === 1 ? th0.starB : th0.starA,
+    });
+    const points = new THREE.Points(geo, mat);
+    points.frustumCulled = false;
+    scene.add(points);
+    starLayers.push({ points, mat, drift: sp.drift });
+  });
+
+  // 近场星尘（星球周围一圈微尘，随场景缓慢自转）
+  const DUST = 340;
   const dustPos = new Float32Array(DUST * 3);
   for (let i = 0; i < DUST; i++) {
-    const r = 14 + Math.random() * 26;
+    const r = R_PLANET * 1.4 + Math.random() * 22;
     const th = Math.random() * Math.PI * 2;
     const ph = Math.acos(2 * Math.random() - 1);
     dustPos[i * 3] = r * Math.sin(ph) * Math.cos(th);
-    dustPos[i * 3 + 1] = r * Math.cos(ph) * 0.6;
+    dustPos[i * 3 + 1] = r * Math.cos(ph) * 0.75;
     dustPos[i * 3 + 2] = r * Math.sin(ph) * Math.sin(th);
   }
   const dustGeo = new THREE.BufferGeometry();
   dustGeo.setAttribute("position", new THREE.BufferAttribute(dustPos, 3));
-  const dust = new THREE.Points(dustGeo, new THREE.PointsMaterial({
-    size: 0.32, map: tex.glow, color: 0xa6e3c8, transparent: true, opacity: 0.55,
+  const dustMat = new THREE.PointsMaterial({
+    size: 0.3, map: tex.glow, color: th0.dust, transparent: true, opacity: th0.dustOp,
     depthWrite: false, blending: THREE.AdditiveBlending, sizeAttenuation: true, fog: false,
-  }));
+  });
+  const dust = new THREE.Points(dustGeo, dustMat);
+  dust.frustumCulled = false;
   scene.add(dust);
 
-  // 中心到五领域的虚线辐条
-  const spokeMat = new THREE.LineDashedMaterial({ color: 0x9fd9bf, dashSize: 0.35, gapSize: 0.45, transparent: true, opacity: 0.13, depthWrite: false });
-  const spokePts = [];
-  const tmpA = new THREE.Vector3();
-  for (const k of DOMAIN_KEYS) {
-    anchorOf(k, tmpA);
-    spokePts.push(new THREE.Vector3(0, 0, 0), tmpA.clone());
-  }
-  const spokes = new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(spokePts), spokeMat);
-  spokes.computeLineDistances();
-  world.add(spokes);
+  // 赤道轨道环：星球外侧一圈细环，视觉上锚定"这是一颗行星"
+  const orbitRingMat = new THREE.MeshBasicMaterial({
+    map: tex.orbit, color: th0.ring, transparent: true, opacity: th0.ringOp,
+    blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide, fog: false,
+  });
+  const orbitRing = new THREE.Mesh(new THREE.PlaneGeometry(R_PLANET * 6.2, R_PLANET * 6.2), orbitRingMat);
+  orbitRing.rotation.x = -Math.PI / 2 + 0.05;
+  orbitRing.position.y = -0.35;
+  world.add(orbitRing);
 
-  // 领域簇：柔光 + 标签
-  const clusters = {};
-  for (const k of DOMAIN_KEYS) {
+  // ---------------------------------------------------------
+  // 领域次行星：球体 + 大气壳 + 轨道环 + 光晕 + 中文标签
+  // ---------------------------------------------------------
+  const planetGeoSmall = new THREE.IcosahedronGeometry(1, 3);
+  const domainObjs = new Map();
+  DOMAIN_KEYS.forEach((k) => {
     const d = DOMAINS[k];
+    const dir = dirs.get(k);
     const g = new THREE.Group();
-    anchorOf(k, g.position);
-    const halo = new THREE.Sprite(new THREE.SpriteMaterial({
-      map: tex.glow, color: d.hex, transparent: true, opacity: 0.0,
+    g.position.copy(dir).multiplyScalar(R_PLANET);
+    // 让每颗行星的"北极"朝向球心外法线，轨道环才贴着球面
+    g.quaternion.copy(new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.clone()));
+
+    const bodyMat = new THREE.MeshStandardMaterial({
+      color: d.hex, roughness: 0.55, metalness: 0.12,
+      emissive: new THREE.Color(d.hex), emissiveIntensity: 0.34,
+      transparent: true, envMapIntensity: 0.8,
+    });
+    const body = new THREE.Mesh(planetGeoSmall, bodyMat);
+    body.scale.setScalar(0.86);
+    g.add(body);
+
+    const shellMat = new THREE.ShaderMaterial({
+      transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.BackSide,
+      uniforms: { uColor: { value: new THREE.Color(d.hex) }, uI: { value: th0.shellI } },
+      vertexShader: `varying vec3 vN; varying vec3 vW;
+        void main(){ vec4 wp = modelMatrix * vec4(position,1.0); vW = wp.xyz; vN = normalize(mat3(modelMatrix)*normal);
+        gl_Position = projectionMatrix * viewMatrix * wp; }`,
+      fragmentShader: `uniform vec3 uColor; uniform float uI; varying vec3 vN; varying vec3 vW;
+        void main(){ vec3 n = normalize(vN); vec3 vd = normalize(cameraPosition - vW);
+        float f = pow(clamp(dot(n, vd) + 1.0, 0.0, 1.0), 3.0);
+        gl_FragColor = vec4(uColor, f * uI); }`,
+    });
+    const shell = new THREE.Mesh(planetGeoSmall, shellMat);
+    shell.scale.setScalar(1.1);
+    g.add(shell);
+
+    const ringPts = [];
+    for (let i = 0; i <= 96; i++) {
+      const a = (i / 96) * Math.PI * 2;
+      ringPts.push(new THREE.Vector3(Math.cos(a) * RING_R, 0, Math.sin(a) * RING_R));
+    }
+    const ringMat = new THREE.LineBasicMaterial({
+      color: d.hex, transparent: true, opacity: th0.ringOp, depthWrite: false,
+    });
+    const ring = new THREE.Line(new THREE.BufferGeometry().setFromPoints(ringPts), ringMat);
+    ring.rotation.z = 0.16;
+    g.add(ring);
+
+    const haloMatD = new THREE.SpriteMaterial({
+      map: tex.glow, color: d.hex, transparent: true, opacity: th0.haloOp,
       blending: THREE.AdditiveBlending, depthWrite: false, fog: false,
-    }));
-    halo.scale.setScalar(9);
+    });
+    const halo = new THREE.Sprite(haloMatD);
+    halo.scale.setScalar(7.5);
     g.add(halo);
+
     const el = document.createElement("div");
-    el.className = "s3d-cluster";
+    el.className = "s3d-planet";
     el.style.setProperty("--c", d.css);
     const ch = document.createElement("div");
-    ch.className = "s3d-cluster-ch";
+    ch.className = "s3d-planet-ch";
     ch.textContent = d.ch;
     const nm = document.createElement("div");
-    nm.className = "s3d-cluster-name";
+    nm.className = "s3d-planet-nm";
     nm.textContent = d.name;
+    const cnt = document.createElement("div");
+    cnt.className = "s3d-planet-n";
+    cnt.textContent = "";
     el.appendChild(ch);
     el.appendChild(nm);
+    el.appendChild(cnt);
     const lab = new CSS2D.CSS2DObject(el);
     lab.position.set(0, 3.6, 0);
+    lab.center.set(0.5, 1);
     g.add(lab);
+
     world.add(g);
-    clusters[k] = { group: g, halo, lab, el, count: 0, target: new THREE.Vector3().copy(g.position), dimmed: false, alpha: 0 };
-  }
+    domainObjs.set(k, {
+      key: k, group: g, body, bodyMat, shell, shellMat, ring, ringMat, halo, haloMatD,
+      lab, el, countEl: cnt, count: -1, alpha: 1, dimmed: false, phase: Math.random() * 6.28,
+    });
+  });
 
   // 边：一个 LineSegments，RGBA 顶点色
   const edgeMat = new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, depthWrite: false });
 
   // 共享几何
-  const sphereGeo = new THREE.SphereGeometry(1, 28, 20);
+  const sphereGeo = new THREE.SphereGeometry(1, 24, 18);
   const satGeo = new THREE.IcosahedronGeometry(1, 1);
 
   // ---- 控制 ----
   const controls = new OrbitControls(camera, canvas);
   controls.enableDamping = true;
   controls.dampingFactor = 0.08;
-  controls.rotateSpeed = 0.7;
+  controls.rotateSpeed = 0.66;
   controls.zoomSpeed = 0.8;
-  controls.panSpeed = 0.7;
-  controls.minDistance = 4;
-  controls.maxDistance = 70;
-  controls.maxPolarAngle = Math.PI * 0.86;
-  controls.autoRotate = true;
-  controls.autoRotateSpeed = 0.45;
+  controls.enablePan = false;               // 星球居中，平移只会让人迷路
+  controls.minDistance = 13;                // 不能进到星球里
+  controls.maxDistance = 78;
+  controls.minPolarAngle = 0.22;
+  controls.maxPolarAngle = Math.PI - 0.22;
+  controls.autoRotate = !reduceMotion();
+  controls.autoRotateSpeed = 0.42;
   controls.target.set(0, 0, 0);
 
-  R = {
-    container, hiddenCanvas, restorePos, root, canvas, renderer, css2d, CSS2D, tip,
-    scene, camera, controls, world, tex, bgTex, hemi, key, rim, fill, core, ground, dust, spokes, clusters,
-    composer: null, bloom: null, envTex, pmrem,
-    edgeMat, edgeLines: null, edgeCap: 0, edgeList: [],
-    sphereGeo, satGeo,
-    nodes: new Map(), // id -> ns
-    order: [], // ns 列表（稳定）
-    selfId: null,
-    sim: { alpha: 0 },
-    w: 0, h: 0, dpr: 1,
-    running: false, raf: 0, last: 0, time: 0,
-    hidden: typeof document !== "undefined" && document.hidden,
-    intersecting: true,
-    lost: false,
-    ready: false,
-    failed: false,
-    fps: { active: 0, frames: 0, done: false },
-    lastInteract: -1e9,
-    dragging: false,
-    pointer: { x: 0, y: 0, ndcX: 0, ndcY: 0, inside: false, dirty: false, downX: 0, downY: 0, downT: 0, down: false, type: "mouse" },
-    hover: null,
-    focusId: null,
-    fly: null,
-    raycaster: new THREE.Raycaster(),
-    pickList: [],
-    ndc: new THREE.Vector2(),
-    v1: new THREE.Vector3(), v2: new THREE.Vector3(), v3: new THREE.Vector3(),
-    col: new THREE.Color(), col2: new THREE.Color(), gray: new THREE.Color(0x7d8b88), amber: new THREE.Color(AMBER),
-    plan: null,
-    planFading: [],
-    bursts: [],
-    labelBudget: 8,
-    panda: null,
-    listeners: [],
-    observers: [],
-    lostTimer: 0,
-  };
-
-  // ---- 熊猫（可选，左下角小视窗，不遮挡图谱主体）----
+  // ---------------------------------------------------------
+  // 熊猫小视窗（可选，左下角，不吃主场景资源）
+  // ---------------------------------------------------------
+  let panda = null;
   if (pandaMod && typeof pandaMod.createPanda === "function") {
     try {
       pandaMod.useThree && pandaMod.useThree(THREE);
@@ -607,20 +901,71 @@ function build(container, hiddenCanvas, OrbitControls, CSS2D, pandaMod, post) {
       const dist = (size.y * 1.22) / (2 * Math.tan((25 * Math.PI) / 360));
       pCam.position.set(center.x, center.y + size.y * 0.045, center.z + dist);
       pCam.lookAt(center.x, center.y, center.z);
-      R.panda = { mod: pandaMod, scene: pScene, cam: pCam, group, rect: { x: 0, y: 0, w: 0, h: 0, on: false } };
+      panda = { mod: pandaMod, scene: pScene, cam: pCam, group, rect: { x: 0, y: 0, w: 0, h: 0, on: false }, last: -1, sig: "" };
       pandaMod.setPandaMood(group, cfg.mood);
     } catch (e) {
       console.debug("[scene3d] 熊猫不可用：", e && e.message);
-      R.panda = null;
+      panda = null;
     }
   }
+
+  R = {
+    container, hiddenCanvas, restorePos, root, canvas, renderer, css2d, CSS2D, tip, a11y,
+    scene, camera, controls, world, tex, bgTex, hemi, key, rim, fill,
+    planet, planetGeo, planetMat, planetUniforms, atmo, atmoMat, planetHalo, haloMat,
+    gridMat, gridGroup, orbitRing, orbitRingMat,
+    dustMat, dust, starLayers,
+    domain, domainObjs, planetGeoSmall,
+    composer: null, bloom: null, envTex, pmrem,
+    edgeMat, edgeLines: null, edgeCap: 0, edgeList: [], edgePool: [],
+    sphereGeo, satGeo,
+    nodes: new Map(),   // id -> ns
+    order: [],          // ns 列表（稳定）
+    selfId: null, selfNs: null, selfLabel: null,
+    additive: new Set(),
+    addTexes: [tex.orbit],
+    sim: { alpha: 0 },
+    w: 0, h: 0, dpr: 1,
+    running: false, raf: 0, last: 0, time: 0, frame: 0, idleAcc: 0,
+    hidden: typeof document !== "undefined" && document.hidden,
+    intersecting: true,
+    lost: false,
+    ready: false,
+    failed: false,
+    budget: { frames: 0, sum: 0, done: false, samples: 0, low: false },
+    lastInteract: -1e9,
+    dragging: false,
+    reduce: reduceMotion(),
+    spin: !reduceMotion(),
+    pointer: { x: 0, y: 0, ndcX: 0, ndcY: 0, inside: false, dirty: false, downX: 0, downY: 0, downT: 0, down: false, type: "mouse" },
+    hover: null,
+    focusId: null,
+    fly: null,
+    raycaster: new THREE.Raycaster(),
+    pickList: [],
+    ndc: new THREE.Vector2(),
+    v1: new THREE.Vector3(), v2: new THREE.Vector3(), v3: new THREE.Vector3(), v4: new THREE.Vector3(),
+    col: new THREE.Color(), col2: new THREE.Color(), gray: new THREE.Color(0x7d8b88), amber: new THREE.Color(AMBER),
+    plan: null, planFading: [],
+    bursts: [],
+    labelBudget: 8,
+    panda,
+    listeners: [], observers: [],
+    lostTimer: 0,
+    theme: cfg.theme === "light" ? "light" : "dark",
+  };
+  ensureScratch();
+  regAdditive(haloMat);
+  for (const s of starLayers) regAdditive(s.mat);
+  regAdditive(dustMat);
+  regAdditive(orbitRingMat);
 
   // ---- 后处理链：RenderPass → Bloom → Output（加载失败自动降级普通渲染）----
   if (post && post[0] && post[1] && post[2] && post[3]) {
     try {
       const composer = new post[0].EffectComposer(renderer);
       composer.addPass(new post[1].RenderPass(scene, camera));
-      const bloom = new post[2].UnrealBloomPass(new THREE.Vector2(512, 512), 0.62, 0.5, 0.8);
+      const bloom = new post[2].UnrealBloomPass(new THREE.Vector2(512, 512), th0.bloom, 0.55, th0.bloomTh);
       composer.addPass(bloom);
       composer.addPass(new post[3].OutputPass());
       R.composer = composer;
@@ -634,11 +979,10 @@ function build(container, hiddenCanvas, OrbitControls, CSS2D, pandaMod, post) {
   wireEvents();
   applyTheme();
   syncGraph(true);
-  ensureScratch();
   measure();
   fitOverview(true);
   R.ready = true;
-  if (R.w > 0 && R.h > 0) renderFrame(0);
+  if (R.w > 0 && R.h > 0) renderFrame(0, true);
   updateRunning();
 }
 
@@ -671,7 +1015,8 @@ function wireEvents() {
   });
   on(canvas, "pointerleave", () => {
     R.pointer.inside = false;
-    R.pointer.dirty = true;
+    R.pointer.dirty = false;
+    setHover(null);
   });
   on(canvas, "pointerdown", (e) => {
     const p = R.pointer;
@@ -681,6 +1026,7 @@ function wireEvents() {
     p.downT = nowMs();
     R.lastInteract = nowMs();
     stopAutoRotate();
+    wake();
   });
   on(canvas, "pointerup", (e) => {
     const p = R.pointer;
@@ -689,10 +1035,32 @@ function wireEvents() {
     const moved = Math.hypot(e.clientX - p.downX, e.clientY - p.downY);
     if (moved > 6 || nowMs() - p.downT > 700) return;
     const rect = canvas.getBoundingClientRect();
-    const x = e.clientX - rect.left, y = e.clientY - rect.top;
-    handleTap(x, y, rect);
+    handleTap(e.clientX - rect.left, e.clientY - rect.top, rect);
   });
-  on(canvas, "wheel", () => { R.lastInteract = nowMs(); stopAutoRotate(); }, { passive: true });
+  on(canvas, "wheel", () => { R.lastInteract = nowMs(); stopAutoRotate(); wake(); }, { passive: true });
+
+  // 键盘：方向键旋转 / +- 缩放 / Home 全景（画布可聚焦，属于无障碍基本要求）
+  on(canvas, "keydown", (e) => {
+    if (!R.ready) return;
+    const step = 0.16;
+    let hit = true;
+    switch (e.key) {
+      case "ArrowLeft": rotateAround(-step, 0); break;
+      case "ArrowRight": rotateAround(step, 0); break;
+      case "ArrowUp": rotateAround(0, -step * 0.7); break;
+      case "ArrowDown": rotateAround(0, step * 0.7); break;
+      case "+": case "=": dolly(0.88); break;
+      case "-": case "_": dolly(1.14); break;
+      case "Home": fitOverview(false); break;
+      default: hit = false;
+    }
+    if (hit) {
+      e.preventDefault();
+      R.lastInteract = nowMs();
+      stopAutoRotate();
+      wake();
+    }
+  });
 
   on(canvas, "webglcontextlost", (e) => {
     e.preventDefault();
@@ -758,14 +1126,21 @@ function onControlEnd() {
 function stopAutoRotate() {
   if (R && R.controls) R.controls.autoRotate = false;
 }
+/** 有人操作 / 有动画需求时把渲染唤醒 */
+function wake() {
+  if (!R) return;
+  R.idleAcc = 0;
+  updateRunning();
+}
 
 function measure() {
   if (!R) return;
   const el = R.container;
   const w = Math.floor(el.clientWidth || 0);
   const h = Math.floor(el.clientHeight || 0);
-  const many = R.order.length > 60;
-  const dpr = Math.min(typeof devicePixelRatio === "number" ? devicePixelRatio : 1, many ? 1.5 : 2);
+  const many = R.order.length > 70;
+  const cap = many ? 1.5 : 2;
+  const dpr = Math.min(typeof devicePixelRatio === "number" ? devicePixelRatio : 1, R.budget.low ? 1.35 : cap);
   if (w === R.w && h === R.h && dpr === R.dpr) return;
   R.w = w;
   R.h = h;
@@ -777,9 +1152,8 @@ function measure() {
   if (R.composer) { try { R.composer.setSize(w, h); } catch (_) {} }
   R.camera.aspect = w / h;
   R.camera.updateProjectionMatrix();
-  R.labelBudget = w * h > 700000 ? 16 : w * h > 300000 ? 11 : 7;
+  R.labelBudget = w * h > 700000 ? 14 : w * h > 300000 ? 10 : 6;
   layoutPandaRect();
-  if (R.ready && !R.running) renderFrame(0);
 }
 
 function layoutPandaRect() {
@@ -803,6 +1177,17 @@ function canRun() {
   return R && R.ready && !R.failed && !R.lost && !R.hidden && R.intersecting && R.w > 0 && R.h > 0;
 }
 
+/** 是否有"必须满帧"的动画：交互 / 相机飞行 / 布局收敛 / 特效 / 悬停 / 规划卫星 */
+function busyFrames() {
+  if (!R) return false;
+  if (R.fly || R.dragging || R.controls.autoRotate) return true;
+  if (R.sim.alpha > 0 || R.bursts.length || R.planFading.length) return true;
+  if (R.hover || R.plan) return true;
+  if (R.pointer.dirty) return true;
+  if (R.panda && R.panda.rect.on) return true;
+  return nowMs() - R.lastInteract < 1200;
+}
+
 function updateRunning() {
   if (!R) return;
   const want = canRun();
@@ -824,26 +1209,45 @@ function loop() {
   const t = nowMs();
   const dt = Math.min(0.05, Math.max(0, (t - R.last) / 1000));
   R.last = t;
-  // 尺寸兜底：ResizeObserver 在某些重挂载场景下可能晚到
   if (R.container.clientWidth !== R.w || R.container.clientHeight !== R.h) {
     measure();
     if (!canRun()) { updateRunning(); return; }
   }
-  renderFrame(dt);
-  fpsCheck(dt);
+  const busy = busyFrames();
+  if (!busy) {
+    // 空闲：只保留星球自转，帧率降到 IDLE_FPS；reduced-motion 时干脆停帧等下一次交互
+    R.idleAcc += dt;
+    if (R.reduce) {
+      if (R.idleAcc > 0.4) R.running = false, cancelAnimationFrame(R.raf), R.raf = 0;
+      return;
+    }
+    if (R.idleAcc < 1 / IDLE_FPS) return;
+    R.idleAcc = 0;
+  } else {
+    R.idleAcc = 0;
+  }
+  renderFrame(dt, false);
+  if (dt > 0) budgetCheck(dt);
 }
 
-function fpsCheck(dt) {
-  const f = R.fps;
-  if (f.done) return;
-  f.active += dt;
-  if (f.active < 1) return; // 跳过着色器编译的头 1 秒
-  f.frames++;
-  f.time = (f.time || 0) + dt;
-  if (f.active >= 5) {
-    f.done = true;
-    const fps = f.frames / Math.max(0.001, f.time);
-    if (fps < 20) triggerFallback("帧率不足");
+/** 自适应画质：连续若干帧平均帧时超预算就降档（DPR → 关 bloom → 砍熊猫小窗），只降不升 */
+function budgetCheck(dt) {
+  const b = R.budget;
+  if (b.done) return;
+  b.frames++;
+  b.sum += dt;
+  if (b.frames < 90) return;
+  const avg = b.sum / b.frames;
+  b.frames = 0; b.sum = 0;
+  b.samples++;
+  if (avg <= 0.045) { b.done = true; return; }   // ≥22fps，合格
+  if (b.samples >= 4) { b.done = true; return; }
+  if (!b.low) {
+    b.low = true;
+    R.w = -1; measure();                          // 降 DPR
+    if (R.bloom) R.bloom.strength = 0;            // 关掉最贵的一段
+  } else if (R.panda) {
+    R.panda.rect.on = false;
   }
 }
 
@@ -859,7 +1263,7 @@ function triggerFallback(reason) {
 }
 
 // ============================================================
-// 7. 图数据同步 + 力导向布局
+// 7. 图数据同步 + 球面布局
 // ============================================================
 
 function syncGraph(initial) {
@@ -874,7 +1278,7 @@ function syncGraph(initial) {
   }
   R.refTime = Number.isFinite(maxLast) ? Math.max(maxLast, Date.now() - 86400000 * 30) : Date.now();
 
-  // 中心"自己"节点：权重最高的 person
+  // 星球本人（中心）：权重最高的 person
   if (!R.selfId || !data.nodes.some((n) => n.id === R.selfId)) {
     let best = null;
     for (const n of data.nodes) if (n.type === "person" && (!best || (+n.weight || 0) > (+best.weight || 0))) best = n;
@@ -895,7 +1299,6 @@ function syncGraph(initial) {
     }
     styleNode(ns);
   }
-  // 移除
   for (const ns of R.order) {
     if (!seen.has(ns.id) && !ns.dying) {
       ns.dying = true;
@@ -903,78 +1306,61 @@ function syncGraph(initial) {
     }
   }
 
-  // 新节点初始位置：邻居附近 / 领域锚点附近
-  if (added.length) {
-    const adj = buildAdjacency(data.edges);
-    for (const ns of added) {
-      if (ns.id === R.selfId) { ns.p.set(0, 0, 0); continue; }
-      const nb = (adj.get(ns.id) || []).map((id) => R.nodes.get(id)).find((o) => o && !added.includes(o));
-      if (nb) ns.p.copy(nb.p);
-      else anchorOf(ns.data.domain, ns.p);
-      ns.p.x += (Math.random() - 0.5) * 2.4;
-      ns.p.y += (Math.random() - 0.5) * 2.4;
-      ns.p.z += (Math.random() - 0.5) * 2.4;
-    }
-    const firstLayout = R.order.length === added.length;
-    for (const ns of R.order) ns.mob = added.includes(ns) || firstLayout ? 1 : 0.12;
-    if (firstLayout) {
-      R.sim.alpha = 1;
-      for (let i = 0; i < 260 && R.sim.alpha > 0.02; i++) simTick();
-      // 入场：错峰弹出
-      added.forEach((ns, i) => { ns.appearDelay = 0.15 + (i / Math.max(1, added.length)) * 0.9; });
-    } else {
-      R.sim.alpha = Math.max(R.sim.alpha, 0.4);
-    }
-    if (!initial || !firstLayout) for (const ns of added) if (!firstLayout) ns.appearDelay = 0;
-  }
   rebuildEdges();
+  relayout();
   applyVisibility();
-  if (added.length && R.order.length > 60) measure();
-}
 
-function buildAdjacency(edges) {
-  const m = new Map();
-  for (const e of edges) {
-    const s = idOf(e.source), t = idOf(e.target);
-    if (!m.has(s)) m.set(s, []);
-    if (!m.has(t)) m.set(t, []);
-    m.get(s).push(t);
-    m.get(t).push(s);
+  if (added.length) {
+    for (const ns of added) {
+      ns.appear = 0;
+      ns.appearDelay = initial ? 0.15 + Math.random() * 0.4 : 0.05;
+    }
   }
-  return m;
+  if (R.order.length > 70) measure();
+  wake();
 }
 
 function createNodeState(n) {
   const group = new THREE.Group();
-  const mat = new THREE.MeshStandardMaterial({ roughness: 0.42, metalness: 0.08, transparent: true, envMapIntensity: 0.7 });
+  const mat = new THREE.MeshStandardMaterial({ roughness: 0.4, metalness: 0.06, transparent: true, envMapIntensity: 0.7 });
   const mesh = new THREE.Mesh(R.sphereGeo, mat);
   mesh.userData.nid = n.id;
   group.add(mesh);
-  const halo = new THREE.Sprite(new THREE.SpriteMaterial({
+  const halo = new THREE.Sprite(regAdditive(new THREE.SpriteMaterial({
     map: R.tex.glow, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, fog: false,
-  }));
+  })));
   group.add(halo);
+  // 标签：胶囊在上、细尾在下，尾端圆点落在节点上（center=(0.5,1)）
   const el = document.createElement("div");
   el.className = "s3d-label";
+  const pill = document.createElement("span");
+  pill.className = "s3d-pill";
   const dot = document.createElement("span");
   dot.className = "s3d-dot";
   const txt = document.createElement("span");
-  el.appendChild(dot);
-  el.appendChild(txt);
+  txt.className = "s3d-txt";
+  pill.appendChild(dot);
+  pill.appendChild(txt);
+  const tail = document.createElement("span");
+  tail.className = "s3d-tail";
+  el.appendChild(pill);
+  el.appendChild(tail);
   const label = new R.CSS2D.CSS2DObject(el);
+  label.center.set(0.5, 1);
   label.visible = false;
   group.add(label);
   group.visible = false;
   R.world.add(group);
   return {
-    id: n.id, data: n, group, mesh, mat, halo, label, el, txt,
+    id: n.id, data: n, group, mesh, mat, halo, label, el, pillar: pill, txt,
     ring: null, priv: null,
-    p: new THREE.Vector3(), v: new THREE.Vector3(),
-    mob: 1, r: 0.4, rec: 1, baseOpacity: 1,
+    p: new THREE.Vector3(), wp: new THREE.Vector3(), tp: new THREE.Vector3(),
+    u: 0, v: 0, h: SHELL_H0,
+    mob: 1, r: 0.4, rec: 1, baseOpacity: 1, bob: Math.random() * 6.28,
     vis: 0, visTarget: 1, dim: 1, dimTarget: 1,
-    appear: 0, appearDelay: 0, dying: false,
-    pulseUntil: 0, pulseColor: AMBER, spawnedAt: 0,
-    labelOn: false, labelCls: "", sig: "",
+    appear: 0, appearDelay: 0, dying: false, placed: false,
+    pulseUntil: 0, spawnedAt: 0,
+    labelCls: "", sig: "",
   };
 }
 
@@ -984,7 +1370,7 @@ function styleNode(ns) {
   if (sig === ns.sig) return;
   ns.sig = sig;
   const d = domainOf(n.domain);
-  ns.r = radiusOf(n.weight) * (n.id === R.selfId ? 1.15 : 1);
+  ns.r = radiusOf(n.weight);
   const lt = timeOf(n.last_seen);
   ns.rec = Number.isFinite(lt) ? clamp(1 - (R.refTime - lt) / (RECENT_DAYS * 86400000), 0.28, 1) : 0.4;
   const dropped = n.status === "dropped";
@@ -992,10 +1378,10 @@ function styleNode(ns) {
   if (dropped) c.lerp(R.gray, 0.65);
   ns.mat.color.copy(c);
   ns.mat.emissive.copy(c);
-  ns.mat.emissiveIntensity = dropped ? 0.12 : 0.22 + 0.6 * ns.rec;
-  ns.baseOpacity = dropped ? 0.42 : 1;
+  ns.mat.emissiveIntensity = dropped ? 0.14 : 0.3 + 0.7 * ns.rec;
+  ns.baseOpacity = dropped ? 0.46 : 1;
   ns.halo.material.color.copy(c);
-  ns.haloBase = dropped ? 0.08 : 0.16 + 0.42 * ns.rec;
+  ns.haloBase = dropped ? 0.08 : 0.18 + 0.44 * ns.rec;
 
   // 完成 = 金环
   if (n.status === "done") {
@@ -1020,64 +1406,151 @@ function styleNode(ns) {
     ns.priv = null;
   }
 
-  // 标签
   let text = str(n.label || n.id);
   if (text.length > 12) text = text.slice(0, 11) + "…";
   ns.txt.textContent = text;
   ns.el.style.setProperty("--c", d.css);
-  ns.label.position.set(0, ns.r + 0.3, 0);
   ns.labelCls = "";
 }
 
-function simTick() {
-  const list = R.order;
-  const n = list.length;
-  const alpha = R.sim.alpha;
-  const A = R.v1, D = R.v2;
-  // 斥力
-  for (let i = 0; i < n; i++) {
-    const a = list[i];
-    if (a.dying) continue;
-    for (let j = i + 1; j < n; j++) {
-      const b = list[j];
-      if (b.dying) continue;
-      D.subVectors(a.p, b.p);
-      let d2 = D.lengthSq();
-      if (d2 < 0.0001) { D.set(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5); d2 = 0.01; }
-      const minD = (a.r + b.r) * 1.6;
-      const f = (5.5 * alpha) / Math.max(d2, 0.25) + (d2 < minD * minD ? 0.25 * alpha : 0);
-      const inv = f / Math.sqrt(d2);
-      a.v.addScaledVector(D, inv * a.mob);
-      b.v.addScaledVector(D, -inv * b.mob);
+/**
+ * 球面布局（确定性，只在数据变化时算一次）：
+ *   1) 每个领域的节点在该领域的切平面 (u,v) 上按黄金角螺旋铺开（大权重靠内）
+ *   2) 网格分桶 + 有限迭代的局部松弛，把重叠的推开（成本近似 O(n)）
+ *   3) 世界坐标 = 领域法线 × (R + h) + 切平面 (u,v) —— 天然浮在球面外侧，不穿模
+ */
+function relayout() {
+  if (!R) return;
+  const byDomain = new Map();
+  for (const k of DOMAIN_KEYS) byDomain.set(k, []);
+  const others = [];
+  for (const ns of R.order) {
+    if (ns.id === R.selfId) continue;
+    const list = byDomain.get(ns.data.domain);
+    if (list) list.push(ns);
+    else others.push(ns);
+  }
+  for (const k of DOMAIN_KEYS) layoutDomain(byDomain.get(k), domainFrame(k));
+  layoutOrbit(others);
+
+  // 首次落位：从星球内部飞出来；退场：往球心缩回去
+  for (const ns of R.order) {
+    if (ns.id === R.selfId) { ns.tp.set(0, 0, 0); ns.p.set(0, 0, 0); ns.placed = true; continue; }
+    if (ns.dying) { ns.tp.multiplyScalar(0.02); continue; }
+    if (!ns.placed) {
+      ns.placed = true;
+      ns.p.copy(ns.tp).multiplyScalar(0.22);
     }
   }
-  // 弹簧
-  for (const e of R.edgeList) {
-    const a = e.a, b = e.b;
-    D.subVectors(b.p, a.p);
-    const d = Math.max(0.01, D.length());
-    const rest = a.data.domain === b.data.domain ? 2.4 : 4.2;
-    const f = ((d - rest) * 0.045 * alpha) / d;
-    a.v.addScaledVector(D, f * a.mob);
-    b.v.addScaledVector(D, -f * b.mob);
+  R.sim.alpha = 1;
+  updateSelfLabel();
+}
+
+/** 领域切平面基：法线 = 球面方向；另两轴取"尽量朝向默认相机"的那组，读起来永远正对观众 */
+function domainFrame(key) {
+  const n = (R.domain.dir.get(key) || new THREE.Vector3(0, 0, 1)).clone().normalize();
+  const view = new THREE.Vector3(0, 0.36, 1).normalize();
+  const u = view.clone().addScaledVector(n, -view.dot(n));
+  if (u.lengthSq() < 1e-4) u.set(0, 1, 0).addScaledVector(n, -n.y);
+  u.normalize();
+  const v = new THREE.Vector3().crossVectors(n, u).normalize();
+  return { n, u, v };
+}
+
+function layoutDomain(list, frame) {
+  const n = list.length;
+  if (!n) return;
+  list.sort(byWeightDesc);                       // 大权重在前 → 靠内、靠上
+  const GOLD = 2.39996323;
+  const step = clamp((PATCH_EDGE * 0.55) / Math.sqrt(n + 1), 0.7, 2.8);
+  for (let i = 0; i < n; i++) {
+    const ns = list[i];
+    const rr = step * Math.sqrt(i) * 1.12;
+    const a = i * GOLD;
+    ns.u = Math.cos(a) * rr;
+    ns.v = Math.sin(a) * rr;
+    // 高度：越重要越离球面远；最外圈压回来，免得飘成一片云
+    const w = Math.min(+ns.data.weight || 1, 60);
+    const hw = Math.log1p(w) / Math.log1p(60);
+    const edge = clamp(rr / PATCH_EDGE, 0, 1);
+    ns.h = SHELL_H0 + SHELL_STEP * (0.45 + 1.5 * hw) * (1 - 0.55 * edge * edge);
   }
-  // 领域引力 + 积分
-  for (const a of list) {
-    if (a.id === R.selfId) { a.p.set(0, 0, 0); a.v.set(0, 0, 0); continue; }
-    anchorOf(a.data.domain, A);
-    D.subVectors(A, a.p);
-    a.v.addScaledVector(D, 0.035 * alpha * a.mob);
-    a.v.multiplyScalar(0.78);
-    const sp = a.v.length();
-    if (sp > 0.6) a.v.multiplyScalar(0.6 / sp);
-    a.p.add(a.v);
+  relax2D(list);
+  for (const ns of list) {
+    ns.tp.copy(frame.n).multiplyScalar(R_PLANET + ns.h)
+      .addScaledVector(frame.u, ns.u)
+      .addScaledVector(frame.v, ns.v);
   }
-  R.sim.alpha *= 0.975;
-  if (R.sim.alpha < 0.02) R.sim.alpha = 0;
+}
+
+/** 无领域归属的节点：贴着赤道外侧的一圈"自由卫星" */
+function layoutOrbit(list) {
+  const n = list.length;
+  if (!n) return;
+  const RING = R_PLANET * 1.55;
+  for (let i = 0; i < n; i++) {
+    const a = (i / n) * Math.PI * 2;
+    list[i].tp.set(Math.cos(a) * RING, Math.sin(a * 3) * 0.6, Math.sin(a) * RING);
+  }
+}
+
+/** 切平面内的轻量松弛：网格分桶只看邻格，只把重叠推开，不改变所属领域 */
+function relax2D(list) {
+  const n = list.length;
+  if (n < 2) return;
+  let cell = 1.4;
+  for (const ns of list) cell = Math.max(cell, ns.r * 2.6);
+  const grid = new Map();
+  for (let it = 0; it < 26; it++) {
+    grid.clear();
+    for (const ns of list) {
+      const k = `${Math.round(ns.u / cell)},${Math.round(ns.v / cell)}`;
+      let arr = grid.get(k);
+      if (!arr) grid.set(k, (arr = []));
+      arr.push(ns);
+    }
+    let moved = 0;
+    for (const a of list) {
+      const cx = Math.round(a.u / cell), cy = Math.round(a.v / cell);
+      for (let gx = cx - 1; gx <= cx + 1; gx++) {
+        for (let gy = cy - 1; gy <= cy + 1; gy++) {
+          const arr = grid.get(`${gx},${gy}`);
+          if (!arr) continue;
+          for (const b of arr) {
+            if (b === a) continue;
+            let dx = a.u - b.u, dy = a.v - b.v;
+            let d = Math.hypot(dx, dy);
+            const min = (a.r + b.r) * 1.3 + 0.36;
+            if (d >= min) continue;
+            if (d < 1e-3) { dx = Math.random() - 0.5; dy = Math.random() - 0.5; d = 0.7; }
+            const push = (min - d) * 0.5;
+            a.u += (dx / d) * push;
+            a.v += (dy / d) * push;
+            moved++;
+          }
+        }
+      }
+    }
+    if (!moved) break;
+  }
+  // 软边界：把散出去的拉回来，让星群始终是一团
+  for (const ns of list) {
+    const d = Math.hypot(ns.u, ns.v);
+    if (d > PATCH_EDGE) {
+      const k = PATCH_EDGE / d;
+      ns.u *= k;
+      ns.v *= k;
+    }
+  }
+}
+
+function byWeightDesc(a, b) {
+  return (+b.data.weight || 0) - (+a.data.weight || 0);
 }
 
 function rebuildEdges() {
   const list = [];
+  const pool = [];
   const seenPair = new Set();
   for (const e of cfg.graph.edges) {
     const s = idOf(e.source), t = idOf(e.target);
@@ -1086,9 +1559,15 @@ function rebuildEdges() {
     const k = s < t ? s + "\u0001" + t : t + "\u0001" + s;
     if (seenPair.has(k)) continue;
     seenPair.add(k);
-    const old = R.edgeList.find((x) => x.k === k);
-    list.push({ k, a, b, w: clamp(Number(e.weight) || 1, 1, 10), hlUntil: old ? old.hlUntil : 0, data: e });
+    const old = R.edgePool.find((x) => x.k === k);
+    const item = old || { k, hlUntil: 0 };
+    item.a = a; item.b = b;
+    item.w = clamp(Number(e.weight) || 1, 1, 10);
+    item.data = e;
+    pool.push(item);
+    list.push(item);
   }
+  R.edgePool = pool;
   R.edgeList = list;
   const need = Math.max(16, list.length);
   if (!R.edgeLines || R.edgeCap < need) {
@@ -1119,6 +1598,7 @@ function applyVisibility() {
   const parent = cfg.role === "parent";
   const fd = cfg.filter.domain, fs = cfg.filter.status;
   for (const ns of R.order) {
+    if (ns.id === R.selfId) { ns.visTarget = 1; ns.dimTarget = 1; continue; }
     const n = ns.data;
     let vis = !ns.dying;
     if (vis && parent && n.private) vis = false;
@@ -1133,42 +1613,110 @@ function applyVisibility() {
     ns.dimTarget = match ? 1 : 0.12;
   }
   for (const k of DOMAIN_KEYS) {
-    const c = R.clusters[k];
+    const o = R.domainObjs.get(k);
     const dim = !!fd && fd !== k;
-    if (dim !== c.dimmed) {
-      c.dimmed = dim;
-      c.el.classList.toggle("is-dim", dim);
+    if (dim !== o.dimmed) {
+      o.dimmed = dim;
+      o.el.classList.toggle("is-dim", dim);
     }
   }
   if (R.hover && R.hover.visTarget === 0) R.hover = null;
-  if (!R.running && R.ready) renderFrame(0);
+  wake();
+  if (!R.running && R.ready) renderFrame(0, true);
 }
 
 function applyTheme() {
   if (!R) return;
-  // 背景/雾/光照固定用同一套：角色只决定"看得到哪些节点"，不改场景明暗（否则切视角时整屏闪）
-  const th = THEMES.child;
-  R.scene.background = R.bgTex.child;
+  // 场景明暗只跟界面主题走：角色只决定"看得到哪些节点"
+  const light = cfg.theme === "light";
+  const th = light ? THEMES.light : THEMES.dark;
+  R.theme = light ? "light" : "dark";
+  R.scene.background = light ? R.bgTex.light : R.bgTex.dark;
   R.scene.fog.color.setHex(th.fog);
   R.scene.fog.density = th.fogD;
   R.hemi.intensity = th.hemi;
+  R.hemi.color.setHex(th.hemiSky);
+  R.hemi.groundColor.setHex(th.hemiGround);
+  R.key.intensity = th.keyI;
+  R.rim.intensity = th.rimI;
+  R.fill.intensity = th.fillI;
   R.edgeBase = th.edge;
+  if (R.bloom) { R.bloom.strength = th.bloom; R.bloom.threshold = th.bloomTh; }
+  // 星球
+  R.planetUniforms.uSea.value.setHex(th.sea);
+  R.planetUniforms.uLand.value.setHex(th.land);
+  R.planetUniforms.uLand2.value.setHex(th.land2);
+  R.planetUniforms.uIce.value.setHex(th.ice);
+  R.planetUniforms.uCloud.value.setHex(th.cloud);
+  R.planetUniforms.uRim.value.setHex(th.atmo);
+  R.planetUniforms.uRimI.value = th.planetRim;
+  R.atmoMat.uniforms.uColor.value.setHex(th.atmo);
+  R.atmoMat.uniforms.uIntensity.value = th.atmoI;
+  R.haloMat.color.setHex(th.atmo);
+  R.haloMat.opacity = th.planetHaloOp;
+  R.gridMat.color.setHex(th.grid);
+  R.gridMat.opacity = th.gridOp;
+  R.orbitRingMat.color.setHex(th.ring);
+  R.orbitRingMat.opacity = th.ringOp;
+  R.dustMat.color.setHex(th.dust);
+  R.dustMat.opacity = th.dustOp;
+  const starCols = [th.starA, th.starB, th.starC];
+  R.starLayers.forEach((s, i) => s.mat.color.setHex(starCols[i] || th.starA));
+  // 叠加混合：浅底上 additive 只会更亮、等于隐形
+  const blend = th.additive ? THREE.AdditiveBlending : THREE.NormalBlending;
+  for (const m of R.additive) {
+    if (m.blending !== blend) {
+      m.blending = blend;
+      m.needsUpdate = true;
+    }
+  }
+  for (const o of R.domainObjs.values()) {
+    o.ringMat.opacity = th.ringOp;
+    o.haloMatD.opacity = th.haloOp;
+    if (o.shellMat.blending !== blend) {
+      o.shellMat.blending = blend;
+      o.shellMat.needsUpdate = true;
+    }
+    o.shellMat.uniforms.uI.value = th.shellI;
+    if (o.haloMatD.blending !== blend) {
+      o.haloMatD.blending = blend;
+      o.haloMatD.needsUpdate = true;
+    }
+  }
+  wake();
+  if (!R.running && R.ready) renderFrame(0, true);
 }
 
 // ============================================================
 // 9. 每帧
 // ============================================================
 
-function renderFrame(dt) {
+function renderFrame(dt, force) {
   if (!R) return;
   R.time += dt;
+  R.frame++;
   const time = R.time;
   const tms = nowMs();
+  const th = THEMES[R.theme];
 
+  // 布局收敛：每帧一次 O(n) 的阻尼插值（不是力导向）
   if (R.sim.alpha > 0) {
-    simTick();
-    simTick();
+    const k = dt === 0 ? 1 : 1 - Math.exp(-dt * 3.4);
+    let settled = true;
+    for (const ns of R.order) {
+      ns.p.lerp(ns.tp, k);
+      if (ns.p.distanceToSquared(ns.tp) > 0.0009) settled = false;
+    }
+    if (settled || dt === 0) R.sim.alpha = 0;
   }
+
+  // 星球自转（着色器里的海陆云漂移跟同一时钟）
+  if (R.spin) {
+    R.planet.rotation.y += dt * SPIN;
+    R.planetUniforms.uTime.value = time;
+  }
+  R.gridGroup.rotation.y = R.planet.rotation.y;
+  R.atmo.rotation.y = R.planet.rotation.y;
 
   // 相机飞行
   const fly = R.fly;
@@ -1181,22 +1729,27 @@ function renderFrame(dt) {
       R.fly = null;
       R.lastInteract = tms;
     }
-  } else if (!R.controls.autoRotate && !R.dragging && tms - R.lastInteract > IDLE_RESUME_MS) {
+  } else if (!R.controls.autoRotate && !R.dragging && !R.reduce && tms - R.lastInteract > IDLE_RESUME_MS) {
     R.controls.autoRotate = true;
   }
   R.controls.update();
 
-  // 节点
-  const k6 = 1 - Math.exp(-dt * 6);
-  const k10 = 1 - Math.exp(-dt * 10);
-  for (let i = 0; i < R.clusterSums.length; i++) R.clusterSums[i].set(0, 0, 0);
-  R.clusterCounts.fill(0);
+  // ---- 记忆星 ----
+  const k6 = dt === 0 ? 1 : 1 - Math.exp(-dt * 6);
+  for (let i = 0; i < R.clusterCounts.length; i++) R.clusterCounts[i] = 0;
+  for (const s of R.clusterSums) s.set(0, 0, 0);
   let anyDead = false;
   for (const ns of R.order) {
-    ns.vis += (ns.visTarget - ns.vis) * (dt === 0 ? 1 : k6);
-    ns.dim += (ns.dimTarget - ns.dim) * (dt === 0 ? 1 : k6);
+    ns.vis += (ns.visTarget - ns.vis) * k6;
+    ns.dim += (ns.dimTarget - ns.dim) * k6;
     if (ns.appearDelay > 0) ns.appearDelay -= dt;
-    else if (ns.appear < 1) ns.appear = Math.min(1, ns.appear + dt / 0.6);
+    else if (ns.appear < 1) ns.appear = Math.min(1, ns.appear + dt / 0.65);
+
+    if (ns.id === R.selfId) {
+      // 本人已由星球本身代表，不画小球
+      if (ns.group.visible) ns.group.visible = false;
+      continue;
+    }
     const shown = ns.vis > 0.01 && ns.appear > 0;
     if (!shown) {
       if (ns.group.visible) ns.group.visible = false;
@@ -1205,10 +1758,13 @@ function renderFrame(dt) {
       continue;
     }
     if (!ns.group.visible) ns.group.visible = true;
-    ns.group.position.copy(ns.p);
+    const bobAmp = 0.055 + 0.03 * ns.h;
+    ns.wp.set(ns.p.x, ns.p.y + Math.sin(time * 0.7 + ns.bob) * bobAmp, ns.p.z);
+    ns.group.position.copy(ns.wp);
+
     const di = DOMAIN_KEYS.indexOf(ns.data.domain);
     if (di >= 0 && ns.visTarget > 0) {
-      R.clusterSums[di].add(ns.p);
+      R.clusterSums[di].add(ns.wp);
       R.clusterCounts[di]++;
     }
 
@@ -1225,8 +1781,8 @@ function renderFrame(dt) {
     ns.mat.opacity = op;
     ns.mat.depthWrite = op > 0.9;
     ns.mesh.visible = op > 0.01;
-    const breathe = 1 + 0.06 * Math.sin(time * 1.6 + ns.p.x);
-    ns.halo.scale.setScalar(s * (4.2 + 2.4 * pulse + hov) * breathe);
+    const breathe = 1 + 0.06 * Math.sin(time * 1.6 + ns.bob);
+    ns.halo.scale.setScalar(Math.max(0.001, s * (4.6 + 2.6 * pulse + hov) * breathe));
     if (pulse > 0) {
       ns.halo.material.color.copy(ns.mat.color).lerp(R.amber, 0.6 * pulse);
     } else if (ns.haloTinted) {
@@ -1243,22 +1799,36 @@ function renderFrame(dt) {
       ns.priv.scale.setScalar(s * 3.4);
       ns.priv.material.opacity = 0.75 * ns.vis * ns.dim;
     }
-    ns.label.position.y = s + 0.3;
   }
   if (anyDead) reapNodes();
 
-  // 簇标签跟随质心
+  // ---- 领域行星：跟着自家星群质心轻微游移（限幅，不脱离球面）+ 计数 ----
   for (let i = 0; i < DOMAIN_KEYS.length; i++) {
-    const c = R.clusters[DOMAIN_KEYS[i]];
+    const k = DOMAIN_KEYS[i];
+    const o = R.domainObjs.get(k);
+    const dir = R.domain.dir.get(k);
     const cnt = R.clusterCounts[i];
-    if (cnt > 0) c.target.copy(R.clusterSums[i]).multiplyScalar(1 / cnt);
-    c.group.position.lerp(c.target, dt === 0 ? 1 : k6 * 0.5);
-    const want = cnt > 0 ? (c.dimmed ? 0.04 : 0.12) : 0;
-    c.alpha += (want - c.alpha) * (dt === 0 ? 1 : k6);
-    c.halo.material.opacity = c.alpha;
-    c.halo.visible = c.alpha > 0.003;
-    const vis = cnt > 0;
-    if (c.lab.visible !== vis) c.lab.visible = vis;
+    R.v3.copy(dir).multiplyScalar(R_PLANET);
+    if (cnt > 0) {
+      R.v4.copy(R.clusterSums[i]).multiplyScalar(1 / cnt).sub(R.v3);
+      const len = R.v4.length();
+      if (len > 1.6) R.v4.multiplyScalar(1.6 / len);
+      R.v3.add(R.v4);
+    }
+    R.v3.addScaledVector(dir, Math.sin(time * 0.5 + o.phase) * 0.12);
+    o.group.position.lerp(R.v3, dt === 0 ? 1 : k6 * 0.5);
+    o.body.rotation.y += dt * 0.18;
+    const want = cnt > 0 ? (o.dimmed ? 0.06 : 1) : 0.35;
+    o.alpha += (want - o.alpha) * k6;
+    o.haloMatD.opacity = th.haloOp * o.alpha;
+    o.halo.visible = o.alpha > 0.01;
+    o.ringMat.opacity = th.ringOp * o.alpha;
+    o.shellMat.uniforms.uI.value = th.shellI * o.alpha;
+    o.el.style.opacity = String(clamp(o.alpha, 0, 1));
+    if (o.count !== cnt) {
+      o.count = cnt;
+      o.countEl.textContent = cnt ? `${cnt} 颗记忆` : "暂无";
+    }
   }
 
   updateEdges(tms, time);
@@ -1266,14 +1836,15 @@ function renderFrame(dt) {
   updatePlan(dt, tms, time);
   updateBursts(dt);
 
-  R.dust.rotation.y += dt * 0.01;
+  for (const s of R.starLayers) s.points.rotation.y += dt * s.drift;
+  R.dust.rotation.y -= dt * 0.012;
 
-  // 悬停拾取
   if (R.pointer.dirty && !R.dragging) {
     R.pointer.dirty = false;
     doHover();
   }
 
+  // ---- 渲染 ----
   const r = R.renderer;
   r.setScissorTest(false);
   r.setViewport(0, 0, R.w, R.h);
@@ -1285,23 +1856,28 @@ function renderFrame(dt) {
     r.render(R.scene, R.camera);
   }
 
-  // 熊猫小视窗
+  // 熊猫小视窗：降频到 ~15fps（第二视口是白给的开销，没必要每帧画两遍）
   const P = R.panda;
   if (P && P.rect.on) {
-    try {
-      P.mod.updatePanda(P.group, dt);
-      const pr = P.rect;
-      r.autoClear = false;
-      r.clearDepth();
-      r.setScissorTest(true);
-      r.setScissor(pr.x, pr.y, pr.w, pr.h);
-      r.setViewport(pr.x, pr.y, pr.w, pr.h);
-      r.render(P.scene, P.cam);
-      r.setScissorTest(false);
-      r.setViewport(0, 0, R.w, R.h);
-      r.autoClear = true;
-    } catch (e) {
-      R.panda = null;
+    const sig = `${P.rect.w}x${P.rect.h}`;
+    if (P.last < 0 || tms - P.last > 66 || P.sig !== sig) {
+      P.last = tms;
+      P.sig = sig;
+      try {
+        P.mod.updatePanda(P.group, Math.max(dt, 0.066));
+        const pr = P.rect;
+        r.autoClear = false;
+        r.clearDepth();
+        r.setScissorTest(true);
+        r.setScissor(pr.x, pr.y, pr.w, pr.h);
+        r.setViewport(pr.x, pr.y, pr.w, pr.h);
+        r.render(P.scene, P.cam);
+        r.setScissorTest(false);
+        r.setViewport(0, 0, R.w, R.h);
+        r.autoClear = true;
+      } catch (e) {
+        R.panda = null;
+      }
     }
   }
 
@@ -1318,9 +1894,12 @@ function updateEdges(tms, time) {
   let i = 0;
   for (const e of R.edgeList) {
     const a = e.a, b = e.b;
+    // 连到"星球本人"的边：落在球面上的对应点，而不是穿进球心
+    const sa = a.id === R.selfId ? surfacePoint(b.wp, R.v3) : a.wp;
+    const sb = b.id === R.selfId ? surfacePoint(a.wp, R.v3) : b.wp;
     const p6 = i * 6, c8 = i * 8;
-    pos[p6] = a.p.x; pos[p6 + 1] = a.p.y; pos[p6 + 2] = a.p.z;
-    pos[p6 + 3] = b.p.x; pos[p6 + 4] = b.p.y; pos[p6 + 5] = b.p.z;
+    pos[p6] = sa.x; pos[p6 + 1] = sa.y; pos[p6 + 2] = sa.z;
+    pos[p6 + 3] = sb.x; pos[p6 + 4] = sb.y; pos[p6 + 5] = sb.z;
     const vis = Math.min(a.vis, b.vis) * Math.min(a.appear, b.appear);
     const dim = Math.min(a.dim, b.dim);
     let alpha = base * (0.55 + 0.08 * e.w) * vis * dim;
@@ -1343,22 +1922,43 @@ function updateEdges(tms, time) {
   L.geometry.attributes.color.needsUpdate = true;
 }
 
-// 标签：只显示重要 / 悬停 / 高亮 / 聚焦 / 新生节点
+/** 把点投到球面外侧（用于"连到本人"的边） */
+function surfacePoint(p, out) {
+  const len = p.length() || 1;
+  return out.copy(p).multiplyScalar((R_PLANET * 1.01) / len);
+}
+
+// 标签：重要节点优先，其次悬停/高亮/聚焦/新生；最后做一次屏幕碰撞，叠在一起就藏掉
 function updateLabels(tms) {
+  const placed = R.labelPlaced;
+  placed.length = 0;
+  // 1) 强制显示的（交互焦点）：先占位，永远不会被挤掉
+  for (const ns of R.order) {
+    if (ns.id === R.selfId) continue;
+    const must = (R.hover === ns) || (R.focusId === ns.id) || (ns.pulseUntil > tms) ||
+      (ns.spawnedAt && tms - ns.spawnedAt < 6000);
+    if (!must || !ns.group.visible || ns.vis < 0.3) continue;
+    if (!labelPlace(ns, placed)) continue;
+  }
+  // 2) 按权重补位：候选已经按权重排序，超出预算或与已占位重叠的都藏掉
   const cand = R.labelCand;
   cand.length = 0;
   for (const ns of R.order) {
-    if (ns.visTarget > 0 && ns.dimTarget > 0.5 && ns.appear > 0.6 && ns.group.visible) cand.push(ns);
+    if (ns.id === R.selfId || !ns.group.visible) continue;
+    if (ns.visTarget <= 0 || ns.dimTarget <= 0.5 || ns.appear <= 0.6 || ns.vis < 0.3) continue;
+    if ((R.hover === ns) || (R.focusId === ns.id) || (ns.pulseUntil > tms)) continue; // 已占位
+    cand.push(ns);
   }
   cand.sort(byWeightDesc);
-  const budget = R.labelBudget;
-  for (let i = 0; i < R.order.length; i++) R.order[i].wantLabel = false;
-  for (let i = 0; i < cand.length && i < budget; i++) cand[i].wantLabel = true;
+  let used = placed.length;
+  for (const ns of cand) {
+    if (used >= R.labelBudget) break;
+    if (labelPlace(ns, placed)) used++;
+  }
+  // 3) 统一的显隐与样式
   for (const ns of R.order) {
-    const hl = ns.pulseUntil > tms;
-    const hov = R.hover === ns;
-    const want = (ns.wantLabel || hl || hov || R.focusId === ns.id || (ns.spawnedAt && tms - ns.spawnedAt < 6000)) &&
-      ns.group.visible && ns.vis > 0.3;
+    if (ns.id === R.selfId) { if (ns.label.visible) ns.label.visible = false; continue; }
+    const want = placed.indexOf(ns) >= 0;
     if (ns.label.visible !== want) ns.label.visible = want;
     if (!want) continue;
     const n = ns.data;
@@ -1366,16 +1966,29 @@ function updateLabels(tms) {
       (n.private ? " is-private" : "") +
       (n.status === "dropped" ? " is-dropped" : "") +
       (n.status === "done" ? " is-done" : "") +
-      (hl ? " is-hl" : "") +
-      (hov ? " is-hover" : "");
+      ((ns.pulseUntil > tms) ? " is-hl" : "") +
+      ((R.hover === ns) ? " is-hover" : "");
     if (cls !== ns.labelCls) {
       ns.labelCls = cls;
       ns.el.className = cls;
     }
   }
 }
-function byWeightDesc(a, b) {
-  return (+b.data.weight || 0) - (+a.data.weight || 0);
+
+/** 把节点标签放到屏幕上：被星球挡住 / 与已放好的标签重叠 就不放。返回是否放下。 */
+function labelPlace(ns, placed) {
+  if (occludedByPlanet(ns.wp)) return false;
+  R.v3.copy(ns.wp).project(R.camera);
+  if (R.v3.z > 1) return false;
+  const x = (R.v3.x * 0.5 + 0.5) * R.w;
+  const y = (-R.v3.y * 0.5 + 0.5) * R.h;
+  const halfW = 62 + Math.min(60, ns.r * 12);   // 胶囊大致半宽
+  const top = y - 22 - ns.r * 6, bottom = y;     // 胶囊挂在节点正上方
+  for (const p of placed) {
+    if (Math.abs(x - p.x) < halfW + p.halfW && bottom > p.top && top < p.bottom) return false;
+  }
+  placed.push({ x, halfW, top, bottom });
+  return true;
 }
 
 function reapNodes() {
@@ -1404,24 +2017,49 @@ function disposeNode(ns) {
 // ============================================================
 
 function pickNode(ndcX, ndcY) {
+  const selfNs = R.selfId ? R.nodes.get(R.selfId) : null;
   const list = R.pickList;
   list.length = 0;
-  for (const ns of R.order) if (ns.group.visible && ns.mesh.visible && ns.visTarget > 0 && ns.dim > 0.3) list.push(ns.mesh);
+  for (const ns of R.order) {
+    if (ns.id === R.selfId) continue;
+    if (ns.group.visible && ns.mesh.visible && ns.visTarget > 0 && ns.dim > 0.3) list.push(ns.mesh);
+  }
+  if (selfNs) list.push(R.planet);          // 点星球本体 = 打开"本人"节点
   if (!list.length) return null;
   R.ndc.set(ndcX, ndcY);
   R.raycaster.setFromCamera(R.ndc, R.camera);
   const hits = R.raycaster.intersectObjects(list, false);
-  if (hits.length) return R.nodes.get(hits[0].object.userData.nid) || null;
+  if (hits.length) {
+    if (hits[0].object === R.planet) return selfNs;
+    return R.nodes.get(hits[0].object.userData.nid) || selfNs;
+  }
   // 小节点容差：屏幕距离 18px 内最近的节点
   let best = null, bestD = 18 * 18;
   for (const m of list) {
+    if (m === R.planet) continue;
     R.v3.copy(m.parent.position).project(R.camera);
     if (R.v3.z > 1) continue;
     const dx = ((R.v3.x - ndcX) * R.w) / 2, dy = ((R.v3.y - ndcY) * R.h) / 2;
     const d2 = dx * dx + dy * dy;
-    if (d2 < bestD) { bestD = d2; best = m; }
+    if (d2 < bestD && !occludedByPlanet(m.parent.position)) { bestD = d2; best = m; }
   }
   return best ? R.nodes.get(best.userData.nid) || null : null;
+}
+
+/** 节点是否被星球本体挡住（相机→节点 的线段是否穿过球体）。CSS2D 标签不受深度测试
+ *  约束，不判一下就会出现"星球背面的标签浮在星球前面"。 */
+function occludedByPlanet(p) {
+  const e = R.camera.position;
+  R.v4.copy(p).sub(e);
+  const len = R.v4.length();
+  if (len < 1e-4) return false;
+  R.v4.multiplyScalar(1 / len);
+  const b = 2 * e.dot(R.v4);
+  const c = e.dot(e) - R_PLANET * R_PLANET;
+  const disc = b * b - 4 * c;
+  if (disc <= 0) return false;
+  const t = (-b - Math.sqrt(disc)) / 2;
+  return t > 0.001 && t < len - 0.001;
 }
 
 function inPanda(x, y) {
@@ -1448,6 +2086,8 @@ function setHover(ns) {
   }
   R.hover = ns;
   R.canvas.style.cursor = ns ? "pointer" : "";
+  if (ns) R.lastInteract = nowMs();
+  wake();
   if (!ns) { hideTip(); return; }
   fillTip(ns.data);
   positionTip();
@@ -1532,7 +2172,6 @@ function flyTo(target, distance, dir) {
   const d = dir ? R.v1.copy(dir) : R.v1.subVectors(cam.position, R.controls.target);
   if (d.lengthSq() < 1e-6) d.set(0, 0.4, 1);
   d.normalize();
-  if (d.y < 0.12) { d.y = 0.25; d.normalize(); }
   R.fly = {
     t: 0,
     dur: 1.15,
@@ -1543,23 +2182,46 @@ function flyTo(target, distance, dir) {
   };
   stopAutoRotate();
   R.lastInteract = nowMs();
+  wake();
   if (!R.running && R.ready) {
-    // 不在渲染（隐藏中）：直接到位
     cam.position.copy(R.fly.p1);
     R.controls.target.copy(R.fly.t1);
     R.fly = null;
   }
 }
 
+/** 绕当前目标水平/垂直转一点（键盘操作用） */
+function rotateAround(dAz, dPol) {
+  if (!R) return;
+  const off = R.v1.subVectors(R.camera.position, R.controls.target);
+  const sph = new THREE.Spherical().setFromVector3(off);
+  sph.theta += dAz;
+  sph.phi = clamp(sph.phi + dPol, R.controls.minPolarAngle, R.controls.maxPolarAngle);
+  R.camera.position.copy(R.controls.target).add(new THREE.Vector3().setFromSpherical(sph));
+  R.camera.lookAt(R.controls.target);
+  R.controls.update();
+  R.fly = null;
+}
+
+function dolly(k) {
+  if (!R) return;
+  const off = R.v1.subVectors(R.camera.position, R.controls.target);
+  const d = clamp(off.length() * k, R.controls.minDistance, R.controls.maxDistance);
+  R.camera.position.copy(R.controls.target).addScaledVector(off.normalize(), d);
+  R.controls.update();
+  R.fly = null;
+}
+
+/** 可见节点的包围半径（用布局目标点，收敛中也能算准） */
 function visibleBounds(center) {
   let n = 0;
   center.set(0, 0, 0);
-  for (const ns of R.order) if (ns.visTarget > 0) { center.add(ns.p); n++; }
-  if (!n) return 10;
+  for (const ns of R.order) if (ns.visTarget > 0) { center.add(ns.tp); n++; }
+  let r = R_PLANET * 1.2;
+  if (!n) return r;
   center.multiplyScalar(1 / n);
-  let r = 0;
-  for (const ns of R.order) if (ns.visTarget > 0) r = Math.max(r, center.distanceTo(ns.p) + ns.r);
-  return Math.max(6, r);
+  for (const ns of R.order) if (ns.visTarget > 0) r = Math.max(r, center.distanceTo(ns.tp) + ns.r);
+  return r;
 }
 
 function fitDistance(radius) {
@@ -1567,18 +2229,18 @@ function fitDistance(radius) {
   const aspect = R.w > 0 && R.h > 0 ? R.w / R.h : 1.6;
   const hf = 2 * Math.atan(Math.tan(vf / 2) * aspect);
   const f = Math.min(vf, hf);
-  return (radius * 1.12) / Math.sin(f / 2);
+  return (radius * 1.16) / Math.sin(f / 2);
 }
 
 function fitOverview(instant) {
   if (!R) return;
   const c = new THREE.Vector3();
   const r = visibleBounds(c);
-  const dist = fitDistance(r);
-  const dir = new THREE.Vector3(0, 0.42, 1);
+  const dist = clamp(fitDistance(r), R.controls.minDistance, R.controls.maxDistance);
+  const dir = new THREE.Vector3(0, 0.36, 1).normalize();
   if (instant) {
     R.controls.target.copy(c);
-    R.camera.position.copy(c).addScaledVector(dir.normalize(), dist);
+    R.camera.position.copy(c).addScaledVector(dir, dist);
     R.camera.lookAt(c);
   } else {
     flyTo(c, dist, dir);
@@ -1590,13 +2252,14 @@ function fitOverview(instant) {
 // ============================================================
 
 function addBurst(pos, color, size) {
-  const sp = new THREE.Sprite(new THREE.SpriteMaterial({
+  const sp = new THREE.Sprite(regAdditive(new THREE.SpriteMaterial({
     map: R.tex.ring, color, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, fog: false,
-  }));
+  })));
   sp.position.copy(pos);
   sp.scale.setScalar(0.1);
   R.world.add(sp);
   R.bursts.push({ sp, t: 0, size });
+  wake();
 }
 
 function updateBursts(dt) {
@@ -1616,7 +2279,7 @@ function updateBursts(dt) {
 }
 
 // ============================================================
-// 13. 任务规划卫星
+// 13. 任务规划卫星（绕星球运行的一圈小行星）
 // ============================================================
 
 function planOrder(items) {
@@ -1657,22 +2320,20 @@ function buildPlan(list) {
   if (!items.length) return;
   const ordered = planOrder(items);
   const group = new THREE.Group();
-  const self = R.selfId && R.nodes.get(R.selfId);
-  group.position.set(0, (self ? self.r : 0.6) + 1.6, 0);
-  group.rotation.x = 0.28;
+  const lat = 0.42;                                    // 悬在星球上方一段纬度带，不遮星群
+  const orbitY = Math.sin(lat) * R_PLANET * 1.35;
+  const radius = clamp(R_PLANET * 1.35 * Math.cos(lat) + ordered.length * 0.14, 9.5, 14);
+  group.position.set(0, orbitY, 0);
+  group.rotation.x = 0.16;
   R.world.add(group);
-  const radius = clamp(2.6 + ordered.length * 0.18, 2.8, 4.6);
   const sats = new Map();
-  // 轨道圈
   const orbitPts = [];
-  for (let i = 0; i <= 96; i++) {
-    const a = (i / 96) * Math.PI * 2;
+  for (let i = 0; i <= 128; i++) {
+    const a = (i / 128) * Math.PI * 2;
     orbitPts.push(new THREE.Vector3(Math.cos(a) * radius, 0, Math.sin(a) * radius));
   }
-  const orbit = new THREE.Line(
-    new THREE.BufferGeometry().setFromPoints(orbitPts),
-    new THREE.LineBasicMaterial({ color: AMBER, transparent: true, opacity: 0.22, depthWrite: false })
-  );
+  const orbitMat = new THREE.LineBasicMaterial({ color: AMBER, transparent: true, opacity: 0.26, depthWrite: false });
+  const orbit = new THREE.Line(new THREE.BufferGeometry().setFromPoints(orbitPts), orbitMat);
   group.add(orbit);
   ordered.forEach((it, i) => {
     const a = -Math.PI / 2 + (i / ordered.length) * Math.PI * 2;
@@ -1680,7 +2341,7 @@ function buildPlan(list) {
     const mesh = new THREE.Mesh(R.satGeo, mat);
     mesh.position.set(Math.cos(a) * radius, 0, Math.sin(a) * radius);
     mesh.scale.setScalar(0.001);
-    const halo = new THREE.Sprite(new THREE.SpriteMaterial({ map: R.tex.glow, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, fog: false }));
+    const halo = new THREE.Sprite(regAdditive(new THREE.SpriteMaterial({ map: R.tex.glow, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, fog: false })));
     halo.position.copy(mesh.position);
     const el = document.createElement("div");
     el.className = "s3d-sat";
@@ -1700,7 +2361,6 @@ function buildPlan(list) {
     sats.set(it.id, sat);
     setSatStatus(sat, it.status);
   });
-  // 依赖弧线
   const arcPts = [];
   const tmp = new THREE.Vector3();
   for (const it of ordered) {
@@ -1735,6 +2395,7 @@ function buildPlan(list) {
     group.add(arcs);
   }
   R.plan = { group, sats, orbit, arcs, t: 0, fade: 1, fading: false };
+  wake();
 }
 
 function setSatStatus(sat, status) {
@@ -1816,7 +2477,36 @@ function destroyPlan(instant) {
 }
 
 // ============================================================
-// 14. 导出 API
+// 14. 星球本人（中心 = 孩子）
+// ============================================================
+
+/** 星球的名字标签：挂在球体北极上方，不随球自转（始终朝上） */
+function updateSelfLabel() {
+  if (!R || !R.selfId) return;
+  const ns = R.nodes.get(R.selfId);
+  if (!ns) return;
+  R.selfNs = ns;
+  if (!R.selfLabel) {
+    const el = document.createElement("div");
+    el.className = "s3d-self";
+    const name = document.createElement("div");
+    name.className = "s3d-self-name";
+    const sub = document.createElement("div");
+    sub.className = "s3d-self-sub";
+    el.appendChild(name);
+    el.appendChild(sub);
+    const lab = new R.CSS2D.CSS2DObject(el);
+    lab.center.set(0.5, 1);
+    lab.position.set(0, R_PLANET * 1.44, 0);
+    R.world.add(lab);
+    R.selfLabel = { el, name, sub, lab };
+  }
+  R.selfLabel.name.textContent = str(ns.data.label || ns.data.id);
+  R.selfLabel.sub.textContent = cfg.timeline ? "记忆星球 · " + cfg.timeline : "记忆星球 · 本人";
+}
+
+// ============================================================
+// 15. 导出 API
 // ============================================================
 
 function safe(fn) {
@@ -1857,26 +2547,34 @@ export const setGraphData = safe(function setGraphData(graph) {
 });
 
 export const setRole = safe(function setRole(role) {
-  const r = role === "parent" ? "parent" : "child";
-  if (cfg.role === r && R && R.themeRole === r) return;
-  cfg.role = r;
-  if (R && R.ready) {
-    R.themeRole = r;
-    applyTheme();
-    applyVisibility();
-  }
+  cfg.role = role === "parent" ? "parent" : "child";
+  if (R && R.ready) applyVisibility();
+});
+
+/** 深浅色切换：整个 3D 场景（背景/雾/光照/星球着色器/叠加材质/bloom）跟随界面主题。 */
+export const setTheme = safe(function setTheme(theme) {
+  const t = theme === "light" ? "light" : "dark";
+  if (cfg.theme === t && (!R || R.theme === t)) return;
+  cfg.theme = t;
+  if (R && R.ready) applyTheme();
 });
 
 export const setTimeline = safe(function setTimeline(dateStr) {
   cfg.timeline = normalizeTimeline(dateStr) ? str(dateStr) : null;
-  if (R && R.ready) applyVisibility();
+  if (R && R.ready) {
+    applyVisibility();
+    if (R.selfLabel) {
+      R.selfLabel.sub.textContent = cfg.timeline ? "记忆星球 · " + cfg.timeline : "记忆星球 · 本人";
+    }
+  }
 });
 
 export const setFilter = safe(function setFilter(f) {
   const o = f && typeof f === "object" ? f : {};
-  const domain = DOMAINS[o.domain] ? o.domain : "";
-  const status = STATUS_NAME[o.status] ? o.status : "";
-  cfg.filter = { domain, status };
+  cfg.filter = {
+    domain: DOMAINS[o.domain] ? o.domain : "",
+    status: STATUS_NAME[o.status] ? o.status : "",
+  };
   if (R && R.ready) applyVisibility();
 });
 
@@ -1896,7 +2594,6 @@ export const setDomainFilter = safe(function setDomainFilter(domain, status) {
 export const attachTo = safe(function attachTo(el, mode) {
   if (!R || !R.ready || !el || typeof el.appendChild !== "function") return false;
   if (R.container !== el) {
-    // 还原旧容器的 position 改动
     if (R.restorePos !== null && R.container) {
       try { R.container.style.position = R.restorePos; } catch (_) {}
       R.restorePos = null;
@@ -1909,7 +2606,7 @@ export const attachTo = safe(function attachTo(el, mode) {
     } catch (_) {}
     el.appendChild(R.root);
     R.container = el;
-    observe(el); // 重新挂 ResizeObserver / IntersectionObserver
+    observe(el);
   }
   R.w = -1; // 强制重算尺寸
   measure();
@@ -1925,24 +2622,24 @@ export const setNodeClickHandler = safe(function setNodeClickHandler(cb) {
 export const highlightRecall = safe(function highlightRecall(payload) {
   if (!R || !R.ready || !payload) return;
   const until = nowMs() + RECALL_MS;
-  const hit = new Set();
   for (const x of Array.isArray(payload.nodes) ? payload.nodes : []) {
     let ns = R.nodes.get(idOf(x));
     if (!ns && x && x.label) ns = R.order.find((o) => o.data.label === x.label);
-    if (ns && !ns.dying) { ns.pulseUntil = until; hit.add(ns.id); }
+    if (ns && !ns.dying) ns.pulseUntil = until;
   }
   for (const e of Array.isArray(payload.edges) ? payload.edges : []) {
     if (!e) continue;
     const s = idOf(e.source), t = idOf(e.target);
     const k = s < t ? s + "\u0001" + t : t + "\u0001" + s;
-    const ed = R.edgeList.find((x) => x.k === k);
+    const ed = R.edgePool.find((x) => x.k === k);
     if (ed) {
       ed.hlUntil = until;
       ed.a.pulseUntil = Math.max(ed.a.pulseUntil, until);
       ed.b.pulseUntil = Math.max(ed.b.pulseUntil, until);
     }
   }
-  if (!R.running) renderFrame(0);
+  wake();
+  if (!R.running) renderFrame(0, true);
 });
 
 export const spawnMemory = safe(function spawnMemory(payload) {
@@ -1950,7 +2647,6 @@ export const spawnMemory = safe(function spawnMemory(payload) {
   const addN = Array.isArray(payload.added_nodes) ? payload.added_nodes : [];
   const addE = Array.isArray(payload.added_edges) ? payload.added_edges : [];
   const upd = Array.isArray(payload.updated) ? payload.updated : [];
-  // 合并进当前数据（不改调用方对象）
   const nodes = cfg.graph.nodes.slice();
   const idx = new Map(nodes.map((n, i) => [n.id, i]));
   for (const n of addN.concat(upd)) {
@@ -1979,7 +2675,7 @@ export const spawnMemory = safe(function spawnMemory(payload) {
     }
     ns.spawnedAt = tms;
     ns.pulseUntil = tms + RECALL_MS;
-    addBurst(ns.p, domainOf(ns.data.domain).hex, ns.r * 2.2);
+    addBurst(ns.tp, domainOf(ns.data.domain).hex, ns.r * 2.2);
   }
   for (const n of upd) {
     const ns = R.nodes.get(idOf(n));
@@ -1989,9 +2685,10 @@ export const spawnMemory = safe(function spawnMemory(payload) {
     if (!e) continue;
     const s = idOf(e.source), t = idOf(e.target);
     const k = s < t ? s + "\u0001" + t : t + "\u0001" + s;
-    const ed = R.edgeList.find((x) => x.k === k);
+    const ed = R.edgePool.find((x) => x.k === k);
     if (ed) ed.hlUntil = tms + RECALL_MS;
   }
+  wake();
 });
 
 export const spawnPlanSatellites = safe(function spawnPlanSatellites(list) {
@@ -2015,7 +2712,9 @@ export const focusNode = safe(function focusNode(nodeId) {
   if (!ns || ns.dying || ns.visTarget === 0) return;
   R.focusId = ns.id;
   ns.pulseUntil = nowMs() + 1800;
-  flyTo(ns.p, clamp(5 + ns.r * 6, 6, 12));
+  if (ns.id === R.selfId) fitOverview(false);
+  else flyTo(ns.tp, clamp(9 + ns.r * 6, R.controls.minDistance, 22));
+  wake();
 });
 
 export const focusDomain = safe(function focusDomain(domain) {
@@ -2024,17 +2723,16 @@ export const focusDomain = safe(function focusDomain(domain) {
   if (!DOMAINS[domain]) { fitOverview(false); return; }
   const c = new THREE.Vector3();
   let n = 0;
-  for (const ns of R.order) if (ns.visTarget > 0 && ns.data.domain === domain) { c.add(ns.p); n++; }
+  for (const ns of R.order) if (ns.visTarget > 0 && ns.data.domain === domain) { c.add(ns.tp); n++; }
   if (!n) anchorOf(domain, c);
   else c.multiplyScalar(1 / n);
   let r = 3;
-  for (const ns of R.order) if (ns.visTarget > 0 && ns.data.domain === domain) r = Math.max(r, c.distanceTo(ns.p) + ns.r);
-  // 从外侧看向簇：方向 = 中心 → 簇
-  const dir = new THREE.Vector3(c.x, 0, c.z);
-  if (dir.lengthSq() < 0.01) dir.set(0, 0, 1);
+  for (const ns of R.order) if (ns.visTarget > 0 && ns.data.domain === domain) r = Math.max(r, c.distanceTo(ns.tp) + ns.r);
+  const dir = new THREE.Vector3(c.x, c.y * 0.6 + 0.4, c.z);
+  if (dir.lengthSq() < 0.01) dir.set(0, 0.4, 1);
   dir.normalize();
-  dir.y = 0.45;
-  flyTo(c, Math.max(9, fitDistance(r) * 0.95), dir);
+  flyTo(c, clamp(fitDistance(r) * 0.92, R.controls.minDistance, 40), dir);
+  wake();
 });
 
 export const setPandaMood = safe(function setPandaMood(mood) {
@@ -2045,7 +2743,7 @@ export const setPandaMood = safe(function setPandaMood(mood) {
 
 export const resize = safe(function resize() {
   if (!R) return;
-  R.w = -1; // 强制重算
+  R.w = -1;
   measure();
   updateRunning();
 });
@@ -2071,14 +2769,15 @@ export const disposeScene = safe(function disposeScene() {
       disposedTextures.add(texture);
     }
   };
+  const keepGeo = new Set([S.sphereGeo, S.satGeo, S.planetGeo, S.planetGeoSmall]);
   const disposeTree = (root) => root.traverse((o) => {
     for (const texture of o.userData.textures || []) disposeTexture(texture);
     if (o.shadow && typeof o.shadow.dispose === 'function') o.shadow.dispose();
-    if (o.geometry) o.geometry.dispose();
+    if (o.geometry && !keepGeo.has(o.geometry)) o.geometry.dispose();
     if (o.material) {
       const ms = Array.isArray(o.material) ? o.material : [o.material];
       for (const m of ms) {
-        if (m.map && m.map !== S.tex.glow && m.map !== S.tex.ring && m.map !== S.tex.priv) disposeTexture(m.map);
+        if (m.map && m.map !== S.tex.glow && m.map !== S.tex.ring && m.map !== S.tex.priv && m.map !== S.tex.orbit) disposeTexture(m.map);
         disposeTexture(m.bumpMap);
         disposeTexture(m.normalMap);
         m.dispose();
@@ -2096,8 +2795,10 @@ export const disposeScene = safe(function disposeScene() {
     if (S.envTex) S.envTex.dispose();
     if (S.pmrem) S.pmrem.dispose();
   } catch (_) {}
-  for (const t of Object.values(S.tex)) t.dispose();
-  for (const t of Object.values(S.bgTex)) t.dispose();
+  for (const g of keepGeo) { try { g.dispose(); } catch (_) {} }
+  for (const t of Object.values(S.tex)) { try { t.dispose(); } catch (_) {} }
+  for (const t of Object.values(S.bgTex)) { try { t.dispose(); } catch (_) {} }
+  for (const t of S.addTexes) { try { t.dispose(); } catch (_) {} }
   try { S.renderer.dispose(); S.renderer.forceContextLoss(); } catch (_) {}
   if (S.root.parentNode) S.root.parentNode.removeChild(S.root);
   if (S.restorePos !== null) S.container.style.position = S.restorePos;
@@ -2105,11 +2806,34 @@ export const disposeScene = safe(function disposeScene() {
   R = null;
 });
 
-// 预分配的簇统计缓冲（避免每帧分配）：build 末尾调用一次
+// ============================================================
+// 16. 共用：叠加材质登记（浅色主题统一切回普通混合）
+// ============================================================
+
+const _earlyAdditive = [];
+function regAdditive(mat) {
+  if (R && R.additive) {
+    R.additive.add(mat);
+    if (!THEMES[R.theme].additive) {
+      mat.blending = THREE.NormalBlending;
+      mat.needsUpdate = true;
+    }
+  } else {
+    _earlyAdditive.push(mat);
+  }
+  return mat;
+}
+
+// 预分配的簇统计缓冲（避免每帧分配）
 function ensureScratch() {
+  if (!R) return;
+  if (!R.labelPlaced) R.labelPlaced = [];
   if (!R.clusterSums) {
     R.clusterSums = DOMAIN_KEYS.map(() => new THREE.Vector3());
     R.clusterCounts = new Array(DOMAIN_KEYS.length).fill(0);
     R.labelCand = [];
   }
+  if (!R.additive) R.additive = new Set();
+  for (const m of _earlyAdditive) R.additive.add(m);
+  _earlyAdditive.length = 0;
 }

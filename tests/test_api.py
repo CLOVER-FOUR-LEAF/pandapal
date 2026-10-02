@@ -4,19 +4,65 @@
 用法：python tests/test_api.py [--base http://localhost:8000]
 
 演示账号（server/auth.py 种子）：小豆/panda123（孩子）、豆豆妈/mama123（家长）、admin/admin123（评委）。
+
+会话隔离用例会临时注册一个「评测员B」账号；打到本机服务时，脚本会在开始前和
+结束（含异常退出）后自动清理该账号的档案目录与 profiles.json 映射条目——这些
+运行时文件已被 .gitignore 排除，清理只是不让本地 data/ 累积测试残留、保证重跑
+拿到一份全新档案。打到远程服务则跳过清理（残留由服务端管）。
 """
 from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
 import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
 
 RESULTS = []
+
+# 验证会话隔离用的一次性账号，跑完必须清干净（见 _cleanup）
+GUEST = "评测员B"
+# 注册/找回密码用例用的临时账号
+REG = "评测员C"
+REG_PARENT = "评测员C妈"
+DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+PROFILES = DATA_DIR / "profiles.json"
+USERS = DATA_DIR / "users.json"
+TEMP_NAMES = [GUEST, REG, REG_PARENT]
+
+
+def _is_local(base: str) -> bool:
+    """只有打本机服务时才需要（也才有能力）清理本地残留。"""
+    return any(h in base for h in ("localhost", "127.0.0.1", "0.0.0.0"))
+
+
+def _cleanup() -> None:
+    """删掉本脚本造出来的临时账号：users.json 条目、档案目录、profiles.json 映射。
+
+    profiles.json 与 data/child_*/ 都已被 .gitignore 排除，不会进仓库；
+    清掉只是让本地 data/ 不留测试残留。
+    """
+    for name in TEMP_NAMES:
+        shutil.rmtree(DATA_DIR / f"child_{name}", ignore_errors=True)
+    try:
+        profiles = json.loads(PROFILES.read_text(encoding="utf-8"))
+        if any(profiles.pop(n, None) is not None for n in TEMP_NAMES):
+            PROFILES.write_text(
+                json.dumps(profiles, ensure_ascii=False, indent=2), encoding="utf-8")
+    except (OSError, ValueError):
+        pass
+    try:
+        users = json.loads(USERS.read_text(encoding="utf-8"))
+        if any(users.pop(n, None) is not None for n in TEMP_NAMES):
+            USERS.write_text(
+                json.dumps(users, ensure_ascii=False, indent=2), encoding="utf-8")
+    except (OSError, ValueError):
+        pass
 
 
 def record(name: str, ok: bool, note: str = ""):
@@ -87,11 +133,33 @@ def login(base: str, username: str, password: str) -> dict:
     return data
 
 
+def get_raw(base: str, path: str, token: str | None = None) -> tuple[int, str]:
+    """非 JSON 端点（ics 等）用的原始文本 GET。"""
+    req = urllib.request.Request(base + urllib.parse.quote(path, safe="/?=&"))
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(req, timeout=120) as r:
+            return r.status, r.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode("utf-8", "replace")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--base", default="http://localhost:8000")
     base = ap.parse_args().base.rstrip("/")
+    local = _is_local(base)
+    if local:
+        _cleanup()  # 上次跑挂掉留下的残留先清掉
+    try:
+        return _run(base)
+    finally:
+        if local:
+            _cleanup()  # 别把测试账号留在本地 data/ 里
 
+
+def _run(base: str) -> int:
     # 1. 健康检查（公开）
     try:
         st, h = get(base, "/api/health")
@@ -204,9 +272,85 @@ def main() -> int:
     except Exception as e:
         record("parent_filter", False, str(e))
 
+    # 10.5 家长写权限收口：勾清单/改事务 → 403，看板读 → 200（"只读视图"承诺）
+    try:
+        st1, _ = post_json(base, "/api/checklist/xikesong_pack",
+                           {"name": "小豆", "index": 0, "done": True}, tk_parent)
+        st2, _ = post_json(base, "/api/affairs",
+                           {"name": "小豆", "patch": {"title": "家长越权测试"}}, tk_parent)
+        st3, _ = get(base, "/api/affairs?name=小豆", tk_parent)
+        ok = st1 == 403 and st2 == 403 and st3 == 200
+        record("parent_readonly", ok, f"cl={st1} affairs_post={st2} affairs_get={st3}")
+    except Exception as e:
+        record("parent_readonly", False, str(e))
+
+    # 10.6 契约 §4 剩余端点覆盖（事务详情/清单/日历/话题/成长/晨报/梦想邀请/日志）
+    try:
+        st1, af = get(base, "/api/affairs/xikesong?name=小豆", tk_admin)
+        st2, cl = get(base, "/api/checklist/xikesong_pack?name=小豆", tk_child)
+        st3, ics = get_raw(base, "/api/ics/xikesong?name=小豆", tk_child)
+        st4, sg = get(base, "/api/suggest?name=小豆", tk_child)
+        st5, gr = get(base, "/api/growth?name=小豆", tk_child)
+        st6, br = get(base, "/api/briefing?name=小豆", tk_child)
+        st7, dr = post_json(base, "/api/dream", {"name": "小豆", "text": ""}, tk_child)
+        st8, lg = get(base, "/api/logs?limit=5", tk_admin)
+        ok = (st1 == 200 and af.get("affair", {}).get("id") == "xikesong"
+              and st2 == 200 and len(cl.get("checklist", {}).get("items", [])) >= 1
+              and st3 == 200 and "BEGIN:VCALENDAR" in ics
+              and st4 == 200 and "chips" in sg
+              and st5 == 200 and "dimensions" in gr
+              and st6 == 200 and bool(br.get("text"))
+              and st7 == 200 and bool(dr.get("text"))
+              and st8 == 200 and "calls" in lg)
+        record("endpoints_matrix", ok,
+               f"detail={st1} cl={st2} ics={st3} suggest={st4} growth={st5} "
+               f"briefing={st6} dream={st7} logs={st8}")
+    except Exception as e:
+        record("endpoints_matrix", False, str(e))
+
+    # 10.7 显式注册 + 密保找回密码：注册即登录 → 查密保 → 错答案拒绝 → 对答案重置
+    # → 旧 token 作废 → 新密码可登录；顺带覆盖家长注册需绑定已存在的孩子账号
+    try:
+        st1, reg = post_json(base, "/api/auth/register", {
+            "username": REG, "password": "reg123", "role": "child",
+            "question": "最喜欢的颜色？", "answer": "蓝色"})
+        st2, _ = post_json(base, "/api/auth/register", {
+            "username": REG, "password": "reg123", "question": "q", "answer": "a"})
+        st3, qd = get(base, f"/api/auth/question?username={REG}")
+        st5, _ = post_json(base, "/api/auth/reset", {
+            "username": REG, "answer": "红色", "password": "reg456"})
+        st6, _ = post_json(base, "/api/auth/reset", {
+            "username": REG, "answer": " 蓝色 ", "password": "reg456"})
+        st7, _ = get(base, "/api/auth/me", reg.get("token"))  # 重置后旧 token 必须失效
+        st8, _ = post_json(base, "/api/auth/login", {"username": REG, "password": "reg123"})
+        relogin = login(base, REG, "reg456")
+        ok = (st1 == 200 and reg.get("role") == "child" and reg.get("is_new") is True
+              and st2 == 400 and st3 == 200 and qd.get("recoverable") is True
+              and qd.get("question") == "最喜欢的颜色？"
+              and st5 == 400 and st6 == 200 and st7 == 401 and st8 == 401
+              and relogin.get("username") == REG)
+        record("register_reset", ok,
+               f"reg={st1} dup={st2} q={st3} wrong={st5} reset={st6} "
+               f"old_tk={st7} old_pw={st8}")
+    except Exception as e:
+        record("register_reset", False, str(e))
+
+    try:
+        st1, preg = post_json(base, "/api/auth/register", {
+            "username": REG_PARENT, "password": "mamab1", "role": "parent",
+            "child": REG, "question": "q", "answer": "a"})
+        st2, _ = post_json(base, "/api/auth/register", {
+            "username": "评测员孤儿妈", "password": "mamab1", "role": "parent",
+            "child": "不存在的孩子", "question": "q", "answer": "a"})
+        ok = (st1 == 200 and preg.get("role") == "parent" and preg.get("name") == REG
+              and st2 == 400)
+        record("register_parent", ok, f"parent={st1} orphan={st2}")
+    except Exception as e:
+        record("register_parent", False, str(e))
+
     # 11. 会话隔离 + 并发不崩（自动注册的新孩子账号 + 小豆同时聊）
     try:
-        guest = login(base, "评测员B", "pw123")  # 未知名 → 自动注册 child
+        guest = login(base, GUEST, "pw123")  # 未知名 → 自动注册 child
         tk_b = guest["token"]
         out: dict[str, list] = {}
 
@@ -214,7 +358,7 @@ def main() -> int:
             out[nm] = post_sse(base, "/api/chat", {"name": nm, "message": msg}, tk)
 
         t1 = threading.Thread(target=talk, args=(tk_child, "小豆", "我有点紧张"))
-        t2 = threading.Thread(target=talk, args=(tk_b, "评测员B", "你好"))
+        t2 = threading.Thread(target=talk, args=(tk_b, GUEST, "你好"))
         t1.start(); t2.start(); t1.join(timeout=120); t2.join(timeout=120)
         ok = all(any(e["type"] == "done" for e in v) for v in out.values())
         record("concurrent", ok, f"sessions={list(out.keys())} guest_new={guest.get('is_new')}")

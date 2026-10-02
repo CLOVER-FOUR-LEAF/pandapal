@@ -1,9 +1,12 @@
 """PandaButler Server：FastAPI 应用与 API 端点。
 
 端点：
-  POST /api/auth/login   用户名+密码登录 → Bearer token（未知名自动注册孩子档）
-  POST /api/auth/logout  注销 token
-  GET  /api/auth/me      当前登录信息（刷新恢复会话用）
+  POST /api/auth/login    用户名+密码登录 → Bearer token（未知名自动注册孩子档）
+  POST /api/auth/register 显式注册（孩子/家长 + 密保问题）→ 注册即登录
+  GET  /api/auth/question 取账号密保问题（找回密码第一步）
+  POST /api/auth/reset    密保答案核对 → 重置密码并吊销旧 token
+  POST /api/auth/logout   注销 token
+  GET  /api/auth/me       当前登录信息（刷新恢复会话用）
   POST /api/session    登录选档：名字 → 绑定 data/{child}/ 档案目录
   GET  /api/greeting   开场主动问候（记忆驱动生成）
   GET  /api/briefing   管家晨间巡检（事务 + 临近截止 + 主动建议）
@@ -30,6 +33,8 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
+from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
 
 from fastapi import FastAPI, HTTPException, Request
@@ -40,7 +45,24 @@ from pydantic import BaseModel, Field
 from . import (actions, affairs, auth, config, executor, graph, llm, memory, planner,
                prompts, router, sessions, suggest, synth)
 
-app = FastAPI(title="PandaButler", docs_url=None, redoc_url=None)
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    yield
+    await llm.close_shared_clients()
+
+
+app = FastAPI(title="PandaButler", docs_url=None, redoc_url=None, lifespan=_lifespan)
+
+
+@app.middleware("http")
+async def _security_headers(request: Request, call_next):
+    resp = await call_next(request)
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["Referrer-Policy"] = "same-origin"
+    resp.headers["X-Frame-Options"] = "DENY"
+    return resp
+
 
 _background: set[asyncio.Task] = set()
 SECRET_PREFIX = "[[secret]]"
@@ -53,6 +75,21 @@ def _bg(task: asyncio.Task) -> None:
 
 class AuthReq(BaseModel):
     username: str = Field(min_length=1, max_length=24)
+    password: str = Field(min_length=1, max_length=64)
+
+
+class RegisterReq(BaseModel):
+    username: str = Field(min_length=1, max_length=24)
+    password: str = Field(min_length=1, max_length=64)
+    role: str = Field(default="child", pattern="^(child|parent)$")
+    child: str = Field(default="", max_length=24)  # 家长账号要绑定的孩子登录名
+    question: str = Field(default="", max_length=60)
+    answer: str = Field(default="", max_length=60)
+
+
+class ResetReq(BaseModel):
+    username: str = Field(min_length=1, max_length=24)
+    answer: str = Field(default="", max_length=60)
     password: str = Field(min_length=1, max_length=64)
 
 
@@ -81,7 +118,7 @@ class ChecklistReq(BaseModel):
 class InboxReq(BaseModel):
     name: str = Field(default="", max_length=24)
     action: str = Field(pattern="^(approve|reject)$")
-    reply: str = ""
+    reply: str = Field(default="", max_length=1000)
 
 
 class RelayReq(BaseModel):
@@ -109,11 +146,17 @@ async def _get_session(name: str):
 # ---------------------------------------------------------------- 鉴权
 
 def _token(request: Request) -> str:
-    """Bearer 头优先；?token= 兜底给 window.open 下载（ics）这类不能带头的场景。"""
+    """Bearer 头优先；?token= 只放行 ics 下载（window.open 带不了头）。
+
+    其它端点不收 query token——URL 会进浏览器历史、反代 access log、
+    Referer，token 漏出去等于账号送出去。
+    """
     h = request.headers.get("authorization", "")
     if h.lower().startswith("bearer "):
         return h[7:].strip()
-    return request.query_params.get("token", "")
+    if request.url.path.startswith("/api/ics/"):
+        return request.query_params.get("token", "")
+    return ""
 
 
 def _user(request: Request) -> dict:
@@ -140,12 +183,26 @@ async def _auth_session(request: Request, cap: str, name: str | None = None):
     return user, await _get_session(eff)
 
 
-@app.post("/api/auth/login")
-async def api_auth_login(req: AuthReq):
-    try:
-        res = auth.login(req.username, req.password)
-    except ValueError as e:
-        raise HTTPException(401, str(e))
+_LOGIN_HITS: dict[str, list[float]] = {}
+
+
+def _login_throttle(ip: str) -> bool:
+    """每 IP 每分钟最多 30 次登录尝试，挡住脚本撞密码。"""
+    now = time.monotonic()
+    hits = [t for t in _LOGIN_HITS.get(ip, []) if now - t < 60]
+    ok = len(hits) < 30
+    if ok:
+        hits.append(now)
+    _LOGIN_HITS[ip] = hits
+    if len(_LOGIN_HITS) > 200:
+        # 表只增不减会渗漏内存：超过阈值时惰性清掉一分钟内没来过的 IP
+        for k in [k for k, v in _LOGIN_HITS.items() if not v or now - v[-1] >= 60]:
+            _LOGIN_HITS.pop(k, None)
+    return ok
+
+
+async def _auth_response(res: dict) -> dict:
+    """登录/注册共用的响应载荷：token + 账号信息 + 绑定档案名（顺带预热会话）。"""
     user = res["user"]
     sess = await _get_session(user["child"])
     return {
@@ -156,6 +213,80 @@ async def api_auth_login(req: AuthReq):
         "name": sess.name,
         "is_new": res["is_new"],
     }
+
+
+def _client_ip(request: Request) -> str:
+    """真实客户端 IP：nginx 反代后 client.host 全是回环地址，取 X-Forwarded-For 首跳。"""
+    fwd = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+    return fwd or (request.client.host if request.client else "-")
+
+
+def _throttled(request: Request) -> None:
+    if not _login_throttle(_client_ip(request)):
+        raise HTTPException(429, "尝试太频繁，歇一分钟再来")
+
+
+_CHAT_HITS: dict[str, list[float]] = {}
+_CHAT_MAX, _CHAT_WIN = 30, 300  # 每账号 5 分钟 30 条
+
+
+def _chat_throttle(key: str) -> bool:
+    """聊天按账号限频——自动注册零门槛，没有它公网上 API Key 会被刷爆。"""
+    now = time.monotonic()
+    hits = [t for t in _CHAT_HITS.get(key, []) if now - t < _CHAT_WIN]
+    ok = len(hits) < _CHAT_MAX
+    if ok:
+        hits.append(now)
+    _CHAT_HITS[key] = hits
+    if len(_CHAT_HITS) > 500:
+        for k in [k for k, v in _CHAT_HITS.items() if not v or now - v[-1] >= _CHAT_WIN]:
+            _CHAT_HITS.pop(k, None)
+    return ok
+
+
+@app.post("/api/auth/login")
+async def api_auth_login(request: Request, req: AuthReq):
+    _throttled(request)
+    try:
+        # PBKDF2 十多万次迭代要跑几十上百毫秒，挪出事件循环免得卡住别人的 SSE 流
+        res = await asyncio.to_thread(auth.login, req.username, req.password)
+    except ValueError as e:
+        raise HTTPException(401, str(e))
+    return await _auth_response(res)
+
+
+@app.post("/api/auth/register")
+async def api_auth_register(request: Request, req: RegisterReq):
+    _throttled(request)
+    try:
+        res = await asyncio.to_thread(
+            auth.register, req.username, req.password, req.role,
+            req.child, req.question, req.answer)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return await _auth_response(res)
+
+
+@app.get("/api/auth/question")
+async def api_auth_question(request: Request, username: str = ""):
+    """找回密码第一步：按用户名取密保问题；recoverable=false 表示没设过密保。"""
+    _throttled(request)
+    try:
+        return await asyncio.to_thread(auth.security_question, username)
+    except KeyError:
+        raise HTTPException(404, "没有这个账号，先去注册吧")
+
+
+@app.post("/api/auth/reset")
+async def api_auth_reset(request: Request, req: ResetReq):
+    """找回密码第二步：密保答案核对通过即重置，旧 token 全部作废。"""
+    _throttled(request)
+    try:
+        await asyncio.to_thread(
+            auth.reset_password, req.username, req.answer, req.password)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True}
 
 
 @app.post("/api/auth/logout")
@@ -187,12 +318,14 @@ def _stores(sess):
 async def api_session(request: Request, req: SessionReq):
     _, sess = await _auth_session(request, "session", req.name)
     g, a, _ = _stores(sess)
+    graph_n, affair_n = await asyncio.to_thread(
+        lambda: (len(g.export()["nodes"]), len(a.list())))
     return {
         "name": sess.name,
         "is_new": sess.is_new,
         "child": sess.store.child_name,
-        "graph_nodes": len(g.export()["nodes"]),
-        "affairs": len(a.list()),
+        "graph_nodes": graph_n,
+        "affairs": affair_n,
     }
 
 
@@ -200,13 +333,14 @@ async def api_session(request: Request, req: SessionReq):
 async def api_greeting(request: Request, name: str = ""):
     _, sess = await _auth_session(request, "greeting", name)
     _, a, _ = _stores(sess)
-    block = sess.store.active_block()
+    block, brief, reminders = await asyncio.to_thread(
+        lambda: (sess.store.active_block(), _affairs_brief(a), sess.store.due_reminders()))
     try:
         text = await llm.complete(
             [{"role": "user", "content": prompts.GREETING.format(
                 name=sess.name,
                 now=datetime.now().strftime("%Y-%m-%d %H:%M 星期") + "一二三四五六日"[datetime.now().weekday()],
-                affairs_brief=_affairs_brief(a),
+                affairs_brief=brief,
                 memory_block=block or "（还没有记忆，这是第一次见面）",
             )}],
             max_tokens=600,
@@ -214,7 +348,7 @@ async def api_greeting(request: Request, name: str = ""):
         )
     except llm.LLMError as e:
         raise HTTPException(502, f"LLM 暂不可用：{e}")
-    return {"text": text.strip(), "reminders": sess.store.due_reminders(), "name": name}
+    return {"text": text.strip(), "reminders": reminders, "name": sess.name}
 
 
 @app.get("/api/suggest")
@@ -222,7 +356,8 @@ async def api_suggest(request: Request, name: str = ""):
     """开场快捷话题：按这个孩子当下的事务/截止/兴趣/时段动态生成。"""
     _, sess = await _auth_session(request, "chat", name)
     g, a, _ = _stores(sess)
-    return {"chips": suggest.opening(a, g, history_len=len(sess.history))}
+    chips = await asyncio.to_thread(suggest.opening, a, g, history_len=len(sess.history))
+    return {"chips": chips}
 
 
 # ---------------------------------------------------------------- 晨间巡检
@@ -244,26 +379,20 @@ def _affairs_brief(a_store, limit: int = 6) -> str:
     return "\n".join(lines)
 
 
-@app.get("/api/briefing")
-async def api_briefing(request: Request, name: str = ""):
-    _, sess = await _auth_session(request, "briefing", name)
-    g, a, m = _stores(sess)
+def _briefing_collect(a: affairs.AffairStore, g: graph.GraphStore, m: memory.MemoryStore) -> dict:
+    """晨报要用的本地数据一次采齐（随 to_thread 整体离事件循环）。
+
+    主动建议："近期反复提起"检测——同一节点被提及 >=3 次、事实跨 >=2 个不同的天、
+    最近 10 天内还在提，且还没挂在任何事务上。确定性规则，不靠 LLM 猜。
+    注意：private（悄悄话）节点绝不能出现在建议里——那是孩子没打算让人知道的事
+    """
     snapshot = a.snapshot()
     due = a.due_soon(days=30)  # 演示档案里主事件在 16 天后，窗口放宽到 30 天
-    due_brief = "\n".join(
-        f"- {d['title']}：{d['due']}（{_left(d)}）" for d in due
-    ) or "（最近没有临近截止的事）"
-
-    affair_brief_text = _affairs_brief(a)
     mem_block = m.active_block()
     graph_block = g.brief_block(limit=30)
     if graph_block:
         mem_block = f"{mem_block}\n\n{graph_block}"
-
-    # 主动建议："近期反复提起"检测——同一节点被提及 >=3 次、事实跨 >=2 个不同的天、
-    # 最近 10 天内还在提，且还没挂在任何事务上。确定性规则，不靠 LLM 猜。
-    # 注意：private（悄悄话）节点绝不能出现在建议里——那是孩子没打算让人知道的事
-    linked = {nid for it in a.list() for nid in it.get("linked_nodes") or []}
+    linked = {nid for it in snapshot["affairs"] for nid in it.get("linked_nodes") or []}
     cutoff = date.today() - timedelta(days=10)
     candidates = []
     for n in g.load().get("nodes", []):
@@ -284,15 +413,33 @@ async def api_briefing(request: Request, name: str = ""):
         "affair_id": None,  # 契约 §4：建议尚未落成事务，id 为 null；node_id 附带图谱来源
         "node_id": n["id"],
     } for n in candidates[:2]]
+    return {
+        "snapshot": snapshot,
+        "due": due,
+        "due_brief": "\n".join(
+            f"- {d['title']}：{d['due']}（{_left(d)}）" for d in due
+        ) or "（最近没有临近截止的事）",
+        "affairs_brief": _affairs_brief(a),
+        "mem_block": mem_block,
+        "suggestions": suggestions,
+    }
+
+
+@app.get("/api/briefing")
+async def api_briefing(request: Request, name: str = ""):
+    _, sess = await _auth_session(request, "briefing", name)
+    g, a, m = _stores(sess)
+    data = await asyncio.to_thread(_briefing_collect, a, g, m)
+    snapshot, due = data["snapshot"], data["due"]
 
     try:
         text = await llm.complete(
             [{"role": "user", "content": prompts.BRIEFING.format(
                 name=sess.name,
                 now=datetime.now().strftime("%Y-%m-%d %H:%M 星期") + "一二三四五六日"[datetime.now().weekday()],
-                affairs_brief=affair_brief_text,
-                due_brief=due_brief,
-                memory_block=mem_block or "（暂无记忆）",
+                affairs_brief=data["affairs_brief"],
+                due_brief=data["due_brief"],
+                memory_block=data["mem_block"] or "（暂无记忆）",
             )}],
             max_tokens=800,
             caller="briefing",
@@ -308,7 +455,7 @@ async def api_briefing(request: Request, name: str = ""):
         "text": text.strip(),
         "affairs": snapshot["board"],
         "due_soon": due,
-        "suggestions": suggestions,
+        "suggestions": data["suggestions"],
     }
 
 
@@ -356,9 +503,11 @@ async def _settle_memory(sess, user_msg: str, reply: str, is_secret: bool = Fals
     """
     g, a, _ = _stores(sess)
     try:
+        # 悄悄话轮的 affair 字段被服务端强制清空，事务简报进了 prompt 也没用——不读
+        brief = "" if is_secret else await asyncio.to_thread(_affairs_brief, a)
         gdata = await memory.extract_and_store(sess.store, user_msg, reply,
                                                graph_store=g, is_secret=is_secret,
-                                               affairs_brief=_affairs_brief(a))
+                                               affairs_brief=brief)
     except Exception as e:  # noqa: BLE001 沉淀失败不能影响对话
         print(f"[memory] 图谱沉淀失败：{e}")
         return None
@@ -366,17 +515,22 @@ async def _settle_memory(sess, user_msg: str, reply: str, is_secret: bool = Fals
         return None
     # 事务侧的轻量沉淀：孩子汇报了进展 → 推进阶段（只对已存在的事务生效，防幻觉造单）
     aff = gdata.pop("affair", None)
-    if aff and not is_secret and a.get(aff["id"]):
+    if aff and not is_secret and await asyncio.to_thread(a.get, aff["id"]):
         try:
-            updated = a.advance(aff["id"], aff["stage"], actor="child",
-                                note=aff["note"] or user_msg[:40])
+            updated = await asyncio.to_thread(a.advance, aff["id"], aff["stage"],
+                                              actor="child", note=aff["note"] or user_msg[:40])
             gdata["affair_event"] = {"type": "affair", "action": "update", "affair": updated}
         except (KeyError, ValueError):
             pass
     return gdata
 
 
-async def _chat_stream(sess, raw_message: str):
+async def _chat_stream(sess, raw_message: str, ctx: dict):
+    """对话主链路的 SSE 流：跑到 done 为止，整个过程持有会话锁。
+
+    ctx 带出本轮的 reply_text / is_secret / message / intent，由调用方在锁释放后
+    接力跑 _chat_settle——沉淀与话题建议带 LLM 调用，占着锁会让下一条消息白吃 429。
+    """
     queue: asyncio.Queue[dict | None] = asyncio.Queue()
     is_secret = raw_message.startswith(SECRET_PREFIX)
     message = raw_message[len(SECRET_PREFIX):].strip() if is_secret else raw_message
@@ -392,7 +546,13 @@ async def _chat_stream(sess, raw_message: str):
 
     async def work():
         nonlocal reply_text
-        cls = await router.classify(message, _affairs_brief(a_store, limit=4))
+        # 意图分类（LLM RTT，最慢的一段）与图谱检索并行：recall 不依赖分类结果，
+        # 契约 §5 的事件顺序由后面的 emit 顺序保证（mode 仍最先下发）。
+        brief = await asyncio.to_thread(_affairs_brief, a_store, limit=4)
+        cls, hit = await asyncio.gather(
+            router.classify(message, brief),
+            asyncio.to_thread(g_store.recall, message, limit=4),
+        )
         intent, mood = cls["intent"], cls["mood"]
         if intent == "affair_update" and not cls.get("affair_id"):
             intent = "chat"  # 没指到具体事务的"汇报"按闲聊走，不再静默落入 chat 分支
@@ -403,7 +563,6 @@ async def _chat_stream(sess, raw_message: str):
         await emit({"type": "mode", "mode": mode, "mood": mood})
 
         # ① 想起来了：图谱检索 → recall 事件（同时注入 prompt）
-        hit = g_store.recall(message, limit=4)
         if hit["nodes"]:
             await emit({"type": "recall", "nodes": hit["nodes"], "edges": hit["edges"]})
 
@@ -423,21 +582,38 @@ async def _chat_stream(sess, raw_message: str):
                 last_turn["intent"] = "chat"
 
         if intent == "new_affair":
-            # ② 接下这件事：建事务
-            affair = await _open_affair(sess, a_store, message, hit)
+            # ② 接下这件事：建事务（或认领已存在的同题事务，不重复开单）
+            affair, created = await _open_affair(sess, a_store, message, hit)
             if affair:
-                await emit({"type": "affair", "action": "create", "affair": a_store.get(affair["id"])})
+                await emit({"type": "affair", "action": "create" if created else "update",
+                            "affair": await asyncio.to_thread(a_store.get, affair["id"])})
             try:
-                plan = await planner.make_plan(sess.store, message, a_store.snapshot())
+                snapshot = await asyncio.to_thread(a_store.snapshot)
+                plan = await planner.make_plan(sess.store, message, snapshot)
             except planner.PlanError:
                 plan = None
             if plan:
+                if created and affair:
+                    # 事务名用规整后的计划名，不拿用户原句切片当标题；
+                    # 存量事务的标题不动——那是用户/管家已经叫顺了的名字
+                    affair = await asyncio.to_thread(
+                        a_store.update, affair["id"], {"title": plan["title"][:18]},
+                        actor="butler", note="定下事务名")
+                    await emit({"type": "affair", "action": "update", "affair": affair})
                 await emit({
                     "type": "plan", "title": plan["title"],
                     "nodes": [{"id": n["id"], "title": n["title"], "tool": n["tool"],
                                "depends_on": n["depends_on"]} for n in plan["nodes"]],
                 })
-                results = await executor.run_plan(plan, sess.store, message, emit)
+                results, statuses = await executor.run_plan(plan, sess.store, message, emit)
+                if affair:
+                    # 执行链连同节点终态存进事务，详情抽屉的"DAG 回放"展示真链而非伪造
+                    await asyncio.to_thread(a_store.update, affair["id"], {"plan": {
+                        "title": plan["title"],
+                        "nodes": [{"id": n["id"], "title": n["title"], "tool": n["tool"],
+                                   "depends_on": n["depends_on"],
+                                   "status": statuses.get(n["id"], "done")} for n in plan["nodes"]],
+                    }}, actor="butler", note="执行链已存档")
                 card = await synth.synthesize(sess.store, message, results)
             else:
                 card = await synth.direct_card(sess.store, message)
@@ -452,12 +628,14 @@ async def _chat_stream(sess, raw_message: str):
         elif intent == "affair_update":
             patch = {"summary": message[:60]}
             try:
-                updated = a_store.update(cls["affair_id"], patch, actor="child", note=message[:40])
+                updated = await asyncio.to_thread(
+                    a_store.update, cls["affair_id"], patch, actor="child", note=message[:40])
                 await emit({"type": "affair", "action": "update", "affair": updated})
             except Exception:  # noqa: BLE001 事务 id 失效时照常聊天
                 pass
             chunks = []
-            async for tok in llm.stream(_chat_messages(sess, message, hit["block"]), max_tokens=600, caller="chat"):
+            msgs = await asyncio.to_thread(_chat_messages, sess, message, hit["block"])
+            async for tok in llm.stream(msgs, max_tokens=600, caller="chat"):
                 chunks.append(tok)
                 await emit({"type": "token", "text": tok})
             reply_text = "".join(chunks)
@@ -465,17 +643,18 @@ async def _chat_stream(sess, raw_message: str):
         elif intent == "explain":
             # 讲懂知识点：复用闲聊通道，但在人设后追加"用自己的经历打比方"的讲解规则
             chunks = []
-            async for tok in llm.stream(
-                    _chat_messages(sess, message, hit["block"],
-                                   extra_rule=prompts.EXPLAIN_RULE),
-                    max_tokens=600, caller="explain"):
+            msgs = await asyncio.to_thread(
+                _chat_messages, sess, message, hit["block"],
+                extra_rule=prompts.EXPLAIN_RULE)
+            async for tok in llm.stream(msgs, max_tokens=600, caller="explain"):
                 chunks.append(tok)
                 await emit({"type": "token", "text": tok})
             reply_text = "".join(chunks)
 
         else:
             chunks = []
-            async for tok in llm.stream(_chat_messages(sess, message, hit["block"]), max_tokens=600, caller="chat"):
+            msgs = await asyncio.to_thread(_chat_messages, sess, message, hit["block"])
+            async for tok in llm.stream(msgs, max_tokens=600, caller="chat"):
                 chunks.append(tok)
                 await emit({"type": "token", "text": tok})
             reply_text = "".join(chunks)
@@ -502,17 +681,35 @@ async def _chat_stream(sess, raw_message: str):
         if not task.done():
             task.cancel()
 
-    # ④ 回复已发完，再做记忆沉淀，并把结果作为 memory 事件补发
+    # ④ 本轮先写进会话历史（仍在锁内，保住先后顺序）；
+    #    耗时沉淀与话题建议交给 _chat_settle，在锁外接力。
     if reply_text:
         u_entry = {"role": "user", "content": raw_message if is_secret else message}
         a_entry = {"role": "assistant", "content": reply_text}
         if is_secret:
             u_entry["secret"] = a_entry["secret"] = True
         sess.history.extend([u_entry, a_entry])
-        # 悄悄话：把带 [[secret]] 标记的原文交给抽取器，它才知道要标成 private；
-        # is_secret 同时让文件层落盘走占位行——私密内容绝不写进 topics/daily/MEMORY.md
-        gdata = await _settle_memory(sess, raw_message if is_secret else message, reply_text,
-                                     is_secret)
+    ctx.update({"reply_text": reply_text, "is_secret": is_secret,
+                "message": message, "raw_message": raw_message,
+                "intent": last_turn.get("intent", "chat")})
+
+
+async def _chat_settle(sess, ctx: dict):
+    """会话锁外的收尾：记忆沉淀（LLM 抽取 + 落盘）→ memory/affair 事件 → 快捷话题。
+
+    悄悄话：把带 [[secret]] 标记的原文交给抽取器，它才知道要标成 private；
+    is_secret 同时让文件层落盘走占位行——私密内容绝不写进 topics/daily/MEMORY.md。
+    落盘安全由 store/目录写锁保证，不依赖会话锁。
+    """
+    reply_text = ctx.get("reply_text") or ""
+    is_secret = ctx.get("is_secret", False)
+    message = ctx.get("message") or ""
+    raw_message = ctx.get("raw_message") or message
+    g_store, a_store, _ = _stores(sess)
+
+    if reply_text:
+        gdata = await _settle_memory(sess, raw_message if is_secret else message,
+                                     reply_text, is_secret)
         if gdata:
             aff_ev = gdata.pop("affair_event", None)  # 事务阶段推进 → 看板实时刷新
             if aff_ev:
@@ -522,10 +719,11 @@ async def _chat_stream(sess, raw_message: str):
             if gdata.get("added_nodes") or gdata.get("added_edges") or gdata.get("updated"):
                 yield _sse({"type": "memory", **gdata})
 
-    # ⑤ 按这一轮的实际情况换一批快捷话题（确定性规则，不额外调 LLM）
+    # 按这一轮的实际情况换一批快捷话题（确定性规则，不额外调 LLM）
     if not is_secret:
         try:
-            chips = suggest.followups(last_turn.get("intent", "chat"), a_store, g_store)
+            chips = await asyncio.to_thread(
+                suggest.followups, ctx.get("intent") or "chat", a_store, g_store)
             if chips:
                 yield _sse({"type": "suggest", "chips": chips})
         except Exception as e:  # noqa: BLE001 话题建议是锦上添花
@@ -542,14 +740,16 @@ async def _triage(sess, a_store, message: str, hit: dict, emit) -> str:
 
     返回本轮回复的纯文本（进历史和记忆沉淀）。事务按 existing_id / 标题去重，不重复建单。
     """
-    mem = sess.store.active_block() or "（暂无记忆）"
+    mem, brief = await asyncio.to_thread(
+        lambda: (sess.store.active_block(), _affairs_brief(a_store, limit=8)))
+    mem = mem or "（暂无记忆）"
     if hit.get("block"):
         mem = f"{mem}\n\n和这次相关的记忆：\n{hit['block']}"
     data = await llm.complete_json(
         [{"role": "system", "content": "你是任务拆解模块，只输出 JSON。"},
          {"role": "user", "content": prompts.TRIAGE.format(
              name=sess.name, now=_now_text(), memory_block=mem,
-             affairs_brief=_affairs_brief(a_store, limit=8), message=message)}],
+             affairs_brief=brief, message=message)}],
         max_tokens=1600, caller="triage")
     tasks = [t for t in data.get("tasks") or [] if isinstance(t, dict) and str(t.get("title") or "").strip()]
     if not tasks:
@@ -568,7 +768,7 @@ async def _triage(sess, a_store, message: str, hit: dict, emit) -> str:
 
     # ③ 逐件落成事务（已在看板上的就更新，不重复建）
     linked = [n["id"] for n in hit.get("nodes", [])[:2]]
-    existing = {a["id"]: a for a in a_store.list()}
+    existing = {a["id"]: a for a in await asyncio.to_thread(a_store.list)}
     sections = []
     for i, t in enumerate(tasks):
         title = str(t["title"]).strip()[:16]
@@ -584,10 +784,11 @@ async def _triage(sess, a_store, message: str, hit: dict, emit) -> str:
                 patch = {"summary": summary}
                 if due:
                     patch["due"] = due
-                affair = a_store.update(aid, patch, actor="child", note=f"又提起：{title}")
+                affair = await asyncio.to_thread(
+                    a_store.update, aid, patch, actor="child", note=f"又提起：{title}")
                 await emit({"type": "affair", "action": "update", "affair": affair})
             else:
-                affair = a_store.create({
+                affair = await asyncio.to_thread(a_store.create, {
                     "title": title, "kind": str(t.get("kind") or "goal"), "stage": "planning",
                     "owner_next": "child", "summary": summary, "due": due,
                     "linked_nodes": linked, "progress": {"mode": "none", "value": 0},
@@ -617,17 +818,38 @@ async def _triage(sess, a_store, message: str, hit: dict, emit) -> str:
     return reply + "\n" + synth.card_to_text(card)
 
 
-async def _open_affair(sess, a_store, message: str, hit: dict) -> dict | None:
-    """把一句需求变成一个事务（不额外调 LLM：用消息与前几个命中节点拼出事务）。"""
+def _flat(text: str) -> str:
+    """标题归一化：去标点空白，只留文字，用来比"是不是同一件事"。"""
+    return re.sub(r"[^\w一-鿿]+", "", text or "")
+
+
+async def _open_affair(sess, a_store, message: str, hit: dict) -> tuple[dict | None, bool]:
+    """把一句需求变成一个事务；返回 (事务, 是否新建)。
+
+    同一批记忆支撑的事不重复建单：recall 命中的节点若已挂在某个事务上，
+    就直接认领它——"西客松要准备啥"和"西客松行李清单"不该是两个事务。
+    """
     try:
-        linked = [n["id"] for n in hit["nodes"][:3]]
+        nodes = hit.get("nodes") or []
+        linked = [n["id"] for n in nodes[:3]]
+        hit_ids = {n["id"] for n in nodes}
+        # 先落个短标题占位，规划成功后由调用方换成 plan["title"]
         title = re.sub(r"[，。！？!?~～\s]+", "", message)[:18] or "新的事"
-        snapshot = a_store.list()
-        # 同一件事已在看板上就不重复建
+        snapshot = await asyncio.to_thread(a_store.list)
+        msg_flat = _flat(message)
+        best, best_score = None, 0
         for it in snapshot:
-            if it["title"][:6] and it["title"][:6] in message:
-                return None
-        affair = a_store.create({
+            if it.get("stage") == "done":
+                continue
+            score = 2 * len(hit_ids & set(it.get("linked_nodes") or []))
+            t = _flat(it.get("title"))
+            if len(t) >= 4 and (t[:6] in msg_flat or msg_flat[:6] in t):
+                score += 3
+            if score > best_score:
+                best, best_score = it, score
+        if best is not None:
+            return best, False
+        affair = await asyncio.to_thread(a_store.create, {
             "title": title,
             "kind": "event",
             "stage": "planning",
@@ -638,10 +860,10 @@ async def _open_affair(sess, a_store, message: str, hit: dict) -> dict | None:
             "log": [{"ts": datetime.now().isoformat(timespec="seconds"), "actor": "butler",
                      "text": f"接下这件事：{message[:40]}"}],
         })
-        return affair
+        return affair, True
     except Exception as e:  # noqa: BLE001 建事务失败不影响出方案
         print(f"[affair] 创建失败：{e}")
-        return None
+        return None, False
 
 
 async def _execute_actions(sess, a_store, affair: dict, card: dict, message: str, emit) -> None:
@@ -667,32 +889,65 @@ async def _execute_actions(sess, a_store, affair: dict, card: dict, message: str
             "detail": "管家已把行程与清单准备好，请家长确认交通与报名相关事项。",
         })
 
+    affair_dirty = False
     for act in to_run:
         try:
             result = await actions.run_action(sess.dir, affair, act)
             await emit({"type": "action", **result})
             if result.get("ok"):
-                a_store.update(affair["id"], {
-                    "actions": (affair.get("actions") or []) + [act],
-                }, actor="butler", note=f"执行了 {act['kind']}")
+                affair["actions"] = (affair.get("actions") or []) + [act]
+                patch = {"actions": affair["actions"]}
+                cid = (result.get("payload") or {}).get("checklist_id")
+                if act.get("kind") == "checklist" and cid:
+                    # 清单回挂到事务上——否则清单建了却永远够不着（详情抽屉按 checklist_id 取）
+                    patch["checklist_id"] = cid
+                affair = await asyncio.to_thread(
+                    a_store.update, affair["id"], patch, actor="butler",
+                    note=f"执行了 {act['kind']}")
+                affair_dirty = True
         except Exception as e:  # noqa: BLE001 单个动作失败不拖垮整链
             await emit({"type": "action", "kind": act.get("kind", "?"), "ok": False, "detail": str(e), "payload": {}})
+    if affair_dirty:
+        await emit({"type": "affair", "action": "update", "affair": affair})
 
 
 @app.post("/api/chat")
 async def api_chat(request: Request, req: ChatReq):
-    _, sess = await _auth_session(request, "chat", req.name)
+    user, sess = await _auth_session(request, "chat", req.name)
+    if not _chat_throttle(user["username"]):
+        raise HTTPException(429, "说得太快啦，喝口水歇五分钟再聊")
     try:
         await asyncio.wait_for(sess.lock.acquire(), timeout=0.3)
     except asyncio.TimeoutError:
         raise HTTPException(429, "管家还在回复上一条，稍等一下哦")
 
     async def guarded():
+        ctx: dict = {}
         try:
-            async for chunk in _chat_stream(sess, req.message):
+            async for chunk in _chat_stream(sess, req.message, ctx):
                 yield chunk
         finally:
             sess.lock.release()
+        # 锁外收尾：记忆沉淀与话题建议不再把下一条消息挡在 429 外面。
+        # 沉淀经后台任务中转——客户端断开时本生成器被关闭，但 _settle 里的
+        # LLM 抽取和落盘必须跑完，否则这一轮的记忆就丢了。
+        q: asyncio.Queue[str | None] = asyncio.Queue()
+
+        async def _settle() -> None:
+            try:
+                async for chunk in _chat_settle(sess, ctx):
+                    await q.put(chunk)
+            except Exception as e:  # noqa: BLE001 收尾失败只记日志，不回写错误事件（回复已发完）
+                print(f"[settle] 后台收尾失败：{e}")
+            finally:
+                await q.put(None)
+
+        _bg(asyncio.create_task(_settle()))
+        while True:
+            chunk = await q.get()
+            if chunk is None:
+                break
+            yield chunk
 
     return StreamingResponse(
         guarded(),
@@ -709,25 +964,28 @@ async def api_graph(request: Request, name: str = "", view: str = "child"):
     if user["role"] == "parent":
         view = "parent"  # 家长视角的私密过滤在服务端强制，不信客户端参数
     g, _, _ = _stores(sess)
-    return g.export(view=view)
+    return await asyncio.to_thread(g.export, view=view)
 
 
 @app.get("/api/affairs")
 async def api_affairs(request: Request, name: str = ""):
     _, sess = await _auth_session(request, "affairs", name)
     _, a, _ = _stores(sess)
-    return a.snapshot()
+    return await asyncio.to_thread(a.snapshot)
 
 
 @app.post("/api/affairs")
 async def api_affairs_write(request: Request, req: AffairReq):
-    _, sess = await _auth_session(request, "affairs", req.name)
+    _, sess = await _auth_session(request, "affairs_write", req.name)
     _, a, _ = _stores(sess)
     patch = req.patch or req.data or {}
     try:
-        if req.id and a.get(req.id):
-            return {"affair": a.update(req.id, patch, actor="user", note="看板更新")}
-        return {"affair": a.create(patch or {"title": "新的事"})}
+        if req.id:
+            if await asyncio.to_thread(a.get, req.id):
+                return {"affair": await asyncio.to_thread(
+                    a.update, req.id, patch, actor="user", note="看板更新")}
+            patch = {**patch, "id": req.id}  # 指定 id 建事务时保留请求方给的 id
+        return {"affair": await asyncio.to_thread(a.create, patch or {"title": "新的事"})}
     except ValueError as e:  # 非法 stage 等校验错误 → 400，而不是 500
         raise HTTPException(400, str(e))
 
@@ -736,7 +994,7 @@ async def api_affairs_write(request: Request, req: AffairReq):
 async def api_affair_detail(request: Request, aid: str, name: str = ""):
     _, sess = await _auth_session(request, "affairs", name)
     _, a, _ = _stores(sess)
-    affair = a.get(aid)
+    affair = await asyncio.to_thread(a.get, aid)
     if affair is None:
         raise HTTPException(404, "事务不存在")
     return {"affair": affair}
@@ -747,17 +1005,17 @@ async def api_checklist_get(request: Request, cid: str, name: str = ""):
     _, sess = await _auth_session(request, "checklist", name)
     _, a, _ = _stores(sess)
     try:
-        return {"checklist": a.checklist(cid)}
+        return {"checklist": await asyncio.to_thread(a.checklist, cid)}
     except KeyError:
         raise HTTPException(404, "清单不存在")
 
 
 @app.post("/api/checklist/{cid}")
 async def api_checklist(request: Request, cid: str, req: ChecklistReq):
-    _, sess = await _auth_session(request, "checklist", req.name)
+    _, sess = await _auth_session(request, "checklist_write", req.name)
     _, a, _ = _stores(sess)
     try:
-        return {"checklist": a.toggle_item(cid, req.index, req.done)}
+        return {"checklist": await asyncio.to_thread(a.toggle_item, cid, req.index, req.done)}
     except (KeyError, IndexError):
         raise HTTPException(404, "清单项不存在")
 
@@ -767,13 +1025,15 @@ async def api_ics(request: Request, aid: str, name: str = ""):
     _, sess = await _auth_session(request, "ics", name)
     _, a, _ = _stores(sess)
     try:
-        ics = a.ics(aid)
+        ics = await asyncio.to_thread(a.ics, aid)
     except KeyError:
         raise HTTPException(404, "事务不存在")
+    # 事务 id 进 Content-Disposition 文件名前消毒，防引号/换行注入响应头
+    safe = re.sub(r"[^\w一-鿿.-]", "_", aid)[:40] or "affair"
     return PlainTextResponse(
         ics,
         media_type="text/calendar; charset=utf-8",
-        headers={"Content-Disposition": f'attachment; filename="{aid}.ics"'},
+        headers={"Content-Disposition": f'attachment; filename="{safe}.ics"'},
     )
 
 
@@ -783,8 +1043,8 @@ async def api_ics(request: Request, aid: str, name: str = ""):
 async def api_inbox(request: Request, name: str = ""):
     _, sess = await _auth_session(request, "inbox", name)
     g, a, _ = _stores(sess)
-    items = a.inbox()
-    secrets = [n for n in g.load().get("nodes", []) if n.get("private")]
+    items, secrets = await asyncio.to_thread(
+        lambda: (a.inbox(), [n for n in g.load().get("nodes", []) if n.get("private")]))
     return {"items": items, "secret_count": len(secrets)}
 
 
@@ -793,7 +1053,7 @@ async def api_inbox_decide(request: Request, iid: str, req: InboxReq):
     _, sess = await _auth_session(request, "inbox", req.name)
     _, a, _ = _stores(sess)
     try:
-        item = a.decide_inbox(iid, req.action, req.reply)
+        item = await asyncio.to_thread(a.decide_inbox, iid, req.action, req.reply)
     except KeyError:
         raise HTTPException(404, "该事项不存在")
     except ValueError as e:
@@ -801,8 +1061,10 @@ async def api_inbox_decide(request: Request, iid: str, req: InboxReq):
     if item.get("affair_id"):
         note = "家长已确认" if req.action == "approve" else "家长驳回，需另想办法"
         try:
-            a.advance(item["affair_id"], "followup" if req.action == "approve" else "executing",
-                      actor="parent", note=note)
+            await asyncio.to_thread(
+                a.advance, item["affair_id"],
+                "followup" if req.action == "approve" else "executing",
+                actor="parent", note=note)
         except KeyError:
             pass
     return {"item": item}
@@ -813,8 +1075,8 @@ async def _do_relay(sess, direction: str, text: str) -> dict:
     # 结构性隔离（参考 OpenPanda isolation.go）：传话筒的产出是给家长/老师看的，
     # 记忆只能来自图谱层——brief_block/recall 在构造上就剔除了 private 节点，
     # 文件层记忆（可能混入心事）没有任何代码路径会进入这条 prompt。
-    mem = g.brief_block(limit=24)
-    rec = g.recall(text, limit=3)["block"]
+    mem = await asyncio.to_thread(g.brief_block, limit=24)
+    rec = (await asyncio.to_thread(g.recall, text, limit=3))["block"]
     if rec:
         mem = f"{mem}\n\n和这段话相关的记忆：\n{rec}" if mem else rec
     tpl = prompts.RELAY_T2P if direction == "teacher2parent" else prompts.RELAY_C2T
@@ -869,7 +1131,8 @@ _STATUS_FACTOR = {"done": 1.15, "active": 1.0, "dropped": 0.35}
 
 def _growth_stats(g: graph.GraphStore, view: str) -> dict:
     """五育雷达：从记忆图谱确定性统计（提及权重 × 新近度 × 状态加成），不靠 LLM 猜。"""
-    nodes = g.load()["nodes"]
+    gdata = g.load()
+    nodes = gdata["nodes"]
     if view == "parent":
         nodes = [n for n in nodes if not n.get("private")]
     today = date.today()
@@ -900,7 +1163,7 @@ def _growth_stats(g: graph.GraphStore, view: str) -> dict:
         })
     return {
         "dimensions": dims,
-        "totals": {"nodes": len(nodes), "edges": len(g.load()["edges"]),
+        "totals": {"nodes": len(nodes), "edges": len(gdata["edges"]),
                    "done": sum(1 for n in nodes if n.get("status") == "done")},
         "source": "graph",
     }
@@ -912,7 +1175,7 @@ async def api_growth(request: Request, name: str = "", view: str = "child"):
     if user["role"] == "parent":
         view = "parent"  # 服务端强制：家长看不到悄悄话节点
     g, _, m = _stores(sess)
-    data = _growth_stats(g, "parent" if view == "parent" else "child")
+    data = await asyncio.to_thread(_growth_stats, g, "parent" if view == "parent" else "child")
     # 一句点评：LLM 可用就生成，失败就省略（数据本身已经够看）
     try:
         dims_txt = "，".join(f"{d['name']} {d['score']}" for d in data["dimensions"])
@@ -932,9 +1195,9 @@ async def api_growth(request: Request, name: str = "", view: str = "child"):
 async def api_dream(request: Request, req: DreamReq):
     """「说说我的梦想」：孩子说梦想 → 接住并落成记忆；没说 → 主动邀请。"""
     _, sess = await _auth_session(request, "dream", req.name)
-    mem_block = sess.store.active_block() or "（还没有记忆，慢慢了解中）"
     g, a, _ = _stores(sess)
-    graph_brief = g.brief_block(limit=20)
+    mem_block = await asyncio.to_thread(sess.store.active_block) or "（还没有记忆，慢慢了解中）"
+    graph_brief = await asyncio.to_thread(g.brief_block, limit=20)
     if graph_brief:
         mem_block = f"{mem_block}\n\n{graph_brief}"
     text = req.text.strip()
@@ -948,7 +1211,8 @@ async def api_dream(request: Request, req: DreamReq):
         if text:
             raise HTTPException(502, f"管家的大脑暂时连不上啦：{e}")
         # 邀请语降级：用本地数据说实话
-        tops = sorted(g.load()["nodes"], key=lambda n: -int(n.get("weight") or 1))
+        tops = sorted((await asyncio.to_thread(g.load))["nodes"],
+                      key=lambda n: -int(n.get("weight") or 1))
         hot = tops[0]["label"] if tops else ""
         reply = (f"我注意到你最近一直在惦记「{hot}」，这里面藏着你的梦想吗？跟我说说～"
                  if hot else "今天第一次见，来说说你的梦想吧，我帮你记着。")
@@ -966,7 +1230,7 @@ async def api_dream(request: Request, req: DreamReq):
 @app.get("/api/memory")
 async def api_memory(request: Request, name: str = ""):
     _, sess = await _auth_session(request, "memory", name)
-    return sess.store.export()
+    return await asyncio.to_thread(sess.store.export)
 
 
 @app.get("/api/history")
@@ -984,7 +1248,7 @@ async def api_history(request: Request, name: str = ""):
 async def api_logs(request: Request, limit: int = 50):
     """LLM 调用日志：评委可据此核验全部输出为真实生成。仅 admin。"""
     _need(_user(request), "logs")
-    return {"calls": llm.read_logs(min(limit, 200))}
+    return {"calls": await asyncio.to_thread(llm.read_logs, min(limit, 200))}
 
 
 @app.get("/api/health")

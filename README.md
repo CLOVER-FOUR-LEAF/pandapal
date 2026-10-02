@@ -45,13 +45,14 @@ cp .env.example .env   # 然后填入你的 LLM_API_KEY 等
 | `豆豆妈` | `mama123` | 家长 | 收件箱确认、传话筒 + 孩子档案的只读视图（悄悄话服务端强制过滤） |
 | `admin` | `admin123` | 评委 | 全部能力 + `/api/logs` 调用留痕 + 孩子/家长视角切换 |
 
-输入未注册的用户名会自动创建「孩子」账号并绑定同名空白档案。除 `/api/health`、`/api/auth/*` 与静态页外，全部接口要求 `Authorization: Bearer <token>`；非 admin 只能访问自己绑定的孩子档案，越权一律 403。密码 PBKDF2 加盐存 `data/users.json`（不入库），token 仅内存有效、重启重登。
+输入未注册的用户名会自动创建「孩子」账号并绑定同名空白档案。登录卡还有**注册**（选孩子/家长身份，家长需填孩子登录名绑定档案）与**忘记密码**（答对注册时设的密保问题即可重置，旧 token 全部作废）两个面板；演示账号统一预置密保「熊猫最爱吃什么？/ 竹子」，开箱可演找回流程。种子账号口令可用 `PANDA_CHILD/PARENT/ADMIN_PASSWORD` 覆盖（仅首次生成 users.json 时生效，线上部署务必改掉）；`data/aliases.seed.json` 可配登录名别名（如 `xiaodou`→`小豆`），别名只解析到已存在的账号、照常校验密码，绝不会绕过密码或蹭到别人的档案。除 `/api/health`、`/api/auth/*` 与静态页外，全部接口要求 `Authorization: Bearer <token>`；非 admin 只能访问自己绑定的孩子档案，越权一律 403；家长账号是孩子档案的只读视图（收件箱确认与传话筒除外）。密码与密保答案 PBKDF2 加盐存 `data/users.json`，token 落 `data/tokens.json`（均不入库），默认 7 天有效、重启不掉登录。
 
 ## 四、核心功能
 
 | 功能 | 模块 |
 |---|---|
 | 登录选档 / 会话隔离（名字→独立档案目录） | `server/sessions.py` |
+| 注册（孩子/家长绑定）· 密保找回密码 · token 吊销 | `server/auth.py` + `/api/auth/register|question|reset` |
 | 记忆驱动开场问候 | `GET /api/greeting` |
 | 闲聊通道（人设+活跃记忆注入+历史尾部→流式回复） | `server/main.py` `_chat_stream` |
 | 意图分类（plan/chat） | `server/router.py` |

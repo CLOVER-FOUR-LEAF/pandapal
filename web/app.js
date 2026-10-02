@@ -18,7 +18,7 @@
 
 import * as scene3d from "./scene3d.js";
 import { renderFallback } from "./graph2d.js";
-import { mountPanda, setMood } from "./panda.js";
+import { mountPanda, setMood, attachLoginInteractions } from "./panda.js";
 import { marked } from "./vendor/marked.esm.js";
 import purify from "./vendor/purify.es.js";
 
@@ -169,6 +169,29 @@ function setMd(target, raw) {
   if (html === null) target.textContent = String(raw == null ? "" : raw);
   else target.innerHTML = html;
 }
+
+/** token 合流渲染：marked+DOMPurify 是对全文的重解析，逐 token 调是 O(n²)。
+ *  50ms 一批重画——窗口内所有 token 只画一次最新 aiRaw，长回复渲染次数从 token 数降到 ~时长/50ms。 */
+function scheduleMd(ctx) {
+  if (!ctx || ctx.mdTimer || !ctx.aiBubble) return;
+  const md = ctx.aiBubble.querySelector(".md");
+  if (!md) return;
+  ctx.aiBubble.classList.add("streaming");
+  ctx.mdTimer = setTimeout(() => {
+    ctx.mdTimer = null;
+    const el = ctx.aiBubble && ctx.aiBubble.querySelector(".md");
+    if (el) setMd(el, ctx.aiRaw);
+    scrollBottom();
+  }, 50);
+}
+
+/** 流结束/出错/中止时把剩余文本一次性刷进气泡，不留半截。 */
+function flushMd(ctx) {
+  if (!ctx) return;
+  if (ctx.mdTimer) { clearTimeout(ctx.mdTimer); ctx.mdTimer = null; }
+  const el = ctx.aiBubble && ctx.aiBubble.querySelector(".md");
+  if (el && ctx.aiRaw) setMd(el, ctx.aiRaw);
+}
 function truncate(s, n = 60) {
   const t = String(s == null ? "" : s);
   return t.length > n ? t.slice(0, n - 1) + "…" : t;
@@ -202,6 +225,9 @@ function countdownText(due) {
  * 2. 网络 + 视图切换 + Toast
  * ========================================================================== */
 
+/* 部署在子路径（如 /pandapal/）时，API 请求统一带上挂载前缀；根路径部署时为空串 */
+const BASE = location.pathname.replace(/\/+$/, "");
+
 async function api(path, opts) {
   let resp;
   try {
@@ -209,7 +235,7 @@ async function api(path, opts) {
     if (state.token) {
       opts.headers = { ...(opts.headers || {}), Authorization: `Bearer ${state.token}` };
     }
-    resp = await fetch(path, opts);
+    resp = await fetch(BASE + path, opts);
   } catch {
     throw new Error("网络好像断了，检查连接再试试～");
   }
@@ -329,10 +355,9 @@ function useFallback2D(reason) {
   setHidden("#scene-canvas", true);
   setHidden("#graph-canvas-2d", false);
   const note = $("#scene-fallback .fallback-note");
-  if (note) note.textContent = reason ? `2D 降级模式 · ${reason}` : "2D 降级模式 · 数据与交互不变";
+  if (note) note.textContent = "2D 全景图谱 · 交互与数据实时同步";
   renderFallbackGraph();
   mount2DPanda();
-  if (state.name) addSys("3D 星球没启动起来，已切到 2D 图谱，其他功能照常～");
 }
 
 function mount2DPanda() {
@@ -370,10 +395,55 @@ function draw2D(host, graph, onClick) {
 }
 
 function renderMiniGraph() {
+  /** 星球速览：五领域节点分布条 + 最近点亮的记忆（2D 缩略图在 146px 高度里只是一团色块，讲不清楚）。 */
   const host = $("#graph-mini .graph-mini-canvas");
   if (!host) return;
-  // 速览图点节点 = 进星球页直接看该节点详情
-  draw2D(host, filteredGraph(), (n) => { go("graph"); openNodeDrawer(n); });
+  const nodes = (state.graph.nodes || []).filter((n) => n && n.id !== "xiaodou" && n.type !== "self");
+  host.innerHTML = "";
+  host.classList.add("mini-stats");
+  if (!nodes.length) {
+    host.appendChild(el("p", "empty-hint", "多聊几句，管家就会把你的世界点亮成星球～"));
+    return;
+  }
+  const counts = {};
+  DOMAIN_KEYS.forEach((k) => (counts[k] = 0));
+  nodes.forEach((n) => { if (counts[n.domain] !== undefined) counts[n.domain] += 1; });
+  const max = Math.max(1, ...Object.values(counts));
+  const bars = el("div", "mini-bars");
+  DOMAIN_KEYS.forEach((k) => {
+    const b = el("button", "mini-bar");
+    b.type = "button";
+    b.dataset.domain = k;
+    b.setAttribute("aria-label", `${DOMAINS[k][0]}：${counts[k]} 个记忆节点`);
+    const track = el("span", "mini-track");
+    const fill = el("i", "mini-fill");
+    fill.style.height = `${Math.max(8, Math.round((counts[k] / max) * 100))}%`;
+    track.appendChild(fill);
+    append(b, el("span", "mini-num", String(counts[k])), track, el("span", "mini-lab", DOMAINS[k][0]));
+    b.onclick = (e) => {
+      e.stopPropagation();
+      state.filters = { ...(state.filters || {}), domain: k };
+      go("graph");
+      s3("setDomainFilter", state.filters.domain, state.filters.status);
+    };
+    bars.appendChild(b);
+  });
+  const recent = nodes.slice()
+    .sort((a, b) => String(b.last_seen || "").localeCompare(String(a.last_seen || "")) || (b.weight || 0) - (a.weight || 0))
+    .slice(0, 3);
+  const side = el("div", "mini-side");
+  append(side, el("div", "mini-total", `${nodes.length}`), el("div", "mini-total-lab", "颗记忆星"));
+  const rec = el("div", "mini-recent");
+  recent.forEach((n) => {
+    const pill = el("button", "node-pill");
+    pill.type = "button";
+    pill.dataset.domain = n.domain || "";
+    pill.textContent = truncate(n.label || n.id, 6);
+    pill.onclick = (e) => { e.stopPropagation(); go("graph"); openNodeDrawer(n); };
+    rec.appendChild(pill);
+  });
+  side.appendChild(rec);
+  append(host, bars, side);
 }
 
 /* ==========================================================================
@@ -392,17 +462,225 @@ function saveAuth() {
   } catch { /* 私密模式下静默 */ }
 }
 
-async function login(username, password) {
-  const hint = $("#login-hint");
+let loginPanda = null;
+let loginBusy = false;
+
+function setHint(sel, text, kind) {
+  const hint = typeof sel === "string" ? $(sel) : sel;
+  if (!hint) return;
+  hint.textContent = text || "";
+  hint.classList.toggle("err", kind === "err");
+  hint.classList.toggle("ok", kind === "ok");
+}
+function setLoginHint(text, kind) { setHint("#login-hint", text, kind); }
+
+function shakeCard() {
+  const card = $("#login-card");
+  if (card) { card.classList.remove("shake"); void card.offsetWidth; card.classList.add("shake"); }
+}
+
+function busyBtn(btn, on) {
+  if (!btn) return;
+  btn.disabled = on;
+  btn.classList.toggle("loading", on);
+}
+
+/* 登录卡三个面板：登录 / 注册 / 找回密码 */
+const AUTH_PANES = {
+  login:    { sel: "#pane-login",    title: "欢迎回来",   sub: "登录后，管家会接着上次的话题继续陪伴" },
+  register: { sel: "#pane-register", title: "创建新账号", sub: "选一个身份，注册即拥有专属档案" },
+  forgot:   { sel: "#pane-forgot",   title: "找回密码",   sub: "答对注册时设的密保问题，就能重置密码" },
+};
+
+function setAuthPane(name) {
+  const cfg = AUTH_PANES[name] || AUTH_PANES.login;
+  Object.values(AUTH_PANES).forEach((p) => setHidden(p.sel, p.sel !== cfg.sel));
+  setText("#login-card-title", cfg.title);
+  setText("#login-card-sub", cfg.sub);
+  ["#login-hint", "#register-hint", "#forgot-hint"].forEach((s) => setHint(s, ""));
+  if (name === "forgot") forgotToStep1();
+  if (loginPanda) setMood(loginPanda, "normal");
+  const input = document.querySelector(`${cfg.sel} input`);
+  if (input) input.focus({ preventScroll: true });
+}
+
+function fieldVal(sel, trim = true) {
+  const n = $(sel);
+  const v = n ? String(n.value) : "";
+  return trim ? v.trim() : v;
+}
+
+/** 注册/找回/登录共用 loginBusy 防重入——同一时刻只允许一笔账号操作在飞。 */
+async function register() {
+  if (loginBusy) return;
+  const u = fieldVal("#reg-name");
+  const p1 = fieldVal("#reg-pass", false), p2 = fieldVal("#reg-pass2", false);
+  const child = fieldVal("#reg-child"), q = fieldVal("#reg-question"), a = fieldVal("#reg-answer");
+  const bad = !u ? ["先起个用户名吧", "#reg-name"]
+    : p1.length < 4 ? ["密码太短啦，至少 4 位", "#reg-pass"]
+    : p1 !== p2 ? ["两遍密码不一样哦", "#reg-pass2"]
+    : regRole === "parent" && !child ? ["家长账号要填孩子的登录名", "#reg-child"]
+    : !q ? ["设一个密保问题吧，忘密码时全靠它", "#reg-question"]
+    : !a ? ["密保答案也要填哦", "#reg-answer"] : null;
+  if (bad) {
+    setHint("#register-hint", bad[0], "err");
+    shakeCard();
+    if (loginPanda) setMood(loginPanda, "oops");
+    const t = $(bad[1]);
+    if (t) t.focus();
+    return;
+  }
+  loginBusy = true;
+  const btn = $("#register-btn");
+  busyBtn(btn, true);
+  setHint("#register-hint", "正在创建账号…");
+  if (loginPanda) setMood(loginPanda, "thinking");
+  try {
+    const resp = await api("/api/auth/register", jsonOpts({
+      username: u, password: p1, role: regRole,
+      child: regRole === "parent" ? child : "", question: q, answer: a,
+    }));
+    const data = await resp.json().catch(() => ({}));
+    state.token = data.token;
+    state.username = data.username;
+    state.authRole = data.role || "child";
+    state.name = data.name || u;
+    state.role = state.authRole === "parent" ? "parent" : "child";
+    saveAuth();
+    setHint("#register-hint", "账号建好啦，正在进入…", "ok");
+    if (loginPanda) setMood(loginPanda, "happy");
+    await enterMain();
+    setAuthPane("login");
+    ["#reg-name", "#reg-pass", "#reg-pass2", "#reg-child", "#reg-question", "#reg-answer"]
+      .forEach((s) => { const n = $(s); if (n) n.value = ""; });
+  } catch (e) {
+    setHint("#register-hint", e.message || "注册失败，请稍后再试", "err");
+    if (loginPanda) setMood(loginPanda, "oops");
+    shakeCard();
+  } finally {
+    loginBusy = false;
+    busyBtn(btn, false);
+  }
+}
+
+let regRole = "child";
+let fpUser = "";  // 找回流程第二步要记住第一步查过的用户名
+
+function setRegRole(role) {
+  regRole = role === "parent" ? "parent" : "child";
+  document.querySelectorAll("#reg-role .seg-btn").forEach((b) => {
+    const on = b.dataset.role === regRole;
+    b.classList.toggle("active", on);
+    b.setAttribute("aria-checked", String(on));
+  });
+  setHidden("#reg-child-field", regRole !== "parent");
+}
+
+function forgotToStep1() {
+  setHidden("#forgot-step1", false);
+  setHidden("#forgot-step2", true);
+  fpUser = "";
+}
+
+async function forgotNext() {
+  if (loginBusy) return;
+  const u = fieldVal("#fp-name");
+  if (!u) {
+    setHint("#forgot-hint", "先填一下用户名哦", "err");
+    shakeCard();
+    const t = $("#fp-name");
+    if (t) t.focus();
+    return;
+  }
+  loginBusy = true;
+  const btn = $("#forgot-next-btn");
+  busyBtn(btn, true);
+  setHint("#forgot-hint", "正在查找账号…");
+  try {
+    const resp = await api(`/api/auth/question?username=${encodeURIComponent(u)}`);
+    const data = await resp.json().catch(() => ({}));
+    if (!data.recoverable) {
+      setHint("#forgot-hint", "这个账号注册时没设密保，没法自助找回哦", "err");
+      shakeCard();
+      return;
+    }
+    fpUser = u;
+    setText("#fp-question", data.question);
+    setHidden("#forgot-step1", true);
+    setHidden("#forgot-step2", false);
+    setHint("#forgot-hint", "");
+    const ans = $("#fp-answer");
+    if (ans) ans.focus();
+  } catch (e) {
+    setHint("#forgot-hint", e.message || "查询失败，请稍后再试", "err");
+    shakeCard();
+  } finally {
+    loginBusy = false;
+    busyBtn(btn, false);
+  }
+}
+
+async function forgotReset() {
+  if (loginBusy || !fpUser) return;
+  const a = fieldVal("#fp-answer");
+  const p1 = fieldVal("#fp-pass", false), p2 = fieldVal("#fp-pass2", false);
+  const bad = !a ? ["密保答案还没填", "#fp-answer"]
+    : p1.length < 4 ? ["新密码太短啦，至少 4 位", "#fp-pass"]
+    : p1 !== p2 ? ["两遍新密码不一样哦", "#fp-pass2"] : null;
+  if (bad) {
+    setHint("#forgot-hint", bad[0], "err");
+    shakeCard();
+    const t = $(bad[1]);
+    if (t) t.focus();
+    return;
+  }
+  loginBusy = true;
+  const btn = $("#forgot-reset-btn");
+  busyBtn(btn, true);
+  setHint("#forgot-hint", "正在重置密码…");
+  if (loginPanda) setMood(loginPanda, "thinking");
+  try {
+    await api("/api/auth/reset", jsonOpts({ username: fpUser, answer: a, password: p1 }));
+    setAuthPane("login");
+    const name = $("#login-name");
+    if (name) name.value = fpUser;
+    const pass = $("#login-pass");
+    if (pass) { pass.value = ""; pass.focus(); }
+    setLoginHint("密码已重置，用新密码登录吧～", "ok");
+    if (loginPanda) setMood(loginPanda, "happy");
+    ["#fp-name", "#fp-answer", "#fp-pass", "#fp-pass2"]
+      .forEach((s) => { const n = $(s); if (n) n.value = ""; });
+  } catch (e) {
+    setHint("#forgot-hint", e.message || "重置失败，请稍后再试", "err");
+    if (loginPanda) setMood(loginPanda, "oops");
+    shakeCard();
+  } finally {
+    loginBusy = false;
+    busyBtn(btn, false);
+  }
+}
+
+async function login(username, password, trigger) {
+  if (loginBusy) return;
   const u = String(username == null ? "" : username).trim();
   const p = String(password == null ? "" : password);
   if (!u || !p) {
-    if (hint) hint.textContent = "用户名和密码都要填哦";
+    setLoginHint(!u ? "先填一下用户名哦" : "密码还没填呢", "err");
+    shakeCard();
+    if (loginPanda) setMood(loginPanda, "oops");
+    const target = !u ? $("#login-name") : $("#login-pass");
+    if (target) target.focus();
     return;
   }
-  const btns = [$("#login-btn"), $("#demo-btn")];
+  loginBusy = true;
+  const mainBtn = $("#login-btn");
+  const btns = [mainBtn, ...document.querySelectorAll(".demo-role")];
   btns.forEach((b) => b && (b.disabled = true));
-  if (hint) hint.textContent = "正在验证身份…";
+  const busyBtn = trigger || mainBtn;
+  if (busyBtn) busyBtn.classList.add("loading");
+  if (busyBtn === mainBtn && mainBtn) mainBtn.disabled = false; // 保留可见态，pointer-events 已禁
+  setLoginHint("正在验证身份…");
+  if (loginPanda) setMood(loginPanda, "thinking");
   try {
     const resp = await api("/api/auth/login", jsonOpts({ username: u, password: p }));
     const data = await resp.json().catch(() => ({}));
@@ -412,21 +690,112 @@ async function login(username, password) {
     state.name = data.name || u;
     state.role = state.authRole === "parent" ? "parent" : "child";
     saveAuth();
-    if (hint) hint.textContent = data.is_new ? "新账号已建好空白档案～" : "";
+    setLoginHint(data.is_new ? "新账号已建好空白档案～" : `欢迎回来，${state.name}！`, "ok");
+    if (loginPanda) setMood(loginPanda, "happy");
     await enterMain();
+    setLoginHint("");
   } catch (e) {
-    if (hint) hint.textContent = e.message;
+    setLoginHint(e.message || "登录失败，请稍后再试", "err");
+    if (loginPanda) setMood(loginPanda, "oops");
+    const card = $("#login-card");
+    if (card) { card.classList.remove("shake"); void card.offsetWidth; card.classList.add("shake"); }
   } finally {
-    btns.forEach((b) => b && (b.disabled = false));
+    loginBusy = false;
+    btns.forEach((b) => b && (b.disabled = false, b.classList.remove("loading")));
   }
 }
 
-function demoLogin() {
+function demoLogin(btn) {
+  const b = btn && btn.dataset ? btn : $("#demo-btn");
+  const user = (b && b.dataset.user) || "小豆";
+  const pass = (b && b.dataset.pass) || "panda123";
   const name = $("#login-name");
-  const pass = $("#login-pass");
-  if (name) name.value = "小豆";
-  if (pass) pass.value = "panda123";
-  login("小豆", "panda123");
+  const pw = $("#login-pass");
+  if (name) name.value = user;
+  if (pw) pw.value = pass;
+  login(user, pass, b);
+}
+
+function setupLoginExtras() {
+  const nameInput = $("#login-name");
+  const passInput = $("#login-pass");
+  const toggle = $("#pass-toggle");
+  let peek = false;
+  const inter = attachLoginInteractions(loginPanda, {
+    nameInput,
+    passInputs: [passInput, "#reg-pass", "#reg-pass2", "#fp-pass", "#fp-pass2"]
+      .map((s) => (typeof s === "string" ? $(s) : s)),
+    isPeek: () => peek,
+  });
+  if (toggle && passInput) {
+    toggle.addEventListener("pointerdown", (e) => e.preventDefault()); // 不抢输入框焦点
+    toggle.onclick = () => {
+      peek = !peek;
+      passInput.type = peek ? "text" : "password";
+      toggle.setAttribute("aria-pressed", String(peek));
+      toggle.setAttribute("aria-label", peek ? "隐藏密码" : "显示密码");
+      const use = toggle.querySelector("use");
+      if (use) use.setAttribute("href", peek ? "#i-eye-off" : "#i-eye");
+      if (inter) inter.syncPass();
+    };
+  }
+  const caps = $("#caps-hint");
+  if (caps && passInput) {
+    const check = (e) => {
+      if (typeof e.getModifierState === "function") setHidden("#caps-hint", !e.getModifierState("CapsLock"));
+    };
+    passInput.addEventListener("keydown", check);
+    passInput.addEventListener("keyup", check);
+    passInput.addEventListener("blur", () => setHidden("#caps-hint", true));
+  }
+  [nameInput, passInput].forEach((n) => n && n.addEventListener("input", () => {
+    const hint = $("#login-hint");
+    if (hint && hint.classList.contains("err")) setLoginHint("");
+  }));
+  document.querySelectorAll(".demo-role").forEach((b) => { b.onclick = () => demoLogin(b); });
+
+  // 注册面板：身份选择 + 输错提示即改即消
+  document.querySelectorAll("#reg-role .seg-btn").forEach((b) => {
+    b.onclick = () => setRegRole(b.dataset.role);
+  });
+  document.querySelectorAll("#pane-register input").forEach((n) => {
+    n.addEventListener("input", () => {
+      const hint = $("#register-hint");
+      if (hint && hint.classList.contains("err")) setHint("#register-hint", "");
+    });
+  });
+  document.querySelectorAll("#pane-forgot input").forEach((n) => {
+    n.addEventListener("input", () => {
+      const hint = $("#forgot-hint");
+      if (hint && hint.classList.contains("err")) setHint("#forgot-hint", "");
+    });
+  });
+
+  // 气泡轮播：讲解时展示管家"主动办事"的样子
+  const lines = [
+    "小豆，明天科学课的实验材料我已经帮你列好啦～",
+    "王老师说周五春游，我把要带的东西整理进清单了",
+    "这周你跳绳进步了 20 个！要不要告诉妈妈？",
+    "西客松还有 3 天，今晚先把演示稿过一遍吧",
+  ];
+  const txt = $("#hero-bubble-text");
+  const bubble = txt && txt.parentElement;
+  let i = 0;
+  if (txt && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    setInterval(() => {
+      if (state.view !== "login" || document.hidden) return;
+      i = (i + 1) % lines.length;
+      txt.textContent = lines[i];
+      bubble.classList.remove("swap"); void bubble.offsetWidth; bubble.classList.add("swap");
+      if (loginPanda && !loginPanda.classList.contains("shy") && !loginPanda.classList.contains("peek")
+          && !loginPanda.classList.contains("thinking")) {
+        setMood(loginPanda, "speaking");
+        setTimeout(() => {
+          if (loginPanda && loginPanda.classList.contains("speaking")) setMood(loginPanda, "normal");
+        }, 1400);
+      }
+    }, 4800);
+  }
 }
 
 async function restoreAuth() {
@@ -471,10 +840,17 @@ async function restoreAuth() {
   }
 }
 
+const CHAT_WELCOME =
+  '<div class="chat-welcome">' +
+  '<div class="cw-logo" aria-hidden="true"><svg class="ic"><use href="#i-logo"/></svg></div>' +
+  '<b>跟熊猫管家说点什么吧</b>' +
+  '<span>今天发生的事、要办的事、心里的话都能说<br>我会记住，也会帮你拆解成一步一步办掉</span>' +
+  '</div>';
+
 /** 清掉上一账号留在界面上的内容，避免换号后看到旧数据。 */
 function resetUserUI() {
   const box = chatBox();
-  if (box) box.innerHTML = '<p class="empty-hint">说一句「西客松我要准备啥」试试。</p>';
+  if (box) box.innerHTML = CHAT_WELCOME;
   const set = (sel, html) => { const n = $(sel); if (n) n.innerHTML = html; };
   set("#chips", ""); // 快捷话题是上一个账号的上下文，清掉等新账号的 /api/suggest
   set("#briefing-card .panel-body", '<div class="skeleton skeleton-lines"></div>');
@@ -542,6 +918,7 @@ function logout() {
   applyRole("child");
   setRelayDir("teacher2parent");
   resetUserUI();
+  setAuthPane("login");
   const hint = $("#login-hint");
   if (hint) hint.textContent = "";
   show("login");
@@ -850,7 +1227,7 @@ async function openAffairDetail(aid) {
   const icsBtn = el("button", "btn-approve");
   icsBtn.type = "button";
   append(icsBtn, icon("i-cal"), document.createTextNode("导出日历"));
-  icsBtn.onclick = () => window.open(`/api/ics/${encodeURIComponent(aff.id)}?${q(state.name)}&token=${encodeURIComponent(state.token || "")}`, "_blank");
+  icsBtn.onclick = () => window.open(`${BASE}/api/ics/${encodeURIComponent(aff.id)}?${q(state.name)}&token=${encodeURIComponent(state.token || "")}`, "_blank");
   const closeBtn = el("button", "btn-reject", "关闭");
   closeBtn.type = "button";
   closeBtn.onclick = () => holder.wrap.classList.add("hidden");
@@ -922,6 +1299,10 @@ function checkRow(item, index, cid) {
   const cb = el("input");
   cb.type = "checkbox";
   cb.checked = !!item.done;
+  if (state.authRole === "parent") {
+    cb.disabled = true;           // 家长只读：勾选权在孩子手里（服务端也会 403）
+    row.title = "家长视角只读";
+  }
   cb.onchange = () => toggleChecklist(cid, index, cb.checked, cb, row);
   append(row, cb, el("span", "check-text", item.text || ""));
   if (item.note) row.appendChild(el("span", "check-note", `引用记忆：${item.note}`));
@@ -943,25 +1324,31 @@ async function toggleChecklist(cid, index, done, cb, row) {
 }
 
 function dagBlock(aff) {
-  const nodes = aff.plan && aff.plan.nodes
-    ? aff.plan.nodes
-    : (aff.linked_nodes || []).map((id, i) => ({
-        id, title: nodeLabel(id), depends_on: i === 0 ? [] : [aff.linked_nodes[0]], status: "done",
-      }));
-  if (!nodes.length) return el("div");
   const wrap = el("div");
-  wrap.appendChild(el("div", "drawer-sub", "DAG 回放"));
-  const dag = el("div", "dag");
-  const title = el("div", "dag-title");
-  title.appendChild(icon("i-board"));
-  title.appendChild(document.createTextNode(aff.plan && aff.plan.title ? aff.plan.title : `${aff.title || ""} 的执行链`));
-  dag.appendChild(title);
-  const names = {};
-  nodes.forEach((n) => (names[n.id] = n.title || n.id));
-  const box = el("div", "dag-nodes");
-  nodes.forEach((n) => box.appendChild(dagNodeRow(n, names, n.status || "done")));
-  dag.appendChild(box);
-  wrap.appendChild(dag);
+  const nodes = (aff.plan && aff.plan.nodes) || [];
+  if (nodes.length) {
+    // 真执行链：后端把 plan+节点终态存进了 affair，这里是回放而不是摆拍
+    wrap.appendChild(el("div", "drawer-sub", "DAG 回放"));
+    const dag = el("div", "dag");
+    const title = el("div", "dag-title");
+    title.appendChild(icon("i-board"));
+    title.appendChild(document.createTextNode(aff.plan.title || `${aff.title || ""} 的执行链`));
+    dag.appendChild(title);
+    const names = {};
+    nodes.forEach((n) => (names[n.id] = n.title || n.id));
+    const box = el("div", "dag-nodes");
+    nodes.forEach((n) => box.appendChild(dagNodeRow(n, names, n.status || "done")));
+    dag.appendChild(box);
+    wrap.appendChild(dag);
+    return wrap;
+  }
+  // 没有执行链存档时如实展示"关联记忆"，不把记忆节点串成假 DAG
+  const linked = aff.linked_nodes || [];
+  if (!linked.length) return wrap;
+  wrap.appendChild(el("div", "drawer-sub", "关联记忆"));
+  const box = el("div", "linked-nodes");
+  linked.forEach((id) => box.appendChild(el("span", "node-pill", nodeLabel(id))));
+  wrap.appendChild(box);
   return wrap;
 }
 
@@ -1036,6 +1423,22 @@ function actionReceipt(ev) {
  * 6. 问候 + 历史
  * ========================================================================== */
 
+/** 逐字打出来：问候气泡里"管家正在开口"的感觉 */
+function typewrite(node, text, done) {
+  const t = String(text || "");
+  let i = 0;
+  node.classList.add("bb-typing");
+  const timer = setInterval(() => {
+    if (!state.name) { clearInterval(timer); return; } // 已退出登录
+    node.textContent = t.slice(0, ++i);
+    if (i >= t.length) {
+      clearInterval(timer);
+      node.classList.remove("bb-typing");
+      if (done) done();
+    }
+  }, 34);
+}
+
 async function loadGreeting() {
   const bubble = $("#panda-bubble");
   if (bubble) {
@@ -1047,9 +1450,12 @@ async function loadGreeting() {
     const data = await resp.json();
     const text = (data && data.text) || "早呀！今天想聊点什么？";
     if (bubble) {
-      bubble.textContent = text;
-      const reminders = (data && data.reminders) || [];
-      if (reminders.length) {
+      bubble.innerHTML = "";
+      const span = el("span", "bb-text");
+      bubble.appendChild(span);
+      typewrite(span, text, () => {
+        const reminders = (data && data.reminders) || [];
+        if (!reminders.length || !bubble.isConnected) return;
         const box = el("div", "reminders");
         reminders.forEach((r) => {
           const pill = el("span", "reminder-pill");
@@ -1058,12 +1464,20 @@ async function loadGreeting() {
           box.appendChild(pill);
         });
         bubble.appendChild(box);
-      }
+      });
     }
     addMsg("ai", text);
     s3("setPandaMood", "speaking");
   } catch (e) {
-    if (bubble) bubble.textContent = `问候生成失败：${e.message}`;
+    const fallbackText = `早呀，${state.name || "小豆"}！今天有什么想和管家聊聊的吗？无论是生活小事、竞赛备战还是心里话，我都一直陪着你～`;
+    if (bubble) {
+      bubble.innerHTML = "";
+      const span = el("span", "bb-text");
+      bubble.appendChild(span);
+      typewrite(span, fallbackText);
+    }
+    addMsg("ai", fallbackText);
+    s3("setPandaMood", "happy");
   }
 }
 
@@ -1087,7 +1501,7 @@ async function loadHistory() {
 function chatBox() { return $("#chat"); }
 
 function clearChatHint() {
-  const hint = $("#chat .empty-hint");
+  const hint = $("#chat .empty-hint, #chat .chat-welcome");
   if (hint) hint.remove();
 }
 
@@ -1351,11 +1765,15 @@ async function send(preset) {
     await readSSE(resp, ctx, dropTyping);
   } catch (e) {
     dropTyping();
+    if (!ctx.aiRaw && input && preset === undefined && !input.value) {
+      input.value = text; // 一个 token 都没回来：请求根本没生效，恢复草稿免得重打
+    }
     if (e.status === 429) addMsg("ai", "管家还在回上一条，稍等 1 秒再说～");
     else addMsg("ai", `唔……${e.message}`);
     s3("setPandaMood", "worried");
   } finally {
     dropTyping();
+    flushMd(ctx);
     if (ctx.aiBubble) ctx.aiBubble.classList.remove("streaming");
     if (seq === state.sendSeq) {
       unlockInput();
@@ -1492,11 +1910,7 @@ function handleEvent(ev, ctx, dropTyping) {
       }
       if (ctx.aiBubble) {
         ctx.aiRaw = (ctx.aiRaw || "") + (ev.text || "");
-        const md = ctx.aiBubble.querySelector(".md");
-        if (md) {
-          ctx.aiBubble.classList.add("streaming");
-          setMd(md, ctx.aiRaw);
-        }
+        scheduleMd(ctx);
       }
       scrollBottom();
       break;
@@ -1504,6 +1918,7 @@ function handleEvent(ev, ctx, dropTyping) {
     // done 之后还可能有 memory 事件：只解锁输入，绝不中断读取
     case "done":
       dropTyping();
+      flushMd(ctx);
       if (ctx.aiBubble) ctx.aiBubble.classList.remove("streaming");
       unlockInput();
       s3("setPandaMood", "idle");
@@ -1513,6 +1928,7 @@ function handleEvent(ev, ctx, dropTyping) {
 
     case "error":
       dropTyping();
+      flushMd(ctx);
       if (ctx.aiBubble) ctx.aiBubble.classList.remove("streaming");
       addMsg("ai", `唔……${ev.message || "出了点小问题，再试一次吧"}`);
       setMoodAll("worried");
@@ -1606,6 +2022,8 @@ async function loadGraph() {
     const resp = await api(`/api/graph?${q(state.name)}&view=${view}`);
     const data = await resp.json();
     state.graph = { nodes: (data && data.nodes) || [], edges: (data && data.edges) || [] };
+    // 事务卡的关联记忆标签依赖图谱节点名；看板可能先于图谱渲染，这里补刷一次
+    if (state.affairs && state.affairs.length) renderBoard(state.affairs);
     await s3("setGraphData", state.graph);
     renderMiniGraph();
     if (state.fallback2d) {
@@ -1640,6 +2058,7 @@ function drawGraph2D() {
 
 function filteredGraph() {
   const nodes = (state.graph.nodes || []).filter((n) => {
+    if (state.role === "parent" && n.private) return false; // 家长视角私密节点前端再滤一道
     if (state.filters.domain && n.domain !== state.filters.domain) return false;
     if (state.filters.status && n.status !== state.filters.status) return false;
     if (state.timeline && String(n.first_seen || "").slice(0, 7) > state.timeline) return false;
@@ -1840,6 +2259,34 @@ function openNodeDrawer(node) {
  * 11. 角色切换 + 家长视图
  * ========================================================================== */
 
+/** 浅色 / 深色主题切换（localStorage 持久化，全顶栏按钮同步） */
+const THEME_KEY = "pb_theme";
+
+function applyTheme(t) {
+  const light = t !== "dark";
+  document.body.dataset.theme = light ? "light" : "dark";
+  document.querySelectorAll(".theme-toggle").forEach((b) => {
+    const use = b.querySelector("use");
+    const lab = b.querySelector(".tt-label");
+    if (use) use.setAttribute("href", light ? "#i-moon" : "#i-sun");
+    if (lab) lab.textContent = light ? "深色" : "浅色";
+    b.setAttribute("aria-pressed", String(light));
+    b.setAttribute("aria-label", light ? "切换深色主题" : "切换浅色主题");
+  });
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.setAttribute("content", light ? "#f6faf7" : "#0c1512");
+  // 记忆星球跟着切（s3() 被 sceneReady 门挡住会丢调用，这里直调——setTheme 在 init 前也生效）
+  if (typeof scene3d.setTheme === "function") scene3d.setTheme(light ? "light" : "dark");
+  if (state.fallback2d) { renderFallbackGraph(); drawGraph2D(); }
+}
+
+function toggleTheme() {
+  const light = document.body.dataset.theme !== "light";
+  applyTheme(light ? "light" : "dark");
+  try { localStorage.setItem(THEME_KEY, light ? "light" : "dark"); } catch { /* 忽略 */ }
+  toast(light ? "切到浅色模式" : "切回夜竹林");
+}
+
 function applyRole(role) {
   document.body.dataset.role = role;
   document.body.dataset.view = role;
@@ -2008,6 +2455,7 @@ function setRelayCol(sel, text, advice) {
   if (!col) return;
   const body = col.querySelector(".relay-body") || col;
   body.textContent = text || "";
+  col.classList.toggle("is-empty", !text);
   const old = col.querySelector(".relay-advice");
   if (old) old.remove();
   if (advice) {
@@ -2515,7 +2963,14 @@ function bind() {
   on("#login-btn", () => login(
     $("#login-name") ? $("#login-name").value : "",
     $("#login-pass") ? $("#login-pass").value : ""));
-  on("#demo-btn", demoLogin);
+  // 登录卡三个面板的切换与提交
+  on("#to-register", () => setAuthPane("register"));
+  on("#to-forgot", () => setAuthPane("forgot"));
+  on("#back-login-reg", () => setAuthPane("login"));
+  on("#back-login-fp", () => setAuthPane("login"));
+  on("#register-btn", register);
+  on("#forgot-next-btn", forgotNext);
+  on("#forgot-reset-btn", forgotReset);
   on("#send-btn", () => send());
   on("#role-toggle", toggleRole);
   on("#secret-btn", toggleSecret);
@@ -2525,6 +2980,8 @@ function bind() {
   on("#logs-back", () => go("main"));
   // 退出按钮：主视图顶栏 + 各子视图导航里的 [data-act="logout"] 统一生效
   document.querySelectorAll('[data-act="logout"]').forEach((b) => { b.onclick = logout; });
+  // 浅色 / 深色主题切换：各顶栏的 .theme-toggle 统一生效
+  document.querySelectorAll(".theme-toggle").forEach((b) => { b.onclick = toggleTheme; });
 
   wireNav();
   buildTabbar();
@@ -2543,14 +3000,29 @@ function bind() {
   const passInput = $("#login-pass");
   if (nameInput) {
     nameInput.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") login(nameInput.value, passInput ? passInput.value : "");
+      if (e.key !== "Enter" || e.isComposing) return;
+      if (passInput && !passInput.value) passInput.focus();
+      else login(nameInput.value, passInput ? passInput.value : "");
     });
   }
   if (passInput) {
     passInput.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") login(nameInput ? nameInput.value : "", passInput.value);
+      if (e.key === "Enter" && !e.isComposing) login(nameInput ? nameInput.value : "", passInput.value);
     });
   }
+  // 注册 / 找回面板：输入框里回车 = 点当前面板的主按钮
+  const paneEnter = (paneSel, btnSel) => {
+    const pane = $(paneSel);
+    if (!pane) return;
+    pane.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter" || e.isComposing || e.target.tagName !== "INPUT") return;
+      const btn = $(btnSel);
+      if (btn && !btn.closest(".hidden")) btn.click();
+    });
+  };
+  paneEnter("#pane-register", "#register-btn");
+  paneEnter("#forgot-step1", "#forgot-next-btn");
+  paneEnter("#forgot-step2", "#forgot-reset-btn");
   const msgInput = $("#msg-input");
   if (msgInput) {
     msgInput.addEventListener("keydown", (e) => {
@@ -2589,14 +3061,19 @@ function bind() {
 }
 
 function boot() {
+  try { applyTheme(localStorage.getItem(THEME_KEY) || "light"); } catch { applyTheme("light"); }
   if ($("#login-panda")) {
     try {
-      mountPanda($("#login-panda"));
+      loginPanda = mountPanda($("#login-panda"));
     } catch (e) { console.warn("[app] 登录页熊猫挂载失败：", e && e.message); }
   }
   setHidden("#secret-note", true);
   bind();
-  restoreAuth(); // 已有 token 则免登录直进
+  try { setupLoginExtras(); } catch (e) { console.warn("[app] 登录页增强失败：", e && e.message); }
+  Promise.resolve(restoreAuth()).finally(() => {
+    // 还停在登录页时直接聚焦名字输入框，评委上手少点一步
+    if (!state.name) { const n = $("#login-name"); if (n) n.focus({ preventScroll: true }); }
+  });
 }
 
 if (document.readyState === "loading") {

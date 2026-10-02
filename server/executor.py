@@ -12,14 +12,15 @@ Emit = Callable[[dict], Awaitable[None]]
 
 async def _run_llm_node(store: MemoryStore, event: str, node: dict, results: dict) -> str:
     context = "\n\n".join(f"【{nid}】{text}" for nid, text in results.items())
+    name, mem = await asyncio.to_thread(lambda: (store.child_name, store.active_block()))
     return await llm.complete(
         [{"role": "user", "content": prompts.NODE_LLM.format(
-            name=store.child_name,
+            name=name,
             event=event,
             title=node["title"],
             task=node["args"].get("task", node["title"]),
             context=context or "（无前置结果）",
-            memory_block=store.active_block() or "（暂无记忆）",
+            memory_block=mem or "（暂无记忆）",
         )}],
         max_tokens=800,
         caller="node",
@@ -52,11 +53,24 @@ async def run_plan(
     store: MemoryStore,
     event: str,
     emit: Emit,
-) -> dict[str, str]:
-    """按 depends_on 并行执行，emit 推送状态；返回 {node_id: 结果文本}。"""
+) -> tuple[dict[str, str], dict[str, str]]:
+    """按 depends_on 并行执行，emit 推送状态；返回 ({node_id: 结果文本}, {node_id: done|error})。"""
     nodes = plan["nodes"]
     done_events = {n["id"]: asyncio.Event() for n in nodes}
     results: dict[str, str] = {}
+    statuses: dict[str, str] = {}
+    by_id = {n["id"]: n for n in nodes}
+
+    def _ancestors(node: dict) -> set[str]:
+        """节点的全部上游依赖（传递闭包）——LLM 上下文只该看到祖先结果，
+        并行分支的产物不掺进来，不然比赛交通的结论会被隔壁乐器分支串味。"""
+        seen, stack = set(), list(node["depends_on"])
+        while stack:
+            d = stack.pop()
+            if d not in seen:
+                seen.add(d)
+                stack.extend((by_id.get(d) or {}).get("depends_on", []))
+        return seen
 
     async def worker(node: dict):
         for dep in node["depends_on"]:
@@ -65,17 +79,21 @@ async def run_plan(
                 await ev.wait()
         await emit({"type": "node", "id": node["id"], "title": node["title"], "status": "running"})
         try:
-            text = await _run_node(store, event, node, results)
+            anc = _ancestors(node)
+            text = await _run_node(store, event, node,
+                                   {k: v for k, v in results.items() if k in anc})
             results[node["id"]] = text
+            statuses[node["id"]] = "done"
             await emit({
                 "type": "node", "id": node["id"], "title": node["title"],
                 "status": "done", "detail": text[:400],
             })
         except Exception as e:  # noqa: BLE001 单节点失败不拖垮整链
             results[node["id"]] = f"（本环节查询失败：{e}，按常识处理）"
+            statuses[node["id"]] = "error"
             await emit({"type": "node", "id": node["id"], "title": node["title"], "status": "error"})
         finally:
             done_events[node["id"]].set()
 
     await asyncio.gather(*(worker(n) for n in nodes))
-    return results
+    return results, statuses
