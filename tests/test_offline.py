@@ -2,20 +2,26 @@
 
 用法：.venv/bin/python tests/test_offline.py
 覆盖：登录 → briefing → plan 全链路 SSE 事件顺序（§5：mode→recall?→affair→plan→
-      node*→action*→card→done→memory）→ 记忆/事务落盘 → 悄悄话 private 隔离 →
-      graph 视角白名单 → 非法 stage 400。
-测试档案固定用 data/child_test_离线（契约 §0 允许的 child_test_*），结束自动清理。
+      node*→action*→card→done→memory）→ 记忆/事务落盘（清单回挂、执行链存档）→
+      悄悄话 private 强制（即使模型漏标）→ graph 视角白名单 → 家长写权限 403 →
+      非法 stage 400。
+数据目录用 PANDA_DATA_DIR 指向一次性沙箱，真实 data/ 一个字节都不碰。
 """
 from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+
+# 必须先于 server 包导入：config 在 import 时读 PANDA_DATA_DIR
+os.environ["PANDA_DATA_DIR"] = tempfile.mkdtemp(prefix="panda_offline_")
 
 import httpx  # noqa: E402
 
@@ -23,8 +29,8 @@ from server import config, llm  # noqa: E402
 from server.main import app  # noqa: E402
 
 NAME = "test_离线"
-CHILD_DIR = config.DATA_DIR / f"child_{NAME}"
-PROFILES = config.DATA_DIR / "profiles.json"
+SANDBOX = Path(os.environ["PANDA_DATA_DIR"])
+CHILD_DIR = SANDBOX / f"child_{NAME}"
 
 RESULTS: list[tuple[str, bool, str]] = []
 
@@ -71,11 +77,12 @@ async def fake_complete_json(messages, *, max_tokens=1200, caller="unknown"):
     if caller == "extract_graph":
         # 模板本身含 [[secret]] 字样，必须只看"孩子："那一行里的用户原话
         secret = "[[secret]]" in content.rsplit("孩子：", 1)[-1]
+        # 故意让悄悄话轮 private=False：模拟 LLM 漏标，服务端必须兜底强制 private
         return {
             "daily": "" if secret else "聊了参赛准备",
             "nodes": [{"label": "秘密心事" if secret else "机器人比赛",
                        "domain": "intellect", "type": "event", "status": "active",
-                       "fact": "离线测试事实", "private": secret}],
+                       "fact": "离线测试事实", "private": False}],
             "edges": [],
             "affair": None,
             "longterm": "", "emotion": "",
@@ -99,14 +106,8 @@ def _restore(saved: dict) -> None:
 
 
 def _cleanup() -> None:
-    """删除测试档案与 profile 条目，data/child_xiaodou 一律不碰。"""
-    shutil.rmtree(CHILD_DIR, ignore_errors=True)
-    try:
-        profiles = json.loads(PROFILES.read_text(encoding="utf-8"))
-        if profiles.pop(NAME, None) is not None:
-            PROFILES.write_text(json.dumps(profiles, ensure_ascii=False, indent=2), encoding="utf-8")
-    except (OSError, ValueError):
-        pass
+    """整个沙箱目录一次性删除，真实 data/ 一律不碰。"""
+    shutil.rmtree(SANDBOX, ignore_errors=True)
 
 
 # ------------------------------------------------------------------ HTTP 辅助
@@ -137,8 +138,7 @@ def _types(events: list[dict]) -> list[str]:
 # ------------------------------------------------------------------ 主流程
 
 async def main() -> int:
-    _cleanup()  # 上次跑挂掉留下的残留先清掉
-    saved = _install_fakes()
+    saved = _install_fakes()  # 沙箱是新建临时目录，无需预清理
     try:
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://t",
@@ -211,8 +211,19 @@ async def _run(client: httpx.AsyncClient) -> None:
         cl = await get_json(client, f"/api/checklist/{cl_ids[0]}{q}")
         record("checklist_persisted", len(cl.get("checklist", {}).get("items", [])) == 3,
                f"cid={cl_ids[0]}")
+        # 清单必须回挂到事务上，否则详情抽屉永远够不着它
+        linked = [a for a in aff.get("affairs", []) if a.get("checklist_id") == cl_ids[0]]
+        record("checklist_linked", len(linked) == 1,
+               f"linked={linked[0]['id'] if linked else '无'}")
     else:
         record("checklist_persisted", False, "无 checklist action")
+        record("checklist_linked", False, "无 checklist action")
+    # 执行链连同节点终态存进事务，详情抽屉的"DAG 回放"才能展示真链
+    plan = (aff.get("affairs") or [{}])[0].get("plan") or {}
+    record("plan_archived",
+           len(plan.get("nodes", [])) == 2
+           and all(n.get("status") == "done" for n in plan["nodes"]),
+           f"nodes={len(plan.get('nodes', []))}")
     inbox = await get_json(client, f"/api/parent/inbox{q}")
     record("inbox_persisted", len(inbox.get("items", [])) >= 1, f"items={len(inbox.get('items', []))}")
     reminders = json.loads((CHILD_DIR / "reminders.json").read_text(encoding="utf-8")) \
@@ -253,6 +264,26 @@ async def _run(client: httpx.AsyncClient) -> None:
     r = await post(client, "/api/checklist/nonexistent",
                    {"name": NAME, "index": 0, "done": True})
     record("checklist_404", r.status_code == 404, f"status={r.status_code}")
+
+    # 7. 家长只读：写事务/勾清单 → 403，看板读 → 200；收件箱决定权仍在
+    r = await post(client, "/api/auth/login",
+                   {"username": "豆豆妈", "password": "mama123"})
+    ptoken = r.json().get("token", "")
+    record("parent_login", r.status_code == 200 and bool(ptoken))
+    client.headers["Authorization"] = f"Bearer {ptoken}"
+    pq = "?name=小豆"
+    r = await post(client, "/api/checklist/nonexistent",
+                   {"name": "小豆", "index": 0, "done": True})
+    record("parent_checklist_403", r.status_code == 403, f"status={r.status_code}")
+    r = await post(client, "/api/affairs",
+                   {"name": "小豆", "patch": {"title": "家长越权测试"}})
+    record("parent_affairs_403", r.status_code == 403, f"status={r.status_code}")
+    r = await client.get(f"/api/affairs{pq}")
+    record("parent_read_ok", r.status_code == 200, f"status={r.status_code}")
+    # 收件箱决定仍是家长的正当写权限（iid 不存在 → 404 而非 403，说明过了能力关）
+    r = await post(client, "/api/parent/inbox/nonexistent",
+                   {"name": "小豆", "action": "approve"})
+    record("parent_inbox_allowed", r.status_code == 404, f"status={r.status_code}")
 
 
 if __name__ == "__main__":

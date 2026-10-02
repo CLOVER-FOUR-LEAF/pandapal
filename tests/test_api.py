@@ -87,6 +87,18 @@ def login(base: str, username: str, password: str) -> dict:
     return data
 
 
+def get_raw(base: str, path: str, token: str | None = None) -> tuple[int, str]:
+    """非 JSON 端点（ics 等）用的原始文本 GET。"""
+    req = urllib.request.Request(base + urllib.parse.quote(path, safe="/?=&"))
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(req, timeout=120) as r:
+            return r.status, r.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode("utf-8", "replace")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--base", default="http://localhost:8000")
@@ -203,6 +215,42 @@ def main() -> int:
                f"inbox={st1} graph={st2} leaked_private={len(leaked)} admin_graph={st3}")
     except Exception as e:
         record("parent_filter", False, str(e))
+
+    # 10.5 家长写权限收口：勾清单/改事务 → 403，看板读 → 200（"只读视图"承诺）
+    try:
+        st1, _ = post_json(base, "/api/checklist/xikesong_pack",
+                           {"name": "小豆", "index": 0, "done": True}, tk_parent)
+        st2, _ = post_json(base, "/api/affairs",
+                           {"name": "小豆", "patch": {"title": "家长越权测试"}}, tk_parent)
+        st3, _ = get(base, "/api/affairs?name=小豆", tk_parent)
+        ok = st1 == 403 and st2 == 403 and st3 == 200
+        record("parent_readonly", ok, f"cl={st1} affairs_post={st2} affairs_get={st3}")
+    except Exception as e:
+        record("parent_readonly", False, str(e))
+
+    # 10.6 契约 §4 剩余端点覆盖（事务详情/清单/日历/话题/成长/晨报/梦想邀请/日志）
+    try:
+        st1, af = get(base, "/api/affairs/xikesong?name=小豆", tk_admin)
+        st2, cl = get(base, "/api/checklist/xikesong_pack?name=小豆", tk_child)
+        st3, ics = get_raw(base, "/api/ics/xikesong?name=小豆", tk_child)
+        st4, sg = get(base, "/api/suggest?name=小豆", tk_child)
+        st5, gr = get(base, "/api/growth?name=小豆", tk_child)
+        st6, br = get(base, "/api/briefing?name=小豆", tk_child)
+        st7, dr = post_json(base, "/api/dream", {"name": "小豆", "text": ""}, tk_child)
+        st8, lg = get(base, "/api/logs?limit=5", tk_admin)
+        ok = (st1 == 200 and af.get("affair", {}).get("id") == "xikesong"
+              and st2 == 200 and len(cl.get("checklist", {}).get("items", [])) >= 1
+              and st3 == 200 and "BEGIN:VCALENDAR" in ics
+              and st4 == 200 and "chips" in sg
+              and st5 == 200 and "dimensions" in gr
+              and st6 == 200 and bool(br.get("text"))
+              and st7 == 200 and bool(dr.get("text"))
+              and st8 == 200 and "calls" in lg)
+        record("endpoints_matrix", ok,
+               f"detail={st1} cl={st2} ics={st3} suggest={st4} growth={st5} "
+               f"briefing={st6} dream={st7} logs={st8}")
+    except Exception as e:
+        record("endpoints_matrix", False, str(e))
 
     # 11. 会话隔离 + 并发不崩（自动注册的新孩子账号 + 小豆同时聊）
     try:
