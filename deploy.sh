@@ -16,6 +16,7 @@ rsync -avz --delete \
   --exclude='.DS_Store' --exclude='*.log' \
   --exclude='data/logs/' --exclude='data/users.json' \
   --exclude='data/tokens.json' --exclude='data/profiles.json' \
+  --exclude='history.json' \
   --include='data/child_xiaodou/***' --exclude='data/child_*' \
   ./ "${REMOTE}:${APP_DIR}/"
 
@@ -23,6 +24,13 @@ echo "==> 服务端：依赖 + 重启"
 ssh "${REMOTE}" "bash -s" <<EOS
 set -euo pipefail
 cd ~/${APP_DIR}
+
+# 首次部署（还没有 users.json）必须在服务端 .env 里设好三个演示口令，禁止落到公开的默认值
+if [ ! -f data/users.json ]; then
+  for k in PANDA_CHILD_PASSWORD PANDA_PARENT_PASSWORD PANDA_ADMIN_PASSWORD; do
+    grep -Eq "^\${k}=.+" .env || { echo "!! 服务端 .env 缺少 \${k}，拒绝使用默认口令" >&2; exit 1; }
+  done
+fi
 
 [ -d .venv ] || python3 -m venv .venv
 # 腾讯云内网 PyPI 镜像，外网源会卡

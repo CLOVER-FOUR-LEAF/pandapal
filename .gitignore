@@ -30,6 +30,8 @@ dist/
 # 孩子档案默认全部忽略，演示档 child_xiaodou 例外保留入库
 data/child_*/
 !data/child_xiaodou/
+# 会话历史是运行时文件，演示档也不入库
+data/child_xiaodou/history.json
 data/logs/
 data/users.json
 data/tokens.json
