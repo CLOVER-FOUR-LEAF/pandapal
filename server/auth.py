@@ -40,10 +40,11 @@ TOKEN_TTL = 7 * 24 * 3600  # token 有效期 7 天；过期项在访问时懒惰
 CAPS: dict[str, set[str]] = {
     "child": {"session", "greeting", "briefing", "chat", "graph", "affairs",
               "affairs_write", "checklist", "checklist_write",
-              "ics", "growth", "dream", "memory", "history", "drafts", "export"},
+              "ics", "growth", "dream", "memory", "history", "drafts", "export",
+              "tts", "voice"},
     "parent": {"session", "greeting", "briefing", "graph", "affairs", "checklist",
                "ics", "inbox", "relay", "growth", "memory", "history", "drafts",
-               "weekly", "notice"},
+               "weekly", "notice", "tts", "voice"},
     "admin": {"*"},
 }
 ROLE_NAMES = {"child": "孩子", "parent": "家长", "admin": "管理员"}
@@ -56,6 +57,7 @@ CAP_NAMES = {
     "growth": "成长雷达", "memory": "记忆本", "history": "对话历史",
     "drafts": "交付文稿", "weekly": "家长周报", "notice": "通知落地",
     "export": "导出童年备忘录", "admin": "后台管理",
+    "tts": "语音播放", "voice": "音色设置",
 }
 
 # 演示种子账号：仅在 users.json 不存在时写入

@@ -24,6 +24,11 @@ sys.path.insert(0, str(ROOT))
 
 # 必须先于 server 包导入：config 在 import 时读 PANDA_DATA_DIR
 os.environ["PANDA_DATA_DIR"] = tempfile.mkdtemp(prefix="panda_offline_")
+# 显式掐掉 TTS：config 在 import 时会读仓库根目录的 .env，开发机上面通常配着
+# 真实 Key。不关掉的话这份"不花 Key 的离线自检"会真的去请求语音接口，
+# 既违背本文件的用途，也让 greeting_stream 的事件序列断言多出一条 voice。
+os.environ["TTS_ENABLED"] = "0"
+os.environ["TTS_API_KEY"] = ""
 # pytest 单进程里别的测试文件可能已经导入过 server 包（沙箱不同）：先清掉再导入，
 # 否则 config 停在先导入者的目录上，本文件的落盘断言会看错沙箱。
 for _m in [m for m in sys.modules if m == "server" or m.startswith("server.")]:

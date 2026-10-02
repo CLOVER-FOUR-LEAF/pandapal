@@ -49,11 +49,50 @@ def vision_enabled() -> bool:
 SEARCH_API_KEY = os.getenv("SEARCH_API_KEY", "")
 SEARCH_BASE_URL = os.getenv("SEARCH_BASE_URL", "").rstrip("/")
 
-# 语音合成 TTS：先在后台配好 Key，调用链路后续接入（服务端持有，前端拿不到明文）
+# 语音合成 TTS。四个基础键在后台「API 配置」里可改（见 SETTINGS_KEYS），
+# 留空时回落到下面的 MiMo 默认值——也就是说"不填也能跑"，填了则以填的为准。
 TTS_API_KEY = os.getenv("TTS_API_KEY", "")
 TTS_BASE_URL = os.getenv("TTS_BASE_URL", "").rstrip("/")
 TTS_MODEL = os.getenv("TTS_MODEL", "")
 TTS_VOICE = os.getenv("TTS_VOICE", "")
+# 下面这些是本项目的调音台，默认值都写在代码里，一般不用动；
+# 需要在后台改的已加进 SETTINGS_KEYS。
+TTS_ENABLED = os.getenv("TTS_ENABLED", "1") not in ("0", "false", "False", "")
+# design = voicedesign（用文字描述生成音色，voice.json 里的 style 就是提示词）；
+# builtin = 内置音色 + 风格指令（只有它支持真流式）。留空按 design。
+TTS_DEFAULT_MODE = os.getenv("TTS_DEFAULT_MODE", "design").lower()
+# 两个模式各对应一个模型：TTS_MODEL 管内置音色，TTS_MODEL_DESIGN 管音色设计。
+# 分开是因为官方就是两个模型，且只有前者有真流式；填错模式会静默降级成默认音色。
+TTS_MODEL_DESIGN = os.getenv("TTS_MODEL_DESIGN", "")
+# 音色描述：voicedesign 模式下这就是喂给音色设计模型的提示词
+TTS_DEFAULT_STYLE = os.getenv("TTS_DEFAULT_STYLE", "") or (
+    "一个清纯甜美的少女声。年龄感二十岁上下，声线清亮干净、不沙不哑，"
+    "像刚下课后跟熟悉的小朋友说话。语速稍快一点，语气轻快、亲切、有一点雀跃，"
+    "但不撒娇也不做作。咬字清晰，句尾自然收住，不要拖长音。")
+TTS_DEFAULT_TAGS = os.getenv("TTS_DEFAULT_TAGS", "")
+# 输出容器：mp3 体积约为 wav 的 1/10（24kHz 单声道 wav 每秒 48KB），本地场景够用；
+# 真遇到某个浏览器解不了，填 wav 即可（官方 API 的默认值）。
+TTS_FORMAT = os.getenv("TTS_FORMAT", "mp3").lower()
+# 让 TTS 自己润色口播稿（仅 voicedesign 支持）。默认关：我们要念的就是孩子
+# 刚看到的那段字，润色会让"看到的"和"听到的"对不上。
+TTS_OPTIMIZE_TEXT = os.getenv("TTS_OPTIMIZE_TEXT", "0") not in ("0", "false", "False", "")
+# 单次口播的字数上限。归一化后仍超长就在最近的句号处收尾——
+# 超过这个量级读下去孩子早就不听了，截断比整段念完更体面。
+TTS_MAX_CHARS = int(os.getenv("TTS_MAX_CHARS", "400"))
+# 卡片类回复（规划/拆解）只念一句引导稿，不念整张方案卡
+TTS_CARD_MAX_CHARS = int(os.getenv("TTS_CARD_MAX_CHARS", "120"))
+# 各场景口播开关
+TTS_SPEAK_CARD = os.getenv("TTS_SPEAK_CARD", "1") not in ("0", "false", "False", "")
+TTS_SPEAK_GREETING = os.getenv("TTS_SPEAK_GREETING", "1") not in ("0", "false", "False", "")
+TTS_SPEAK_BRIEFING = os.getenv("TTS_SPEAK_BRIEFING", "1") not in ("0", "false", "False", "")
+# 语音缓存：每个档案目录下 voice_cache/，超过上限按最旧淘汰（磁盘有硬顶）
+TTS_CACHE_MAX = int(os.getenv("TTS_CACHE_MAX", "60"))
+# 试音文案：点开朗读开关时立刻念这一句，让用户当场听见效果
+TTS_PREVIEW_TEXT = os.getenv("TTS_PREVIEW_TEXT", "好，我在。点一下这个喇叭，我就会说话了。")
+TTS_PREVIEW_MAX_CHARS = int(os.getenv("TTS_PREVIEW_MAX_CHARS", "40"))
+# 单次语音合成超时（秒）。比 LLM 短得多：TTS 正常 1-8 秒出结果，
+# 超时基本等于网关抽风，早失败好过把 SSE 吊在那儿。
+TTS_TIMEOUT = float(os.getenv("TTS_TIMEOUT", "30"))
 
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8000"))
@@ -88,7 +127,14 @@ SETTINGS_KEYS: dict[str, tuple[str, object, bool]] = {
     "TTS_API_KEY": ("TTS_API_KEY", lambda v: str(v).strip(), True),
     "TTS_BASE_URL": ("TTS_BASE_URL", lambda v: str(v).strip().rstrip("/"), False),
     "TTS_MODEL": ("TTS_MODEL", lambda v: str(v).strip(), False),
+    "TTS_MODEL_DESIGN": ("TTS_MODEL_DESIGN", lambda v: str(v).strip(), False),
     "TTS_VOICE": ("TTS_VOICE", lambda v: str(v).strip(), False),
+    "TTS_ENABLED": ("TTS_ENABLED", lambda v: str(v).strip(), False),
+    "TTS_DEFAULT_MODE": ("TTS_DEFAULT_MODE", lambda v: str(v).strip().lower(), False),
+    "TTS_DEFAULT_STYLE": ("TTS_DEFAULT_STYLE", lambda v: str(v).strip(), False),
+    "TTS_FORMAT": ("TTS_FORMAT", lambda v: str(v).strip().lower(), False),
+    "TTS_MAX_CHARS": ("TTS_MAX_CHARS", lambda v: int(v) or 400, False),
+    "TTS_CARD_MAX_CHARS": ("TTS_CARD_MAX_CHARS", lambda v: int(v) or 120, False),
 }
 
 

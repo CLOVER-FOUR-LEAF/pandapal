@@ -32,6 +32,8 @@ data/child_*/
 !data/child_xiaodou/
 # 会话历史是运行时文件，演示档也不入库
 data/child_xiaodou/history.json
+# TTS 合成出来的语音是二进制缓存，体积大且随时可再生成，一律不入库
+data/child_*/voice_cache/
 data/logs/
 data/users.json
 data/tokens.json

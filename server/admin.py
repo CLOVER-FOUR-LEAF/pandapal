@@ -31,7 +31,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from . import affairs, auth, config, graph, llm, sessions, store
+from . import affairs, auth, config, graph, llm, sessions, store, tts
 
 router = APIRouter()
 
@@ -75,9 +75,15 @@ def _collect_overview() -> dict:
         },
         "search": {"configured": bool(config.SEARCH_API_KEY and config.SEARCH_BASE_URL)},
         "tts": {
+            # available 走的是 tts 模块的运行时判断：开关打开 + 有 Key 才算真能用。
+            # 这三个字段留空是正常的——不填就回落到 MiMo 官方端点/模型/默认音色。
             "configured": bool(config.TTS_API_KEY),
-            "base_url": config.TTS_BASE_URL, "model": config.TTS_MODEL,
-            "voice": config.TTS_VOICE,
+            "available": tts.available(),
+            "base_url": config.TTS_BASE_URL or tts.DEF_BASE_URL,
+            "model": config.TTS_MODEL or tts.DEF_MODEL_BUILTIN,
+            "model_design": config.TTS_MODEL_DESIGN or tts.DEF_MODEL_DESIGN,
+            "voice": config.TTS_VOICE or tts.DEF_VOICE,
+            "mode": config.TTS_DEFAULT_MODE,
         },
         "logs": llm.read_logs(1, 0).get("total", 0),
         "overrides": sorted(overrides.keys()),
@@ -135,8 +141,10 @@ _SETTINGS_GROUPS = [
     ("llm", "大模型 LLM", ["LLM_PROTOCOL", "LLM_BASE_URL", "LLM_API_KEY",
                           "LLM_API_KEY2", "LLM_MODEL", "LLM_REASONING_EFFORT", "LLM_VISION"]),
     ("search", "联网搜索", ["SEARCH_API_KEY", "SEARCH_BASE_URL"]),
-    ("tts", "语音合成 TTS（先配置，调用链路后续接入）",
-     ["TTS_API_KEY", "TTS_BASE_URL", "TTS_MODEL", "TTS_VOICE"]),
+    ("tts", "语音合成 TTS（管家朗读）",
+     ["TTS_API_KEY", "TTS_BASE_URL", "TTS_MODEL", "TTS_MODEL_DESIGN", "TTS_VOICE",
+      "TTS_ENABLED", "TTS_DEFAULT_MODE", "TTS_DEFAULT_STYLE", "TTS_FORMAT",
+      "TTS_MAX_CHARS", "TTS_CARD_MAX_CHARS"]),
 ]
 
 
