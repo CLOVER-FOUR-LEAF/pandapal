@@ -729,7 +729,26 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   #topbar { grid-area: topbar; }
   #left-col { grid-area: left; overflow: hidden; position: relative; }
   /* 桌面端 body 是 overflow:hidden，这几个视图必须自己限定高度并内部滚动 */
+  /* admin-view 原来漏在这份名单外：只有 min-height 没有高度上限和滚动容器，
+     配置项一多就撑破视口，而 body 又不让滚——整个页面看着像"滚不动"。
+     顶栏和页签留在 .admin-wrap 里不滚，只有 .admin-scroll 里的面板内容滚。 */
   #parent-view, #growth-view, #memory-view { height: 100dvh; min-height: 0; }
+  #admin-view {
+    display: flex; flex-direction: column;
+    height: 100dvh; min-height: 0; overflow: hidden;
+  }
+  #admin-view > .topbar { flex: none; }
+  #admin-view .admin-wrap {
+    flex: 1 1 auto; min-height: 0;
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  #admin-view .admin-tabs, #admin-view .admin-hint { flex: none; }
+  /* 真正的滚动容器是这一层：min-height:0 不能少，否则 flex 子项会被内容
+     撑开、overflow:auto 就退化��不滚动，页面又回到"滚不动"。 */
+  #admin-view .admin-scroll {
+    flex: 1 1 auto; min-height: 0;
+    overflow-y: auto; overscroll-behavior: contain;
+  }
   .memory-body, #growth-evidence, #parent-inbox { min-height: 0; }
   /* 矮视口下登录卡片改内部滚动，避免顶部标题/底部按钮被裁掉 */
   #login-view { height: 100dvh; overflow-y: auto; }
@@ -2077,6 +2096,12 @@ body[data-theme="dark"] .btn-reject { color: #fb7185; background: rgba(251, 113,
 .admin-tabs { align-self: center; flex-wrap: wrap; }
 .admin-pane { display: flex; flex-direction: column; gap: 12px; }
 .admin-pane.hidden { display: none; }
+/* 面板内容区：桌面端独立滚动，顶栏与页签留在外面不跟着走 */
+.admin-scroll { display: flex; flex-direction: column; gap: 12px; }
+/* 移动端（body 本身可滚）下 .admin-scroll 不再套一层滚动，直接铺开即可 */
+@media (max-width: 1099px) {
+  #admin-view .admin-scroll { overflow-y: visible; }
+}
 .hint.bad { color: var(--bad); }
 
 .admin-cards {
@@ -2118,7 +2143,12 @@ body[data-theme="dark"] .btn-reject { color: #fb7185; background: rgba(251, 113,
 .tag.tag-admin { color: var(--amber); }
 
 .admin-table {
-  border-radius: var(--r-lg); overflow: hidden;
+  border-radius: var(--r-lg); overflow: hidden auto;
+  /* 账号/档案/数据文件三张表都是"越翻越长"的列表。原来只写 overflow:hidden
+     又没有高度上限，条目一多就被直接裁掉，而且滚不出来——同 admin-view
+     那个毛病，这里改成限高 + 纵向滚动。 */
+  max-height: min(52dvh, 520px);
+  overscroll-behavior: contain;
   background: var(--card); border: 1px solid var(--line);
   box-shadow: var(--shadow-card);
 }

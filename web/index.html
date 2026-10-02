@@ -982,6 +982,9 @@
     </div>
     <p id="admin-hint" class="hint" role="status" aria-live="polite"></p>
 
+    <!-- 桌面端 body 是 overflow:hidden，面板必须自己内部滚动（见 style.css 的 @1100px 段）。
+         顶栏和页签留在容器外，这样切页签时不用先滚回顶部。 -->
+    <div id="admin-panes" class="admin-scroll">
     <!-- 总览 -->
     <section id="admin-pane-overview" class="admin-pane" role="tabpanel" aria-label="总览">
       <div id="admin-overview" class="admin-cards"></div>
@@ -1059,6 +1062,7 @@
         </div>
       </div>
     </section>
+    </div>
   </div>
 </section>
 
