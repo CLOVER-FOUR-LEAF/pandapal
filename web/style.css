@@ -749,10 +749,11 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   box-shadow: var(--shadow-card);
   background: radial-gradient(ellipse 90% 70% at 50% 25%, #e0f2fe 0%, #f0fdf4 65%, #e8f5ec 100%);
 }
+/* 银河版：3D 画布为深空底色（WebGL 挂载前不闪），2D 兜底仍用竹林配色 */
 body[data-theme="dark"] #scene-canvas {
   background:
-    radial-gradient(80% 55% at 50% 30%, #10281f 0%, transparent 75%),
-    linear-gradient(180deg, #050d16 0%, #0a1c1e 60%, #06110d 100%);
+    radial-gradient(70% 55% at 50% 42%, #241a4d 0%, transparent 72%),
+    linear-gradient(180deg, #05061a 0%, #0a0722 60%, #03040d 100%);
 }
 body[data-theme="dark"] #scene-fallback {
   background:
@@ -1576,9 +1577,13 @@ body[data-theme="dark"] .btn-send {
   position: absolute; inset: 0;
   background: radial-gradient(ellipse 90% 70% at 50% 25%, #e0f2fe 0%, #f0fdf4 65%, #e8f5ec 100%);
 }
-body[data-theme="dark"] #graph-canvas,
 body[data-theme="dark"] #graph-canvas-2d {
   background: radial-gradient(80% 55% at 50% 30%, #10281f 0%, #07100d 75%);
+}
+body[data-theme="dark"] #graph-canvas {
+  background:
+    radial-gradient(70% 55% at 50% 42%, #241a4d 0%, transparent 72%),
+    linear-gradient(180deg, #05061a 0%, #0a0722 60%, #03040d 100%);
 }
 .graph-tools {
   flex: none;
