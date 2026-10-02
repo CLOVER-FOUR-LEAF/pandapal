@@ -70,7 +70,7 @@ const MOOD_3D = { happy: "happy", sad: "worried", nervous: "worried", normal: "i
 
 const ACTION_KIND = {
   reminder: "加提醒", checklist: "生成清单",
-  parent_confirm: "请家长确认", ics: "导出日历",
+  parent_confirm: "请家长确认", ics: "导出日历", draft: "写文稿",
 };
 const MODE_LABEL = { plan: "规划链", todo: "拆解待办", affair: "事务更新", relay: "传话筒", explain: "讲给你听", chat: "" };
 
@@ -1256,6 +1256,7 @@ async function openAffairDetail(aid) {
 
   box.appendChild(await checklistBlock(aff));
   box.appendChild(dagBlock(aff));
+  box.appendChild(draftsBlock(aff));
   box.appendChild(logBlock(aff));
   holder.wrap.classList.remove("hidden");
   holder.wrap.scrollIntoView({ behavior: "smooth", block: "nearest" });
@@ -1392,6 +1393,41 @@ function setDagDot(dot, status) {
   if (status === "done") dot.appendChild(icon("i-check"));
   else if (status === "error") dot.appendChild(icon("i-x"));
   else if (status === "running") dot.appendChild(icon("i-bolt"));
+}
+
+/** 交付文稿：draft 动作写成的稿子挂回事务（aff.drafts 由详情接口一起返回）。 */
+function draftsBlock(aff) {
+  const wrap = el("div");
+  const drafts = aff.drafts || [];
+  if (!drafts.length) return wrap;
+  wrap.appendChild(el("div", "drawer-sub", "交付文稿"));
+  drafts.forEach((d) => {
+    const det = el("details", "draft-item");
+    const sum = el("summary", "draft-sum");
+    sum.appendChild(icon("i-doc"));
+    sum.appendChild(el("span", "draft-title", d.title || "文稿"));
+    if (d.created) {
+      sum.appendChild(el("span", "draft-time", String(d.created).slice(5, 16).replace("T", " ")));
+    }
+    det.appendChild(sum);
+    const body = el("div", "doc-body");
+    body.textContent = d.body || "";
+    det.appendChild(body);
+    const copyBtn = el("button", "btn-approve doc-copy");
+    copyBtn.type = "button";
+    append(copyBtn, icon("i-clip"), document.createTextNode("复制全文"));
+    copyBtn.onclick = async () => {
+      try {
+        await navigator.clipboard.writeText(d.body || "");
+        toast("已复制，拿去用吧");
+      } catch {
+        toast("复制没成功，手动选中文字复制吧");
+      }
+    };
+    det.appendChild(copyBtn);
+    wrap.appendChild(det);
+  });
+  return wrap;
 }
 
 function logBlock(aff) {
@@ -1669,6 +1705,40 @@ function addActionRow(ev) {
   scrollBottom();
 }
 
+/** 代办文书卡：draft 动作的产出物，正文整段可读完、可复制。 */
+function addDocCard(d) {
+  const box = chatBox();
+  if (!box || !d) return;
+  clearChatHint();
+  const wrap = el("div", "card doc-card");
+  const title = el("div", "card-title");
+  title.appendChild(icon("i-doc"));
+  title.appendChild(document.createTextNode(d.title || "写好的文稿"));
+  wrap.appendChild(title);
+  const body = el("div", "doc-body");
+  body.textContent = d.body || "";
+  wrap.appendChild(body);
+  const foot = el("div", "doc-foot");
+  const copyBtn = el("button", "btn-approve doc-copy");
+  copyBtn.type = "button";
+  append(copyBtn, icon("i-clip"), document.createTextNode("复制全文"));
+  copyBtn.onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(d.body || "");
+      toast("已复制，拿去用吧");
+    } catch {
+      toast("复制没成功，手动选中文字复制吧");
+    }
+  };
+  foot.appendChild(copyBtn);
+  if (d.created) {
+    foot.appendChild(el("span", "doc-time", String(d.created).slice(0, 16).replace("T", " ")));
+  }
+  wrap.appendChild(foot);
+  box.appendChild(wrap);
+  scrollBottom();
+}
+
 function addCard(card) {
   if (!card) return;
   const box = chatBox();
@@ -1897,6 +1967,10 @@ function handleEvent(ev, ctx, dropTyping) {
       addActionRow(ev);
       applyActionToDetail(ev);
       if (ev.detail) toast(ev.detail);
+      // 代办文书：全文随回执一起到了，直接出文稿卡（"给我一个结果"）
+      if (ev.kind === "draft" && ev.ok && ev.payload && ev.payload.body) {
+        addDocCard(ev.payload);
+      }
       break;
 
     case "relay_result": {

@@ -1439,6 +1439,46 @@ body[data-theme="dark"] .btn-send {
 }
 .cite-item:hover { color: var(--bamboo); border-color: var(--bamboo); }
 
+/* 代办文书：聊天里的文稿卡 + 事务抽屉里的可展开文稿 */
+#chat .doc-card { margin-left: 48px; }
+.doc-card {
+  align-self: stretch;
+  border-radius: var(--r);
+  border: 1px solid rgba(116, 185, 246, .3);
+  background: linear-gradient(170deg, rgba(116, 185, 246, .08), var(--card-2) 40%);
+  overflow: hidden;
+  animation: rise .3s ease-out both;
+}
+.doc-card .card-title .ic { color: var(--dom-intellect); }
+.doc-body {
+  margin: 6px 15px 4px; padding: 10px 12px;
+  font-size: 13.5px; line-height: 1.8; color: var(--ink);
+  white-space: pre-wrap; overflow-wrap: break-word;
+  background: var(--card-3); border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  max-height: 260px; overflow-y: auto;
+}
+.doc-foot { display: flex; align-items: center; gap: 10px; padding: 8px 15px 12px; }
+.doc-copy {
+  font-size: 12px; padding: 5px 12px;
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.doc-copy .ic { width: 13px; height: 13px; }
+.doc-time { font-size: 11px; color: var(--ink-faint); }
+.draft-item {
+  margin-top: 6px; border: 1px solid var(--line);
+  border-radius: var(--r-sm); overflow: hidden;
+}
+.draft-sum {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 10px; cursor: pointer; font-size: 13px;
+}
+.draft-sum .ic { width: 14px; height: 14px; color: var(--dom-intellect); flex: none; }
+.draft-title { flex: 1; min-width: 0; font-weight: 600; }
+.draft-time { font-size: 11px; color: var(--ink-faint); flex: none; }
+.draft-item .doc-body { margin: 4px 10px 8px; }
+.draft-item .doc-copy { margin: 0 10px 10px; }
+
 .drawer-sub {
   font-size: 11.5px; font-weight: 700; letter-spacing: .06em;
   color: var(--ink-dim); margin: 14px 0 6px;
