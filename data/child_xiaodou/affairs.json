@@ -64,6 +64,50 @@
           "kind": "parent_confirm",
           "title": "西安西客松参赛：需要家长帮忙确认的事",
           "detail": "管家已把行程与清单准备好，请家长确认交通与报名相关事项。"
+        },
+        {
+          "kind": "reminder",
+          "text": "现在快晚上 11 点了，感冒恢复期更要早点睡。"
+        },
+        {
+          "kind": "reminder",
+          "text": "距离 10 月 18 日西客松比赛还有 16 天，你一直在稳稳准备着。"
+        },
+        {
+          "kind": "reminder",
+          "text": "西安 10 月中旬早晚温差大，你感冒刚好，记得带上药和一件外套。"
+        },
+        {
+          "kind": "reminder",
+          "text": "提前一天去西安的事，和妈妈、老师再确认一次就安心啦。"
+        },
+        {
+          "kind": "checklist",
+          "title": "携带清单",
+          "items": [
+            "学生证或身份证明，别忘了放在书包里。",
+            "笔记本电脑和充电器，那台有点卡的也要带上。",
+            "创意编程赛道可以带自己的零件包。"
+          ]
+        },
+        {
+          "kind": "parent_confirm",
+          "title": "西安西客松参赛：需要家长帮忙确认的事",
+          "detail": "管家已把行程与清单准备好，请家长确认交通与报名相关事项。"
+        },
+        {
+          "kind": "checklist",
+          "title": "携带清单",
+          "items": [
+            "学生证或身份证明放进固定小袋，交给妈妈一起保管。",
+            "笔记本电脑和充电器带上，作品提前拷一份到 U 盘备份。",
+            "创意编程要用的零件包也装好，用得上就不慌。"
+          ]
+        },
+        {
+          "kind": "parent_confirm",
+          "title": "西安西客松参赛：需要家长帮忙确认的事",
+          "detail": "管家已把行程与清单准备好，请家长确认交通与报名相关事项。"
         }
       ],
       "log": [
@@ -156,60 +200,118 @@
           "ts": "2026-10-02T22:01:16",
           "actor": "child",
           "text": "出发前紧张，第一次去这么远比赛"
+        },
+        {
+          "ts": "2026-10-02T22:51:39",
+          "actor": "butler",
+          "text": "执行链已存档"
+        },
+        {
+          "ts": "2026-10-02T22:51:41",
+          "actor": "butler",
+          "text": "执行了 reminder"
+        },
+        {
+          "ts": "2026-10-02T22:51:41",
+          "actor": "butler",
+          "text": "执行了 reminder"
+        },
+        {
+          "ts": "2026-10-02T22:52:12",
+          "actor": "butler",
+          "text": "执行链已存档"
+        },
+        {
+          "ts": "2026-10-02T22:52:15",
+          "actor": "butler",
+          "text": "执行了 reminder"
+        },
+        {
+          "ts": "2026-10-02T22:52:15",
+          "actor": "butler",
+          "text": "执行了 reminder"
+        },
+        {
+          "ts": "2026-10-02T22:52:15",
+          "actor": "butler",
+          "text": "执行了 checklist"
+        },
+        {
+          "ts": "2026-10-02T22:52:15",
+          "actor": "butler",
+          "text": "执行了 parent_confirm"
+        },
+        {
+          "ts": "2026-10-02T22:52:21",
+          "actor": "child",
+          "text": "查了报名时间没查到，要去问老师是否已报名"
+        },
+        {
+          "ts": "2026-10-02T22:57:50",
+          "actor": "butler",
+          "text": "执行链已存档"
+        },
+        {
+          "ts": "2026-10-02T22:57:53",
+          "actor": "butler",
+          "text": "执行了 checklist"
+        },
+        {
+          "ts": "2026-10-02T22:57:53",
+          "actor": "butler",
+          "text": "执行了 parent_confirm"
+        },
+        {
+          "ts": "2026-10-02T22:58:22",
+          "actor": "user",
+          "text": "巡检"
         }
       ],
       "created": "2026-09-28",
       "updated": "2026-10-02",
       "plan": {
-        "title": "小豆西客松西安参赛准备计划",
+        "title": "西客松参赛准备清单",
         "nodes": [
           {
             "id": "n1",
-            "title": "查清西客松大赛要求",
+            "title": "查西客松大赛信息",
             "tool": "race_lookup",
             "depends_on": [],
             "status": "done"
           },
           {
             "id": "n2",
-            "title": "查威海到西安的交通参考",
-            "tool": "transport_lookup",
-            "depends_on": [],
-            "status": "done"
-          },
-          {
-            "id": "n3",
             "title": "查西安比赛期间天气",
             "tool": "weather",
             "depends_on": [],
             "status": "done"
           },
           {
+            "id": "n3",
+            "title": "查威海到西安交通方案",
+            "tool": "transport_lookup",
+            "depends_on": [],
+            "status": "done"
+          },
+          {
             "id": "n4",
-            "title": "整理参赛装备与赛前练习清单",
+            "title": "整理参赛物品清单与感冒恢复期健康提醒",
             "tool": "llm",
             "depends_on": [
-              "n1"
+              "n1",
+              "n2"
             ],
             "status": "done"
           },
           {
             "id": "n5",
-            "title": "健康与情绪准备提醒",
-            "tool": "llm",
-            "depends_on": [],
-            "status": "done"
-          },
-          {
-            "id": "n6",
             "title": "汇总成给孩子的参赛准备方案",
             "tool": "llm",
             "depends_on": [
               "n1",
               "n2",
               "n3",
-              "n4",
-              "n5"
+              "n4"
             ],
             "status": "done"
           }
