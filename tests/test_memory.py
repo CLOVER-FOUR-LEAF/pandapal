@@ -159,6 +159,21 @@ def test_active_block_budget_and_recency() -> None:
            text2.splitlines()[-1][:50])
     record("active_daily_no_title", "# " + DAY not in text2, "日记标题行不重复注入")
 
+    # 档案越丰富越容易把预算吃光：日记是"接着昨天聊"的底线，必须仍有预留额度
+    rich = fresh_store("child_rich")
+    (rich.dir / "MEMORY.md").write_text(
+        "# 小豆的长期记忆\n" + "\n".join(f"- 长期事实{i}：{'细' * 60}" for i in range(60)),
+        encoding="utf-8")
+    for i in range(6):  # 足量活跃主题，单独就能吃掉活跃块预算
+        put_topic(rich, f"话题{i}", [f"{DAY} 关于话题{i}的进展" * 12], updated=DAY)
+    put_daily(rich, DAY, ["今天聊了很要紧的一件事"])
+    memory._CACHE.clear()
+    rich_text = body_of(MemoryStore(rich.dir).active_block())
+    record("active_daily_reserved", "今天聊了很要紧的一件事" in rich_text,
+           rich_text.splitlines()[-1][:50])
+    record("active_daily_reserved_budget", len(rich_text) <= memory._ACTIVE_MAX_CHARS + 200,
+           f"len={len(rich_text)}")
+
     record("active_never_empty", "长期记忆" in body_of(fresh_store("child_empty").active_block()))
 
 

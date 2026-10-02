@@ -39,10 +39,10 @@ _MEMORY_NAME_MAX = 40        # 主题名字符上限（超长名字既进不了�
 # 行数上限约束"文件多大"，字符预算约束"每轮 prompt 多大"。两者都要有：
 # 只有行数上限时，40 条长事实（每条 400 字）依然能撑爆系统提示。
 _ACTIVE_MAX_CHARS = 1800     # 活跃块（长期记忆 + 活跃主题 + 最近日记）合计预算
-_MEMORY_BLOCK_CHARS = 900    # 其中 MEMORY.md 的预算
+_MEMORY_BLOCK_CHARS = 700    # 其中 MEMORY.md 的预算（留出额度给活跃主题与最近日记）
 _TOPIC_BLOCK_CHARS = 420     # 单个活跃主题正文预算（保最新事实）
 _RECENT_DAILY = 2            # 活跃块固定附带的最近日记篇数（"昨天聊过什么"不能每次都靠猜）
-_RECENT_DAILY_CHARS = 320    # 最近日记合计预算
+_RECENT_DAILY_CHARS = 320    # 最近日记合计预算（在活跃块里是预留额度，见 _recent_daily 调用处）
 _RETRIEVE_TOPIC_CHARS = 320  # 单条检索主题正文预算
 _RETRIEVE_DAILY_CHARS = 260  # 单条检索日记正文预算
 _MIN_RELEVANCE = 0.34        # 检索相关度门槛：低于它的"弱命中"注入只会制造噪音
@@ -308,8 +308,11 @@ class MemoryStore:
 
     def _recent_daily(self, count: int = _RECENT_DAILY, max_chars: int = _RECENT_DAILY_CHARS,
                       skip: set[str] | None = None) -> str:
-        """最近几篇日记（新→旧）：新会话第一句就能接上"昨天说的事"，不必等检索命中。"""
-        if count <= 0:
+        """最近几篇日记（新→旧）：新会话第一句就能接上"昨天说的事"，不必等检索命中。
+
+        max_chars <= 0 直接返回空——调用方用它表达"这块没预算了"。
+        """
+        if count <= 0 or max_chars <= 0:
             return ""
         parts, used = [], 0
         for f in self._daily_files():
@@ -356,7 +359,8 @@ class MemoryStore:
             if not body:
                 continue
             put(f"【{t['name']}】{body}")
-        put(self._recent_daily())
+        # 日记是"接着昨天聊"的底线：按剩余额度注入，不让充裕的主题把这一块挤没
+        put(self._recent_daily(max_chars=max(_ACTIVE_MAX_CHARS - total, 0)))
         return fence_memory("\n\n".join(parts))
 
     @staticmethod
