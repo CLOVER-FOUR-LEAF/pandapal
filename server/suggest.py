@@ -119,6 +119,9 @@ def opening(a: AffairStore, g: GraphStore, history_len: int = 0, now: datetime |
     linked = {nid for it in items for nid in it.get("linked_nodes") or []}
     chips = (_due_chips(due_items)[:2] + _affair_chips(items, due_ids)[:2]
              + _graph_chips(g.load()["nodes"], linked))
+    # 出行/参赛类事务 → 递一条"帮我写"的代办文书入口（draft 动作的演示线）
+    if any(it.get("kind") in ("travel", "event") for it in items):
+        chips.append(_chip("帮我写一份参赛自我介绍", "draft"))
     if not items and not history_len:
         # 全新档案：先认识，再帮忙
         chips += [_chip("我先介绍一下我自己", "intro"), _chip("我最近在忙好几件事", "intro"),
@@ -142,7 +145,8 @@ def followups(intent: str, a: AffairStore, g: GraphStore) -> list[dict]:
                   _chip("做完一件了，帮我划掉", "next")]
     elif intent == "new_affair":
         chips += [_chip("方案里哪一步最要紧？", "next"), _chip("帮我把这件事告诉家长", "next"),
-                  _chip("我有点紧张，怎么办", "next")]
+                  _chip("我有点紧张，怎么办", "next"),
+                  _chip("帮我写一份用得上的文稿（自我介绍/申请书都行）", "next")]
     elif intent == "explain":
         chips += [_chip("再举一个例子吧", "next"), _chip("出一道小题考考我", "next"),
                   _chip("这个和我学的东西有什么关系？", "next")]
