@@ -44,3 +44,5 @@ PORT = int(os.getenv("PORT", "8000"))
 LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT", "60"))
 TOOL_TIMEOUT = float(os.getenv("TOOL_TIMEOUT", "10"))
 HISTORY_TAIL = int(os.getenv("HISTORY_TAIL", "8"))
+# 会话闲置回收：超过这么久没来消息的会话释放内存（历史已落盘，再登录照常恢复）
+SESSION_IDLE_S = float(os.getenv("PANDA_SESSION_IDLE", "1800"))

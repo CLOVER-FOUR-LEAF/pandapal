@@ -11,10 +11,11 @@ import json
 import os
 import re
 import threading
+import time
 from collections import deque
 from pathlib import Path
 
-from . import config
+from . import config, store
 from .memory import MemoryStore
 
 PROFILES_PATH = config.DATA_DIR / "profiles.json"
@@ -109,6 +110,32 @@ class Session:
         self.store = MemoryStore(child_dir)
         self.history: deque[dict] = deque(maxlen=config.HISTORY_TAIL * 2)
         self.lock = asyncio.Lock()
+        self.last_active = time.monotonic()
+
+
+def _read_history(path: Path) -> list[dict]:
+    """重开档案时恢复会话历史：只认 {role, content} 结构，secret 标记原样保留。"""
+    data = store.read_json(path, {"history": []})
+    items = data.get("history") if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        return []
+    out = []
+    for m in items:
+        if not isinstance(m, dict) or m.get("role") not in ("user", "assistant"):
+            continue
+        entry = {"role": m["role"], "content": str(m.get("content") or "")}
+        if m.get("secret"):
+            entry["secret"] = True
+        out.append(entry)
+    return out
+
+
+def persist_history(sess: Session) -> None:
+    """会话历史落盘（同步小文件，调用方负责 to_thread）。重启后刷新恢复仍可用。"""
+    store.atomic_write(
+        sess.dir / "history.json",
+        json.dumps({"history": list(sess.history)}, ensure_ascii=False, indent=1),
+    )
 
 
 _sessions: dict[str, Session] = {}
@@ -135,19 +162,36 @@ def resolve(name: str) -> tuple[Path, bool]:
         return child_dir, is_new
 
 
+def _sweep_idle(now: float) -> None:
+    """回收闲置会话：内存里的 Session 只增不减，长跑会渗漏。
+    正在聊的（持锁）不动；历史已落盘，回收后重新登录照样恢复。"""
+    for k, s in list(_sessions.items()):
+        if s.lock.locked() or now - s.last_active < config.SESSION_IDLE_S:
+            continue
+        _sessions.pop(k, None)
+
+
 async def login(name: str) -> Session:
     """获取或创建会话。评委输入任意名字都能得到独立档案。"""
     name = name.strip()[:24]
     if not name:
         raise ValueError("名字不能为空")
+    now = time.monotonic()
     if name in _sessions:
-        return _sessions[name]
+        sess = _sessions[name]
+        sess.last_active = now
+        return sess
     # 同一名字的并发首登要拿到同一个 Session——否则后写覆盖 _sessions，
     # 先建者成孤儿（锁/历史不同步）
     async with _SESSIONS_LOCK:
+        _sweep_idle(now)
         if name in _sessions:
-            return _sessions[name]
+            sess = _sessions[name]
+            sess.last_active = now
+            return sess
         child_dir, is_new = await asyncio.to_thread(resolve, name)
         sess = Session(name, child_dir, is_new)
+        sess.history.extend(
+            await asyncio.to_thread(_read_history, child_dir / "history.json"))
         _sessions[name] = sess
         return sess

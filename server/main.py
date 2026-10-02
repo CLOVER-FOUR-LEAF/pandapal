@@ -681,7 +681,7 @@ async def _chat_stream(sess, raw_message: str, ctx: dict):
         if not task.done():
             task.cancel()
 
-    # ④ 本轮先写进会话历史（仍在锁内，保住先后顺序）；
+    # ④ 本轮先写进会话历史并落盘（仍在锁内，保住先后顺序）；
     #    耗时沉淀与话题建议交给 _chat_settle，在锁外接力。
     if reply_text:
         u_entry = {"role": "user", "content": raw_message if is_secret else message}
@@ -689,6 +689,11 @@ async def _chat_stream(sess, raw_message: str, ctx: dict):
         if is_secret:
             u_entry["secret"] = a_entry["secret"] = True
         sess.history.extend([u_entry, a_entry])
+        # 落盘失败不拖垮对话：内存里的历史本轮仍然有效
+        try:
+            await asyncio.to_thread(sessions.persist_history, sess)
+        except Exception as e:  # noqa: BLE001
+            print(f"[history] 落盘失败：{e}")
     ctx.update({"reply_text": reply_text, "is_secret": is_secret,
                 "message": message, "raw_message": raw_message,
                 "intent": last_turn.get("intent", "chat")})
