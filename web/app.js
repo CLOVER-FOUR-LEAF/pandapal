@@ -169,6 +169,29 @@ function setMd(target, raw) {
   if (html === null) target.textContent = String(raw == null ? "" : raw);
   else target.innerHTML = html;
 }
+
+/** token 合流渲染：marked+DOMPurify 是对全文的重解析，逐 token 调是 O(n²)。
+ *  50ms 一批重画——窗口内所有 token 只画一次最新 aiRaw，长回复渲染次数从 token 数降到 ~时长/50ms。 */
+function scheduleMd(ctx) {
+  if (!ctx || ctx.mdTimer || !ctx.aiBubble) return;
+  const md = ctx.aiBubble.querySelector(".md");
+  if (!md) return;
+  ctx.aiBubble.classList.add("streaming");
+  ctx.mdTimer = setTimeout(() => {
+    ctx.mdTimer = null;
+    const el = ctx.aiBubble && ctx.aiBubble.querySelector(".md");
+    if (el) setMd(el, ctx.aiRaw);
+    scrollBottom();
+  }, 50);
+}
+
+/** 流结束/出错/中止时把剩余文本一次性刷进气泡，不留半截。 */
+function flushMd(ctx) {
+  if (!ctx) return;
+  if (ctx.mdTimer) { clearTimeout(ctx.mdTimer); ctx.mdTimer = null; }
+  const el = ctx.aiBubble && ctx.aiBubble.querySelector(".md");
+  if (el && ctx.aiRaw) setMd(el, ctx.aiRaw);
+}
 function truncate(s, n = 60) {
   const t = String(s == null ? "" : s);
   return t.length > n ? t.slice(0, n - 1) + "…" : t;
@@ -1526,11 +1549,15 @@ async function send(preset) {
     await readSSE(resp, ctx, dropTyping);
   } catch (e) {
     dropTyping();
+    if (!ctx.aiRaw && input && preset === undefined && !input.value) {
+      input.value = text; // 一个 token 都没回来：请求根本没生效，恢复草稿免得重打
+    }
     if (e.status === 429) addMsg("ai", "管家还在回上一条，稍等 1 秒再说～");
     else addMsg("ai", `唔……${e.message}`);
     s3("setPandaMood", "worried");
   } finally {
     dropTyping();
+    flushMd(ctx);
     if (ctx.aiBubble) ctx.aiBubble.classList.remove("streaming");
     if (seq === state.sendSeq) {
       unlockInput();
@@ -1667,11 +1694,7 @@ function handleEvent(ev, ctx, dropTyping) {
       }
       if (ctx.aiBubble) {
         ctx.aiRaw = (ctx.aiRaw || "") + (ev.text || "");
-        const md = ctx.aiBubble.querySelector(".md");
-        if (md) {
-          ctx.aiBubble.classList.add("streaming");
-          setMd(md, ctx.aiRaw);
-        }
+        scheduleMd(ctx);
       }
       scrollBottom();
       break;
@@ -1679,6 +1702,7 @@ function handleEvent(ev, ctx, dropTyping) {
     // done 之后还可能有 memory 事件：只解锁输入，绝不中断读取
     case "done":
       dropTyping();
+      flushMd(ctx);
       if (ctx.aiBubble) ctx.aiBubble.classList.remove("streaming");
       unlockInput();
       s3("setPandaMood", "idle");
@@ -1688,6 +1712,7 @@ function handleEvent(ev, ctx, dropTyping) {
 
     case "error":
       dropTyping();
+      flushMd(ctx);
       if (ctx.aiBubble) ctx.aiBubble.classList.remove("streaming");
       addMsg("ai", `唔……${ev.message || "出了点小问题，再试一次吧"}`);
       setMoodAll("worried");
