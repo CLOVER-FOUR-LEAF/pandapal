@@ -235,6 +235,16 @@ def _issue_token(username: str, rec: dict) -> dict:
     return {"token": token, "user": user}
 
 
+def would_create(username: str) -> bool:
+    """这个名字登录时会不会走"未知名自动注册"（供接口层按 IP 限量）。"""
+    username = username.strip()[:24]
+    if not username:
+        return False
+    users = _read_users()
+    canonical = _read_aliases().get(username, username)
+    return canonical not in users and username not in users
+
+
 def login(username: str, password: str) -> dict:
     """校验用户名密码，返回 {token, user, is_new}；失败抛 ValueError。
 
@@ -258,6 +268,9 @@ def login(username: str, password: str) -> dict:
                 canonical = username
         is_new = False
         if rec is None:
+            # 自动注册和显式注册同一条底线：否则 1 位密码的号随手就能建
+            if len(password) < 4:
+                raise ValueError("新账号的密码至少 4 位")
             rec = _new_user(password, "child", username)
             users[username] = rec
             _write_users(users)
@@ -272,11 +285,13 @@ def login(username: str, password: str) -> dict:
 
 
 def register(username: str, password: str, role: str = "child", child: str = "",
-             question: str = "", answer: str = "") -> dict:
+             question: str = "", answer: str = "", child_password: str = "") -> dict:
     """显式注册：返回 {token, user, is_new}（注册即登录）；失败抛 ValueError。
 
     role 只允许 child|parent（admin 不开放自助注册）；parent 必须绑定一个
-    已存在的孩子账号。密保问题+答案必填——忘密码时唯一的自助找回凭证。
+    已存在的孩子账号，并且要输入那个孩子账号的密码——家长能看孩子的记忆、
+    聊天记录和收件箱，只知道孩子的名字（演示号"小豆"就是公开的）绝不能绑上去。
+    密保问题+答案必填——忘密码时唯一的自助找回凭证。
     """
     username = username.strip()[:24]
     question = question.strip()[:60]
@@ -299,9 +314,12 @@ def register(username: str, password: str, role: str = "child", child: str = "",
         if username in _read_aliases():
             raise ValueError("这个名字是别名，已经指向别人的账号啦，换一个吧")
         if role == "parent":
+            child = _read_aliases().get(child, child)
             bound = users.get(child)
-            if not bound or bound.get("role") != "child":
-                raise ValueError("找不到这个孩子的账号，先让孩子注册一个")
+            # 找不到和密码不对给同一句话：不让注册接口变成探测孩子用户名的工具
+            if (not bound or bound.get("role") != "child"
+                    or not hmac.compare_digest(bound["hash"], _hash(child_password, bound["salt"]))):
+                raise ValueError("孩子的登录名或密码不对，绑定需要孩子账号的密码")
             child_name = bound["child"]
         else:
             child_name = username

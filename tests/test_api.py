@@ -427,7 +427,7 @@ def _run(base: str) -> int:
     try:
         st1, preg = post_json(base, "/api/auth/register", {
             "username": REG_PARENT, "password": "mamab1", "role": "parent",
-            "child": REG, "question": "q", "answer": "a"})
+            "child": REG, "child_password": "reg456", "question": "q", "answer": "a"})
         st2, _ = post_json(base, "/api/auth/register", {
             "username": "评测员孤儿妈", "password": "mamab1", "role": "parent",
             "child": "不存在的孩子", "question": "q", "answer": "a"})

@@ -556,10 +556,12 @@ async function register() {
   const u = fieldVal("#reg-name");
   const p1 = fieldVal("#reg-pass", false), p2 = fieldVal("#reg-pass2", false);
   const child = fieldVal("#reg-child"), q = fieldVal("#reg-question"), a = fieldVal("#reg-answer");
+  const childPass = fieldVal("#reg-child-pass", false);
   const bad = !u ? ["先起个用户名吧", "#reg-name"]
     : p1.length < 4 ? ["密码太短啦，至少 4 位", "#reg-pass"]
     : p1 !== p2 ? ["两遍密码不一样哦", "#reg-pass2"]
     : regRole === "parent" && !child ? ["家长账号要填孩子的登录名", "#reg-child"]
+    : regRole === "parent" && !childPass ? ["还要填孩子账号的密码，证明是一家人", "#reg-child-pass"]
     : !q ? ["设一个密保问题吧，忘密码时全靠它", "#reg-question"]
     : !a ? ["密保答案也要填哦", "#reg-answer"] : null;
   if (bad) {
@@ -578,7 +580,8 @@ async function register() {
   try {
     const resp = await api("/api/auth/register", jsonOpts({
       username: u, password: p1, role: regRole,
-      child: regRole === "parent" ? child : "", question: q, answer: a,
+      child: regRole === "parent" ? child : "",
+      child_password: regRole === "parent" ? childPass : "", question: q, answer: a,
     }));
     const data = await resp.json().catch(() => ({}));
     state.token = data.token;
@@ -591,7 +594,7 @@ async function register() {
     if (loginPanda) setMood(loginPanda, "happy");
     await enterMain();
     setAuthPane("login");
-    ["#reg-name", "#reg-pass", "#reg-pass2", "#reg-child", "#reg-question", "#reg-answer"]
+    ["#reg-name", "#reg-pass", "#reg-pass2", "#reg-child", "#reg-child-pass", "#reg-question", "#reg-answer"]
       .forEach((s) => { const n = $(s); if (n) n.value = ""; });
   } catch (e) {
     setHint("#register-hint", e.message || "注册失败，请稍后再试", "err");
@@ -614,6 +617,7 @@ function setRegRole(role) {
     b.setAttribute("aria-checked", String(on));
   });
   setHidden("#reg-child-field", regRole !== "parent");
+  setHidden("#reg-child-pass-field", regRole !== "parent");
 }
 
 function forgotToStep1() {
@@ -2082,7 +2086,8 @@ async function send(preset, opts = {}) {
         state.chatPaused = true;
         showResumeChip();
       }
-      if (e.status === 429) addMsg("ai", "管家还在回上一条，稍等 1 秒再说～");
+      // 429 有两种：上一条还没回完 / 额度用完——服务端的话说得更准，直接用
+      if (e.status === 429) addMsg("ai", e.message || "管家还在回上一条，稍等 1 秒再说～");
       else if (!e.status) retryableError("没能连上管家");
       else addMsg("ai", `唔……${e.message}`);
       s3("setPandaMood", "worried");

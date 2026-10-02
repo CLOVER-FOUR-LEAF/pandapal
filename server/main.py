@@ -37,6 +37,7 @@ import re
 import time
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
+from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
@@ -112,6 +113,7 @@ class RegisterReq(BaseModel):
     password: str = Field(min_length=1, max_length=64)
     role: str = Field(default="child", pattern="^(child|parent)$")
     child: str = Field(default="", max_length=24)  # 家长账号要绑定的孩子登录名
+    child_password: str = Field(default="", max_length=64)  # 绑定凭证：孩子账号的密码
     question: str = Field(default="", max_length=60)
     answer: str = Field(default="", max_length=60)
 
@@ -207,9 +209,10 @@ async def _stream_text(messages: list[dict], *, max_tokens: int, caller: str,
     """
     got: list[str] = []
     try:
-        async for tok in llm.stream(messages, max_tokens=max_tokens, caller=caller):
-            got.append(tok)
-            yield _sse({"type": "token", "text": tok})
+        if messages:  # 传 None：额度用完，直接走本地兜底，不碰 LLM
+            async for tok in llm.stream(messages, max_tokens=max_tokens, caller=caller):
+                got.append(tok)
+                yield _sse({"type": "token", "text": tok})
     except Exception as e:  # noqa: BLE001 流已开始，只能用兜底文本收尾
         print(f"[{caller}] 流式失败，已降级：{e}")
     text = "".join(got) or fallback
@@ -363,9 +366,56 @@ def _chat_throttle(key: str) -> bool:
     return ok
 
 
+# 所有会调 LLM 的接口共用一份额度：按账号 + 按 IP 双桶。
+# 只限 /api/chat 不够——问候/晨报/梦想/传话筒同样每次都烧 API Key，
+# 而登录对未知名字零门槛自动注册，单靠"按账号"换个名字就绕过去了，所以再按 IP 兜一层。
+_LLM_HITS: dict[str, list[float]] = {}
+_LLM_WIN = 300
+_LLM_USER_MAX, _LLM_IP_MAX = 60, 150  # 5 分钟内：每账号 60 次、每 IP 150 次（家庭/教室共用出口留余量）
+
+
+def _hit(table: dict, key: str, limit: int, win: float, now: float) -> bool:
+    hits = [t for t in table.get(key, []) if now - t < win]
+    ok = len(hits) < limit
+    if ok:
+        hits.append(now)
+    table[key] = hits
+    return ok
+
+
+def _llm_quota(request: Request, username: str) -> bool:
+    """还有没有 LLM 额度；两个桶都要有余量才放行（先查不扣，免得一个桶白扣）。"""
+    now = time.monotonic()
+    ukey, ikey = f"u:{username}", f"ip:{_client_ip(request)}"
+    for key, limit in ((ukey, _LLM_USER_MAX), (ikey, _LLM_IP_MAX)):
+        if sum(1 for t in _LLM_HITS.get(key, []) if now - t < _LLM_WIN) >= limit:
+            return False
+    _hit(_LLM_HITS, ukey, _LLM_USER_MAX, _LLM_WIN, now)
+    _hit(_LLM_HITS, ikey, _LLM_IP_MAX, _LLM_WIN, now)
+    if len(_LLM_HITS) > 1000:
+        for k in [k for k, v in _LLM_HITS.items() if not v or now - v[-1] >= _LLM_WIN]:
+            _LLM_HITS.pop(k, None)
+        _cap_table(_LLM_HITS, 10000)
+    return True
+
+
+def _need_llm_quota(request: Request, username: str) -> None:
+    if not _llm_quota(request, username):
+        raise HTTPException(429, "管家今天被问得有点累啦，歇几分钟再来")
+
+
+_SIGNUP_HITS: dict[str, list[float]] = {}
+_SIGNUP_MAX, _SIGNUP_WIN = 10, 3600  # 每 IP 每小时最多自动建 10 个新号
+
+
 @app.post("/api/auth/login")
 async def api_auth_login(request: Request, req: AuthReq):
     _throttled(request)
+    if await asyncio.to_thread(auth.would_create, req.username):
+        # 未知名字会被自动注册成新孩子号：按 IP 限量，挡住"每次换个名字"刷额度
+        if not _hit(_SIGNUP_HITS, _client_ip(request), _SIGNUP_MAX, _SIGNUP_WIN, time.monotonic()):
+            raise HTTPException(429, "这台设备新建的账号太多啦，用已有账号登录吧")
+        _cap_table(_SIGNUP_HITS, 2000)
     try:
         # PBKDF2 十多万次迭代要跑几十上百毫秒，挪出事件循环免得卡住别人的 SSE 流
         res = await asyncio.to_thread(auth.login, req.username, req.password)
@@ -380,7 +430,7 @@ async def api_auth_register(request: Request, req: RegisterReq):
     try:
         res = await asyncio.to_thread(
             auth.register, req.username, req.password, req.role,
-            req.child, req.question, req.answer)
+            req.child, req.question, req.answer, req.child_password)
     except ValueError as e:
         raise HTTPException(400, str(e))
     return await _auth_response(res)
@@ -450,7 +500,7 @@ async def api_session(request: Request, req: SessionReq):
 
 @app.get("/api/greeting")
 async def api_greeting(request: Request, name: str = "", stream: bool = False):
-    _, sess = await _auth_session(request, "greeting", name)
+    user, sess = await _auth_session(request, "greeting", name)
     _, a, _ = _stores(sess)
     block, brief, reminders = await asyncio.to_thread(
         lambda: (sess.store.active_block(), _affairs_brief(a), sess.store.due_reminders()))
@@ -461,13 +511,17 @@ async def api_greeting(request: Request, name: str = "", stream: bool = False):
         memory_block=block or "（还没有记忆，这是第一次见面）",
     )}]
     fallback = f"早呀，{sess.name}！今天有什么想聊的？我一直都在。"
+    # 额度用完不报错：问候本来就有本地兜底，照常给一句
+    quota = _llm_quota(request, user["username"])
     if stream:
         # opt-in 流式：`?stream=1` 走 SSE 逐字下发，默认仍返回 JSON（契约 §4 不变）
         return StreamingResponse(
-            _stream_text(messages, max_tokens=600, caller="greeting",
+            _stream_text(messages if quota else None, max_tokens=600, caller="greeting",
                          done={"reminders": reminders, "name": sess.name},
                          fallback=fallback),
             media_type="text/event-stream", headers=_SSE_HEADERS)
+    if not quota:
+        return {"text": fallback, "reminders": reminders, "name": sess.name}
     try:
         text = await llm.complete(messages, max_tokens=600, caller="greeting")
     except llm.LLMError as e:
@@ -567,7 +621,7 @@ def _briefing_fallback(name: str, snapshot: dict, due: list[dict]) -> str:
 
 @app.get("/api/briefing")
 async def api_briefing(request: Request, name: str = "", stream: bool = False):
-    _, sess = await _auth_session(request, "briefing", name)
+    user, sess = await _auth_session(request, "briefing", name)
     g, a, m = _stores(sess)
     data = await asyncio.to_thread(_briefing_collect, a, g, m)
     snapshot, due = data["snapshot"], data["due"]
@@ -583,15 +637,18 @@ async def api_briefing(request: Request, name: str = "", stream: bool = False):
         "due_soon": due,
         "suggestions": data["suggestions"],
     }
+    quota = _llm_quota(request, user["username"])  # 用完就走本地兜底，晨报照常出
     if stream:
         # opt-in 流式：先逐字出正文，done 事件再带看板/截止/建议，首屏从"整段等"变"边出边看"
         return StreamingResponse(
-            _stream_text(messages, max_tokens=800, caller="briefing",
+            _stream_text(messages if quota else None, max_tokens=800, caller="briefing",
                          done=payload,
                          fallback=_briefing_fallback(sess.name, snapshot, due)),
             media_type="text/event-stream", headers=_SSE_HEADERS)
 
     try:
+        if not quota:
+            raise llm.LLMError("额度用完")
         text = await llm.complete(messages, max_tokens=800, caller="briefing")
     except llm.LLMError as e:
         # 晨报失败不影响界面：给一句基于本地数据的兜底
@@ -1262,6 +1319,7 @@ async def api_chat(request: Request, req: ChatReq):
     user, sess = await _auth_session(request, "chat", req.name)
     if not _chat_throttle(user["username"]):
         raise HTTPException(429, "说得太快啦，喝口水歇五分钟再聊")
+    _need_llm_quota(request, user["username"])
     try:
         await asyncio.wait_for(sess.lock.acquire(), timeout=0.3)
     except asyncio.TimeoutError:
@@ -1434,12 +1492,16 @@ async def api_ics(request: Request, aid: str, name: str = ""):
         ics = await asyncio.to_thread(a.ics, aid)
     except KeyError:
         raise HTTPException(404, "事务不存在")
-    # 事务 id 进 Content-Disposition 文件名前消毒，防引号/换行注入响应头
+    # 事务 id 进 Content-Disposition 文件名前消毒，防引号/换行注入响应头。
+    # 响应头只能是 latin-1：中文 id 直接塞进 filename="" 会 UnicodeEncodeError 成 500，
+    # 所以 filename 给 ASCII 兜底名，真名按 RFC 6266 走 filename*（UTF-8 百分号编码）
     safe = re.sub(r"[^\w一-鿿.-]", "_", aid)[:40] or "affair"
+    ascii_name = re.sub(r"[^A-Za-z0-9._-]", "_", safe).strip("_") or "affair"
+    disp = f"attachment; filename=\"{ascii_name}.ics\"; filename*=UTF-8''{quote(safe + '.ics')}"
     return PlainTextResponse(
         ics,
         media_type="text/calendar; charset=utf-8",
-        headers={"Content-Disposition": f'attachment; filename="{safe}.ics"'},
+        headers={"Content-Disposition": disp},
     )
 
 
@@ -1525,7 +1587,8 @@ async def _do_relay(sess, direction: str, text: str) -> dict:
 
 @app.post("/api/relay")
 async def api_relay(request: Request, req: RelayReq):
-    _, sess = await _auth_session(request, "relay", req.name)
+    user, sess = await _auth_session(request, "relay", req.name)
+    _need_llm_quota(request, user["username"])
     return await _do_relay(sess, req.direction, req.text)
 
 
@@ -1600,7 +1663,8 @@ async def api_growth(request: Request, name: str = "", view: str = "child"):
 @app.post("/api/dream")
 async def api_dream(request: Request, req: DreamReq):
     """「说说我的梦想」：孩子说梦想 → 接住并落成记忆；没说 → 主动邀请。"""
-    _, sess = await _auth_session(request, "dream", req.name)
+    user, sess = await _auth_session(request, "dream", req.name)
+    _need_llm_quota(request, user["username"])
     g, a, _ = _stores(sess)
     mem_block = await asyncio.to_thread(sess.store.active_block) or "（还没有记忆，慢慢了解中）"
     graph_brief = await asyncio.to_thread(g.brief_block, limit=20)

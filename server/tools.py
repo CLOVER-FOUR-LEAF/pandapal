@@ -19,8 +19,10 @@ executor 的派发、闲聊通道的候选清单——不用再改第三处。
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import re
+import socket
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -332,28 +334,111 @@ async def _web_browse(args: dict, ctx: ToolCtx) -> str:
     host = urlparse(url).hostname or ""
     if not url.startswith(("http://", "https://")) or not host:
         return f"「{url}」不是能打开的网址"
-    if _blocked_host(host):
-        return "这个地址指向内网/本机，我不能打开"
-    resp = await shared_client().get(url, headers=_UA, timeout=config.TOOL_TIMEOUT,
-                                     follow_redirects=True)
-    resp.raise_for_status()
-    ctype = resp.headers.get("content-type", "")
+    fetched = await _safe_fetch(url)
+    if isinstance(fetched, str):
+        return fetched
+    url, ctype, html = fetched
+    host = urlparse(url).hostname or host
     if "html" not in ctype and "text" not in ctype:
         return f"打开的是 {ctype.split(';')[0] or '非网页'} 内容，读不了正文"
-    title, text = _html_to_text(resp.text[:_MAX_HTML_BYTES])
+    title, text = _html_to_text(html)
     if not text.strip():
         return f"打开了 {host}，但页面里没读到文字（可能是纯脚本页面）"
     head = f"网页「{title or host}」" + (f"（{url}）" if url else "")
     return head + " 的内容：\n" + text[:_BROWSE_CHARS]
 
 
+_MAX_REDIRECTS = 3
+_BLOCKED_MSG = "这个地址指向内网/本机，我不能打开"
+
+
+def _ip_blocked(ip: ipaddress._BaseAddress) -> bool:
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
+        ip = ip.ipv4_mapped  # ::ffff:127.0.0.1
+    return not ip.is_global or ip.is_multicast
+
+
 def _blocked_host(host: str) -> bool:
-    """轻量 SSRF 护栏：挡住本机/内网常见段，不做 DNS 反查（够用且零依赖）。"""
-    h = host.lower().strip("[]")
-    if h in ("localhost", "0.0.0.0", "::1"):
+    """不查 DNS 的快速判断：本机名、以及任何写法的非公网 IP 字面量。
+
+    ipaddress 只认标准点分写法；"2130706433"、"0x7f.1"、"0177.0.0.1" 这类
+    整数/十六进制/八进制写法交给 inet_aton 归一（libc 照样会把它们连到 127.0.0.1）。
+    """
+    h = host.lower().strip("[]").rstrip(".")
+    if not h or h == "localhost" or h.endswith((".localhost", ".local", ".internal")):
         return True
-    return bool(re.match(
-        r"^(127\.|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.)", h))
+    try:
+        return _ip_blocked(ipaddress.ip_address(h))
+    except ValueError:
+        pass
+    if re.fullmatch(r"[0-9a-fx.]+", h):
+        try:
+            return _ip_blocked(ipaddress.IPv4Address(socket.inet_aton(h)))
+        except OSError:
+            pass
+    return False
+
+
+async def _resolves_blocked(host: str) -> bool:
+    """解析域名后逐个地址检查：挡住 127.0.0.1.nip.io 这类指向内网的公网域名。
+
+    解析失败也拒绝（宁可打不开，也不放过）。残余风险是 DNS 重绑定——检查和
+    实际连接之间解析结果变了；对一个读网页正文的工具，这个代价可以接受。
+    """
+    if _blocked_host(host):
+        return True
+    try:
+        infos = await asyncio.get_running_loop().getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    except OSError:
+        return True
+    for info in infos:
+        try:
+            if _ip_blocked(ipaddress.ip_address(info[4][0].split("%")[0])):
+                return True
+        except ValueError:
+            return True
+    return not infos
+
+
+async def _safe_fetch(url: str):
+    """手动跟随重定向、每一跳都重新检查地址，并按字节上限流式读取。
+
+    返回 (最终 url, content-type, html 文本)，或一句给模型看的拒绝/失败说明。
+    （follow_redirects=True 时公网地址 302 到 169.254.169.254 就能绕过前置检查；
+    resp.text 会先把整个响应读进内存，超大页面能把进程撑爆。）
+    """
+    client = shared_client()
+    for _ in range(_MAX_REDIRECTS + 1):
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            return f"「{url}」不是能打开的网址"
+        if await _resolves_blocked(parsed.hostname):
+            return _BLOCKED_MSG
+        async with client.stream("GET", url, headers=_UA, timeout=config.TOOL_TIMEOUT,
+                                 follow_redirects=False) as resp:
+            if resp.is_redirect:
+                loc = resp.headers.get("location", "")
+                if not loc:
+                    return "网页让我跳转，但没说跳去哪"
+                url = str(resp.url.join(loc))
+                continue
+            resp.raise_for_status()
+            ctype = resp.headers.get("content-type", "")
+            if "html" not in ctype and "text" not in ctype:
+                return str(resp.url), ctype, ""
+            buf = bytearray()
+            async for chunk in resp.aiter_bytes():
+                buf += chunk
+                if len(buf) >= _MAX_HTML_BYTES:
+                    del buf[_MAX_HTML_BYTES:]
+                    break
+            enc = resp.charset_encoding or "utf-8"
+            try:
+                html = buf.decode(enc, errors="replace")
+            except LookupError:
+                html = buf.decode("utf-8", errors="replace")
+            return str(resp.url), ctype, html
+    return "网页跳转次数太多，没打开"
 
 
 def _plain_text(html_frag: str) -> str:
