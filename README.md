@@ -45,7 +45,7 @@ cp .env.example .env   # 然后填入你的 LLM_API_KEY 等
 | `豆豆妈` | `mama123` | 家长 | 收件箱确认、传话筒 + 孩子档案的只读视图（悄悄话服务端强制过滤） |
 | `admin` | `admin123` | 评委 | 全部能力 + `/api/logs` 调用留痕 + 孩子/家长视角切换 |
 
-输入未注册的用户名会自动创建「孩子」账号并绑定同名空白档案。除 `/api/health`、`/api/auth/*` 与静态页外，全部接口要求 `Authorization: Bearer <token>`；非 admin 只能访问自己绑定的孩子档案，越权一律 403。密码 PBKDF2 加盐存 `data/users.json`（不入库），token 仅内存有效、重启重登。
+输入未注册的用户名会自动创建「孩子」账号并绑定同名空白档案。除 `/api/health`、`/api/auth/*` 与静态页外，全部接口要求 `Authorization: Bearer <token>`；非 admin 只能访问自己绑定的孩子档案，越权一律 403；家长账号是孩子档案的只读视图（收件箱确认与传话筒除外）。密码 PBKDF2 加盐存 `data/users.json`，token 落 `data/tokens.json`（均不入库），默认 7 天有效、重启不掉登录。
 
 ## 四、核心功能
 
