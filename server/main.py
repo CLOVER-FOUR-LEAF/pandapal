@@ -44,7 +44,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import (actions, affairs, auth, config, executor, graph, llm, memory, planner,
-               prompts, router, sessions, suggest, synth)
+               prompts, router, sessions, store, suggest, synth)
 
 
 @asynccontextmanager
@@ -888,15 +888,18 @@ async def _open_affair(sess, a_store, message: str, hit: dict) -> tuple[dict | N
         # 先落个短标题占位，规划成功后由调用方换成 plan["title"]
         title = re.sub(r"[，。！？!?~～\s]+", "", message)[:18] or "新的事"
         snapshot = await asyncio.to_thread(a_store.list)
-        msg_flat = _flat(message)
+        msg_grams = store.bigrams(_flat(message))
         best, best_score = None, 0
         for it in snapshot:
             if it.get("stage") == "done":
                 continue
             score = 2 * len(hit_ids & set(it.get("linked_nodes") or []))
             t = _flat(it.get("title"))
-            if len(t) >= 4 and (t[:6] in msg_flat or msg_flat[:6] in t):
-                score += 3
+            if len(t) >= 4:
+                # 标题二元组覆盖度 ≥1/2 才算同一件事——"前 6 字"前缀法对换序/插字太脆
+                t_grams = store.bigrams(t)
+                if t_grams and len(t_grams & msg_grams) / len(t_grams) >= 0.5:
+                    score += 3
             if score > best_score:
                 best, best_score = it, score
         if best is not None:
