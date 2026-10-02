@@ -1667,6 +1667,29 @@ function addMemoryChip(payload) {
   scrollBottom();
 }
 
+/** 工具调用条：「🔧 联网搜索「西客松」…」→ 完成打勾 / 失败打叉。同一调用按 key 原地更新。 */
+function addToolChip(ev, ctx) {
+  const box = chatBox();
+  if (!box) return;
+  clearChatHint();
+  ctx.toolChips = ctx.toolChips || {};
+  const key = `${ev.tool}:${ev.label || ""}`;
+  let chip = ctx.toolChips[key];
+  if (!chip) {
+    const row = el("div", "chip-row");
+    chip = el("span", "chip tool");
+    row.appendChild(chip);
+    box.appendChild(row);
+    ctx.toolChips[key] = chip;
+  }
+  const status = ev.status || "running";
+  chip.dataset.status = status;
+  chip.innerHTML = "";
+  chip.appendChild(icon(status === "done" ? "i-check" : status === "error" ? "i-x" : "i-globe"));
+  chip.appendChild(document.createTextNode(` ${ev.label || ev.tool}${status === "running" ? "…" : ""}`));
+  scrollBottom();
+}
+
 function addPlanTree(title, nodes) {
   const box = chatBox();
   if (!box) return null;
@@ -1946,6 +1969,11 @@ function handleEvent(ev, ctx, dropTyping) {
       if (ev.kind === "draft" && ev.ok && ev.payload && ev.payload.body) {
         addDocCard(ev.payload);
       }
+      break;
+
+    case "tool":
+      dropTyping();
+      addToolChip(ev, ctx);
       break;
 
     case "relay_result": {
@@ -2450,7 +2478,7 @@ function inboxCard(item, actionable) {
   card.innerHTML =
     `<div class="inbox-head">
        <span class="inbox-title">${escapeHtml(item.title || item.id || "")}</span>
-       <span class="inbox-status">${escapeHtml(String(item.created || item.ts || "").slice(0, 16))}</span>
+       <span class="inbox-status">${escapeHtml(String(item.created || item.ts || "").slice(5, 16).replace("T", " "))}</span>
      </div>
      <div class="inbox-detail">${escapeHtml(item.detail || "")}</div>`;
   const reply = item.reply;
