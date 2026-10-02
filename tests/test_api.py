@@ -4,19 +4,52 @@
 用法：python tests/test_api.py [--base http://localhost:8000]
 
 演示账号（server/auth.py 种子）：小豆/panda123（孩子）、豆豆妈/mama123（家长）、admin/admin123（评委）。
+
+会话隔离用例会临时注册一个「评测员B」账号；打到本机服务时，脚本会在开始前和
+结束（含异常退出）后自动清理该账号的档案目录与 profiles.json 条目——后者是被 git
+追踪的，不清理就会把测试账号带进公开仓库。打到远程服务则跳过清理（残留由服务端管）。
 """
 from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
 import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
 
 RESULTS = []
+
+# 验证会话隔离用的一次性账号，跑完必须清干净（见 _cleanup）
+GUEST = "评测员B"
+DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+GUEST_DIR = DATA_DIR / f"child_{GUEST}"
+PROFILES = DATA_DIR / "profiles.json"
+
+
+def _is_local(base: str) -> bool:
+    """只有打本机服务时才需要（也才有能力）清理本地残留。"""
+    return any(h in base for h in ("localhost", "127.0.0.1", "0.0.0.0"))
+
+
+def _cleanup() -> None:
+    """删掉本脚本造出来的评测员B 档案与 profiles.json 条目。
+
+    profiles.json 是**被 git 追踪**的：不收尾的话，跑一次测试就把测试账号
+    写进公开仓库了。data/child_*/ 本身在 .gitignore 里，但一并删掉更干净。
+    """
+    shutil.rmtree(GUEST_DIR, ignore_errors=True)
+    try:
+        profiles = json.loads(PROFILES.read_text(encoding="utf-8"))
+        if profiles.pop(GUEST, None) is not None:
+            PROFILES.write_text(
+                json.dumps(profiles, ensure_ascii=False, indent=2), encoding="utf-8")
+    except (OSError, ValueError):
+        pass
 
 
 def record(name: str, ok: bool, note: str = ""):
@@ -103,7 +136,17 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--base", default="http://localhost:8000")
     base = ap.parse_args().base.rstrip("/")
+    local = _is_local(base)
+    if local:
+        _cleanup()  # 上次跑挂掉留下的残留先清掉
+    try:
+        return _run(base)
+    finally:
+        if local:
+            _cleanup()  # 别把测试账号留在公开仓库里
 
+
+def _run(base: str) -> int:
     # 1. 健康检查（公开）
     try:
         st, h = get(base, "/api/health")
@@ -254,7 +297,7 @@ def main() -> int:
 
     # 11. 会话隔离 + 并发不崩（自动注册的新孩子账号 + 小豆同时聊）
     try:
-        guest = login(base, "评测员B", "pw123")  # 未知名 → 自动注册 child
+        guest = login(base, GUEST, "pw123")  # 未知名 → 自动注册 child
         tk_b = guest["token"]
         out: dict[str, list] = {}
 
@@ -262,7 +305,7 @@ def main() -> int:
             out[nm] = post_sse(base, "/api/chat", {"name": nm, "message": msg}, tk)
 
         t1 = threading.Thread(target=talk, args=(tk_child, "小豆", "我有点紧张"))
-        t2 = threading.Thread(target=talk, args=(tk_b, "评测员B", "你好"))
+        t2 = threading.Thread(target=talk, args=(tk_b, GUEST, "你好"))
         t1.start(); t2.start(); t1.join(timeout=120); t2.join(timeout=120)
         ok = all(any(e["type"] == "done" for e in v) for v in out.values())
         record("concurrent", ok, f"sessions={list(out.keys())} guest_new={guest.get('is_new')}")
