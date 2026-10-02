@@ -254,7 +254,9 @@
         <div class="hero-halo" aria-hidden="true"></div>
         <div id="login-panda" class="panda-holder" aria-hidden="true"></div>
         <div class="hero-bubble" aria-hidden="true">
-          <span id="hero-bubble-text">小豆，明天科学课的实验材料我已经帮你列好啦～</span>
+          <!-- 只写能力陈述：具体事件（科学课/春游/跳绳/比赛倒计时）在演示档案里并不存在，
+               写死会被评委当场核对出对不上。文案与 app.js 轮播首条保持一致。 -->
+          <span id="hero-bubble-text">你说过的事我都记着，明天要带什么，我今天就提醒你</span>
         </div>
       </div>
       <div class="hero-copy">
@@ -563,11 +565,15 @@
       <div class="inputbar">
         <button id="attach-btn" class="icon-btn" type="button"
                 aria-label="上传文件：图片、PDF、Word、Excel、文本"
-                title="上传文件（图片 / PDF / Word / Excel / 文本）">
+                title="上传文件（图片 / PDF / Word / Excel / 文本，也可直接粘贴或拖进来）">
           <svg class="ic" aria-hidden="true"><use href="#i-attach"/></svg>
         </button>
+        <button id="files-btn" class="icon-btn" type="button" aria-expanded="false"
+                aria-label="最近上传的附件：可以再次引用或删掉" title="最近上传（再次引用 / 删除）">
+          <svg class="ic" aria-hidden="true"><use href="#i-clip"/></svg>
+        </button>
         <input id="file-input" class="sr-only" type="file" multiple
-               accept="image/*,.pdf,.docx,.xlsx,.pptx,.txt,.md,.csv,.json,.log,.py,.js,.ts,.html,.css">
+               accept="image/*,.pdf,.docx,.doc,.xlsx,.xls,.xlsm,.pptx,.ppt,.txt,.md,.markdown,.csv,.tsv,.json,.log,.xml,.yml,.yaml,.ini,.conf,.sql,.py,.js,.ts,.html,.css,.java,.c,.cpp,.h,.go,.rs,.rb,.php,.sh,.bat,.ps1">
         <button id="secret-btn" class="icon-btn" type="button"
                 aria-label="悄悄话：家长视角看不到" aria-pressed="false">
           <svg class="ic" aria-hidden="true"><use href="#i-lock"/></svg>

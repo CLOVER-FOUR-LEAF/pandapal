@@ -101,7 +101,6 @@ def test_wiring() -> None:
     record("degraded_note", "function degradedNote" in js and ".degraded-note" in css
            and js.count("degradedNote(") >= 4)
     record("degraded_greeting_not_in_chat", 'data && data.degraded ? "" : text' in js)
-
     # 附件（多模态上传）
     record("attach_btn_in_inputbar", 'id="attach-btn"' in inside)
     record("attach_before_input",

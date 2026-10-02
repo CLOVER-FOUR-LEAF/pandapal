@@ -114,7 +114,11 @@ class Session:
 
 
 def _read_history(path: Path) -> list[dict]:
-    """重开档案时恢复会话历史：只认 {role, content} 结构，secret 标记原样保留。"""
+    """重开档案时恢复会话历史：{role, content} + secret 标记 + 附件元数据。
+
+    files 必须一起恢复：前端靠它重画文件卡，服务端靠它在新一轮里重新附上图片
+    （丢了就等于"重启之后图片全部消失"）。
+    """
     data = store.read_json(path, {"history": []})
     items = data.get("history") if isinstance(data, dict) else None
     if not isinstance(items, list):
@@ -126,6 +130,11 @@ def _read_history(path: Path) -> list[dict]:
         entry = {"role": m["role"], "content": str(m.get("content") or "")}
         if m.get("secret"):
             entry["secret"] = True
+        files = m.get("files")
+        if isinstance(files, list):
+            clean = [f for f in files if isinstance(f, dict) and f.get("id")]
+            if clean:
+                entry["files"] = clean[: config.UPLOAD_MAX_FILES_PER_REQUEST]
         out.append(entry)
     return out
 

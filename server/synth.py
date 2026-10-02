@@ -26,8 +26,13 @@ def _normalize_card(data: dict) -> dict:
     }
 
 
-async def synthesize(store: MemoryStore, event: str, results: dict[str, str]) -> dict:
-    """正常路径：汇总节点结果出卡片。"""
+async def synthesize(store: MemoryStore, event: str, results: dict[str, str],
+                     attach_ctx: str = "") -> dict:
+    """正常路径：汇总节点结果出卡片。
+
+    attach_ctx 是本轮附件摘要（文件名 + 抽取正文）：卡片只吃文本，
+    孩子用图片/文档补需求时（"按这张课程表安排"），不带上卡片就会漏掉关键信息。
+    """
     results_text = "\n\n".join(f"【{nid}】{text}" for nid, text in results.items())
     name, mem = await asyncio.to_thread(lambda: (store.child_name, store.active_block(event)))
     data = await llm.complete_json(
@@ -35,7 +40,7 @@ async def synthesize(store: MemoryStore, event: str, results: dict[str, str]) ->
             {"role": "system", "content": "你是方案整理模块，只输出 JSON。"},
             {"role": "user", "content": prompts.SYNTH.format(
                 name=name,
-                event=event,
+                event=event + attach_ctx,
                 now=tools.now_text(),
                 memory_block=mem or "（暂无记忆）",
                 results=results_text,
@@ -48,7 +53,7 @@ async def synthesize(store: MemoryStore, event: str, results: dict[str, str]) ->
     return _normalize_card(data)
 
 
-async def direct_card(store: MemoryStore, event: str) -> dict:
+async def direct_card(store: MemoryStore, event: str, attach_ctx: str = "") -> dict:
     """保底路径：跳过 DAG，单次调用直出卡片（仍是真实 LLM 生成）。"""
     name, mem = await asyncio.to_thread(lambda: (store.child_name, store.active_block(event)))
     data = await llm.complete_json(
@@ -56,7 +61,7 @@ async def direct_card(store: MemoryStore, event: str) -> dict:
             {"role": "system", "content": "你是方案整理模块，只输出 JSON。"},
             {"role": "user", "content": prompts.CARD_DIRECT.format(
                 name=name,
-                event=event,
+                event=event + attach_ctx,
                 now=tools.now_text(),
                 memory_block=mem or "（暂无记忆）",
             )},

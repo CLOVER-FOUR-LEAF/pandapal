@@ -133,7 +133,7 @@ def _settings_payload() -> dict:
 # 后台「API 配置」页的分组（键必须在 config.SETTINGS_KEYS 里）
 _SETTINGS_GROUPS = [
     ("llm", "大模型 LLM", ["LLM_PROTOCOL", "LLM_BASE_URL", "LLM_API_KEY",
-                          "LLM_API_KEY2", "LLM_MODEL", "LLM_REASONING_EFFORT"]),
+                          "LLM_API_KEY2", "LLM_MODEL", "LLM_REASONING_EFFORT", "LLM_VISION"]),
     ("search", "联网搜索", ["SEARCH_API_KEY", "SEARCH_BASE_URL"]),
     ("tts", "语音合成 TTS（先配置，调用链路后续接入）",
      ["TTS_API_KEY", "TTS_BASE_URL", "TTS_MODEL", "TTS_VOICE"]),

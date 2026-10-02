@@ -90,8 +90,13 @@ def _drop_summary_tail(plan: dict) -> None:
                 n["depends_on"] = [d for d in n["depends_on"] if d != gone]
 
 
-async def make_plan(store: MemoryStore, message: str, affairs_snapshot: dict | None = None) -> dict:
-    """生成 DAG 计划；失败抛 PlanError 由调用方走保底。"""
+async def make_plan(store: MemoryStore, message: str, affairs_snapshot: dict | None = None,
+                    attach_ctx: str = "") -> dict:
+    """生成 DAG 计划；失败抛 PlanError 由调用方走保底。
+
+    attach_ctx 是本轮附件摘要（文件名 + 抽取正文）：规划链路只吃文本，
+    孩子用图片/文档补充需求时（"按这张课程表安排"）不带上就等于什么都没说。
+    """
     brief = "（暂无）"
     if affairs_snapshot:
         rows = affairs_snapshot.get("board") or []
@@ -111,7 +116,7 @@ async def make_plan(store: MemoryStore, message: str, affairs_snapshot: dict | N
                     tools_doc=tools.planner_docs(),
                     memory_block=mem or "（暂无记忆）",
                     affairs_brief=brief,
-                    message=message,
+                    message=message + attach_ctx,
                 )},
             ],
             max_tokens=1200,  # 3-5 个节点的 JSON 足够。实测调小并不省时间：

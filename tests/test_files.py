@@ -114,6 +114,20 @@ def make_xlsx() -> bytes:
     return buf.getvalue()
 
 
+def make_pptx() -> bytes:
+    from pptx import Presentation
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[5])
+    slide.shapes.title.text = "我的机器人展示"
+    box = slide.shapes.add_textbox(0, 0, 200, 100)
+    box.text_frame.text = "第一页讲结构和传感器"
+    second = prs.slides.add_slide(prs.slide_layouts[5])
+    second.shapes.title.text = "比赛成绩"
+    buf = io.BytesIO()
+    prs.save(buf)
+    return buf.getvalue()
+
+
 # ------------------------------------------------------------------ 用例
 
 def test_kind_and_name() -> None:
@@ -422,16 +436,16 @@ def test_api_upload_flow() -> None:
         record("api_delete_missing_404", r10.status_code == 404, f"status={r10.status_code}")
 
         # 上传限频：配额挡的是磁盘，限频挡的是"脚本反复刷解析烧 CPU"
-        old_max = main_mod._UPLOAD_MAX
+        old_max = config.UPLOAD_MAX_PER_WINDOW
         main_mod._UPLOAD_HITS.clear()
-        main_mod._UPLOAD_MAX = 1
+        config.UPLOAD_MAX_PER_WINDOW = 1
         try:
             await client.post(f"/api/files?name={NAME}",
                               files={"file": ("一.txt", b"1", "text/plain")})
             rlim = await client.post(f"/api/files?name={NAME}",
                                      files={"file": ("二.txt", b"2", "text/plain")})
         finally:
-            main_mod._UPLOAD_MAX = old_max
+            config.UPLOAD_MAX_PER_WINDOW = old_max
             main_mod._UPLOAD_HITS.clear()
         record("api_upload_throttled", rlim.status_code == 429, f"status={rlim.status_code}")
     asyncio.run(api_case("files", body))
@@ -444,6 +458,7 @@ def test_chat_with_attachment() -> None:
 
     async def fake_json(messages, **kw):
         captured.setdefault("calls", []).append(messages)
+        captured.setdefault("by_caller", {}).setdefault(kw.get("caller"), []).append(messages)
         if kw.get("caller") == "router":
             return {"intent": "chat", "mood": "normal", "affair_id": None, "reason": "t"}
         return {}
@@ -478,6 +493,11 @@ def test_chat_with_attachment() -> None:
             record("chat_history_has_files",
                    any(m.get("files") for m in (await client.get(
                        f"/api/history?name={NAME}")).json().get("history", [])))
+            # 记忆沉淀也要带上"这轮发来过什么"（纯图/纯文件的一轮否则什么都沉淀不出）
+            settle = captured.get("by_caller", {}).get("extract_graph", [])
+            record("chat_settle_sees_attachment",
+                   any("题目.txt" in str(m) for msgs in settle for m in msgs),
+                   f"extract_graph calls={len(settle)}")
 
             # 图片：走多模态 content 数组（视觉模型真能看到图）
             up2 = await client.post(f"/api/files?name={NAME}",
@@ -516,6 +536,394 @@ def test_chat_with_attachment() -> None:
         llm.complete_json, llm.stream = saved_json, saved_stream
 
 
+def test_openai_wire_format() -> None:
+    """默认协议是 openai：图片必须翻译成 image_url，否则"图片走视觉"从来没成立过。"""
+    msgs = [
+        {"role": "system", "content": "你是管家"},
+        {"role": "user", "content": [
+            {"type": "text", "text": "这题怎么做"},
+            {"type": "image", "data": "QUJD", "mime": "image/jpeg"},
+        ]},
+    ]
+    out = llm._openai_messages(msgs)
+    block = out[1]["content"]
+    record("openai_image_url_block",
+           block[1] == {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,QUJD"}},
+           str(block)[:90])
+    record("openai_text_block_kept", block[0] == {"type": "text", "text": "这题怎么做"})
+    # 纯文本消息不能被改造成 content 数组（别影响非多模态链路）
+    plain = llm._openai_messages([{"role": "system", "content": "你是管家"},
+                                  {"role": "user", "content": "你好"}])
+    record("openai_plain_untouched",
+           plain[0]["content"] == "你是管家" and plain[1]["content"] == "你好")
+    odd = llm._openai_messages([{"role": "user", "content": [
+        {"type": "image", "data": "QUJD", "mime": "image/tiff"}]}])
+    record("openai_odd_mime_told", "不支持的图片类型" in str(odd[0]["content"]))
+
+
+def test_vision_rejection_helpers() -> None:
+    """provider 拒绝带图请求时要能被识别成"模型没视觉"，而不是当网络错误。"""
+    class _Resp:
+        status_code = 400
+
+    class _Err(Exception):
+        response = _Resp()
+
+    with_img = [{"role": "user", "content": [{"type": "image", "data": "QUJD", "mime": "image/png"}]}]
+    record("vision_rejected_detected", llm._vision_rejected(_Err(), with_img))
+    record("vision_rejected_ignores_text_only",
+           not llm._vision_rejected(_Err(), [{"role": "user", "content": "你好"}]))
+    record("vision_unsupported_is_llm_error", issubclass(llm.LLMVisionUnsupported, llm.LLMError))
+    record("vision_flag_default_on", config.vision_enabled() is True)
+
+
+def test_image_png_photo_falls_back_to_jpeg() -> None:
+    """PNG 照片（无透明通道）压完仍然很大时要转 JPEG，否则白占体积甚至被丢。"""
+    from PIL import Image
+    import random
+    rnd = random.Random(7)
+    im = Image.new("RGB", (2200, 1600))
+    px = im.load()
+    for y in range(0, 1600, 2):          # 噪点图：PNG 压不动，正是相机照片的样子
+        for x in range(0, 2200, 2):
+            c = (rnd.randrange(256), rnd.randrange(256), rnd.randrange(256))
+            px[x, y] = c
+            px[x + 1, y] = c
+    buf = io.BytesIO()
+    im.save(buf, format="PNG")
+    noisy = buf.getvalue()
+    payload, mime = files.vision_payload(noisy, "image/png")
+    record("png_photo_becomes_jpeg",
+           mime == "image/jpeg" and len(payload) <= config.IMAGE_MAX_BYTES,
+           f"mime={mime} size={len(payload)} src={len(noisy)}")
+    with Image.open(io.BytesIO(payload)) as out:
+        record("png_photo_edge_capped", max(out.size) <= config.IMAGE_MAX_EDGE, str(out.size))
+    # 需要透明通道的图不能转 JPEG（透明会变黑）
+    rgba = Image.new("RGBA", (300, 300), (255, 0, 0, 90))
+    buf2 = io.BytesIO()
+    rgba.save(buf2, format="PNG")
+    _, mime2 = files.vision_payload(buf2.getvalue(), "image/png")
+    record("alpha_still_png", mime2 == "image/png", mime2)
+
+
+def test_probe_and_unreadable_image() -> None:
+    """坏图/HEIC 这类读不了的图要在上传时就被认出来，别原样喂给 provider 换一个 400。"""
+    store = fresh_store("child_probe")
+    bad = store.save(b"not really a png", "假图.png", "image/png")
+    record("probe_rejects_garbage", bad.get("vision_ok") is False
+           and "读不了" in str(bad.get("note") or ""), str(bad.get("note"))[:40])
+    ok = store.save(make_png(300, 200), "真图.png", "image/png")
+    record("probe_accepts_real", ok.get("vision_ok") is True and ok.get("width") == 300)
+    record("public_exposes_vision_ok", store.public(bad).get("vision_ok") is False)
+
+
+def test_pdf_scan_rendered_as_images() -> None:
+    """扫描件 PDF（没有文字层）要渲染成图片走视觉，而不是只回一句"请截图"。"""
+    store = fresh_store("child_scan")
+    item = store.save(make_blank_pdf(), "扫描件.pdf", "application/pdf")
+    record("scan_has_no_text", not item["text"].strip())
+    pages = files.pdf_page_images(store.content(item), 3)
+    record("scan_renders_pages",
+           len(pages) == 2 and all(p[:8] == b"\x89PNG\r\n\x1a\n" for p in pages),
+           f"pages={len(pages)}")
+    record("scan_pages_capped", len(files.pdf_page_images(store.content(item), 1)) == 1)
+    from server import main as srv
+    srv._prepare_attachments(store, [item])
+    parts = srv._attachment_parts(store, [item])
+    record("scan_becomes_vision_parts", len(parts) >= 1 and parts[0]["type"] == "image",
+           f"parts={len(parts)}")
+    record("scan_note_explains", "当图片" in str(item.get("note") or ""),
+           str(item.get("note"))[:50])
+
+
+def test_image_budget_cap() -> None:
+    """单轮图片张数与总字节都要封顶（5 张 4MB 的 base64 请求体会被 provider 拒掉）。"""
+    from server import main as srv
+    parts = [{"type": "image", "data": "A" * 1000, "mime": "image/png"} for _ in range(9)]
+    capped = srv._cap_images(parts, 10 ** 9)
+    record("cap_images_count", len(capped) == config.UPLOAD_MAX_IMAGES_PER_REQUEST,
+           f"kept={len(capped)}")
+    small = [{"type": "image", "data": "A" * 400, "mime": "image/png"} for _ in range(6)]
+    record("cap_images_bytes", len(srv._cap_images(small, 1000)) == 2,
+           f"kept={len(srv._cap_images(small, 1000))}")
+
+
+def test_history_keeps_files() -> None:
+    """history.json 恢复时不能把 files 丢掉：丢了图片卡消失、跨轮附图也没了依据。"""
+    from server import sessions
+    path = SANDBOX / "hist_probe.json"
+    path.write_text(json.dumps({"history": [
+        {"role": "user", "content": "看看这个", "files": [{"id": "a" * 16, "name": "题图.png"}]},
+        {"role": "assistant", "content": "我看到了"},
+        {"role": "user", "content": "[[secret]]心里话", "secret": True, "files": [{"id": "b" * 16}]},
+    ]}, ensure_ascii=False), encoding="utf-8")
+    hist = sessions._read_history(path)
+    record("history_keeps_files", hist[0].get("files", [{}])[0].get("id") == "a" * 16)
+    record("history_keeps_secret", hist[2].get("secret") is True)
+    record("history_drops_junk_files",
+           "files" not in sessions._read_history(path)[1])
+
+
+def test_prepare_pipeline_notes() -> None:
+    """图片预处理失败时，原因必须写进 note —— 这是"不静默丢图"的唯一凭据。"""
+    from server import main as srv
+    store = fresh_store("child_prep")
+    bad = store.save(b"broken", "坏图.png", "image/png")
+    fake = {"id": "f" * 16, "kind": "image", "name": "没存的图.png", "mime": "image/png"}
+    srv._prepare_attachments(store, [bad, fake])
+    note = srv._file_system_note([bad, fake])
+    record("prepare_marks_unreadable", srv._attachment_parts(store, [bad]) == []
+           and "读不了" in note, note[:60])
+    record("prepare_marks_missing_bytes", "重新上传" in str(fake.get("note") or ""),
+           str(fake.get("note"))[:40])
+    record("note_warns_model", "必须如实告诉孩子" in note)
+    # 幂等：跑两遍不会把同一句说明叠两遍
+    srv._prepare_attachments(store, [bad])
+    record("prepare_idempotent", str(bad.get("note") or "").count("读不了") == 1)
+
+
+def test_vision_off_mode() -> None:
+    """LLM_VISION=off（如 deepseek-chat）时一开始就不带图，并如实说明。"""
+    from server import main as srv
+    store = fresh_store("child_novision")
+    item = store.save(make_png(400, 300), "题图.png", "image/png")
+    old = config.LLM_VISION
+    config.LLM_VISION = "off"
+    try:
+        srv._prepare_attachments(store, [item])
+        record("vision_off_drops_image", srv._attachment_parts(store, [item]) == [])
+        record("vision_off_note", "看不了图片" in str(item.get("note") or ""),
+               str(item.get("note"))[:40])
+    finally:
+        config.LLM_VISION = old
+
+
+def test_extract_pptx() -> None:
+    """PPT 收得下就必须读得出：以前上传成功却一个字都读不出来，孩子会以为读过了。"""
+    try:
+        import pptx  # noqa: F401
+    except ImportError:
+        item = fresh_store("child_ppt").save(b"PK-fake", "展示.pptx", "")
+        record("extract_pptx_no_lib_is_honest", "python-pptx" in str(item.get("note") or ""),
+               str(item.get("note"))[:50])
+        return
+    store = fresh_store("child_ppt")
+    item = store.save(make_pptx(), "展示.pptx",
+                      "application/vnd.openxmlformats-officedocument.presentationml.presentation")
+    record("extract_pptx_text",
+           "我的机器人展示" in item["text"] and "传感器" in item["text"], item["text"][:40])
+    record("extract_pptx_pages", item.get("slides") == 2, str(item.get("slides")))
+    record("extract_pptx_public", store.public(item)["chars"] > 0)
+
+
+def test_serve_mime_whitelist() -> None:
+    """下发原文件只认白名单 MIME：不把客户端声明的 content_type 原样回吐。"""
+    record("serve_mime_image", files.serve_mime({"ext": "png", "mime": "image/png"}) == "image/png")
+    record("serve_mime_pdf", files.serve_mime({"ext": "pdf", "mime": "application/pdf"})
+           == "application/pdf")
+    record("serve_mime_html_is_neutralized",
+           files.serve_mime({"ext": "html", "mime": "text/html"}) == "application/octet-stream")
+    record("serve_mime_stated_pdf_ok",
+           files.serve_mime({"ext": "bin", "mime": "application/pdf"}) == "application/pdf")
+    record("serve_mime_garbage", files.serve_mime({"ext": "", "mime": ""})
+           == "application/octet-stream")
+
+
+def test_attach_memory_note() -> None:
+    """记忆沉淀也要知道"孩子发来过什么"，但必须严格限量、带围栏。"""
+    from server import main as srv
+    store = fresh_store("child_memnote")
+    item = store.save(("讲义内容" * 800).encode(), "讲义.txt", "text/plain")
+    note = srv._attach_memory_note(store, [item])
+    record("memory_note_names_file", "讲义.txt" in note, note[:40])
+    record("memory_note_bounded", len(note) <= 1400, f"len={len(note)}")
+    record("memory_note_fenced", "<attach_digest>" in note and "</attach_digest>" in note)
+    record("memory_note_empty_without_files", srv._attach_memory_note(store, []) == "")
+
+
+def test_synth_gets_attach_ctx() -> None:
+    """卡片/规划链路只吃文本：不带附件摘要就会漏掉孩子图里给的信息。"""
+    from server import synth
+    from server.memory import MemoryStore
+    d = SANDBOX / "child_synth"
+    d.mkdir(parents=True, exist_ok=True)
+    store = MemoryStore(d)
+    captured: dict = {}
+    saved = llm.complete_json
+
+    async def fake(messages, **kw):
+        captured["user"] = messages[-1]["content"]
+        return {"title": "方案", "sections": [{"heading": "要点", "items": ["先做数学"]}]}
+
+    llm.complete_json = fake
+    try:
+        card = asyncio.run(synth.synthesize(store, "按课表安排", {},
+                                           "\n\n【附件】课表.png：已读出 120 字"))
+        record("synth_card_ok", card["title"] == "方案")
+        record("synth_attach_ctx_in_prompt", "课表.png" in captured.get("user", ""),
+               captured.get("user", "")[-60:])
+        card2 = asyncio.run(synth.direct_card(store, "按课表安排", "\n\n【附件】课表.png"))
+        record("direct_card_attach_ctx", card2["title"] == "方案"
+               and "课表.png" in captured.get("user", ""))
+    finally:
+        llm.complete_json = saved
+
+
+def test_api_body_limits() -> None:
+    """上传不能被 256KB 的 JSON 闸门误杀；非上传接口的闸门仍要留着。"""
+    async def body(client, token):
+        # 真实照片量级（>256KB）：以前一定 413，这里必须传得上去
+        big = make_png(1200, 900)
+        from PIL import Image
+        buf = io.BytesIO()
+        with Image.open(io.BytesIO(big)) as im:
+            im.convert("RGB").save(buf, format="BMP")   # 未压缩格式，体积自然超过 256KB
+        payload = buf.getvalue()
+        record("body_limit_fixture_big", len(payload) > 256_000, f"{len(payload)} bytes")
+        r = await client.post(f"/api/files?name={NAME}",
+                              files={"file": ("大图.bmp", payload, "image/bmp")})
+        record("upload_over_256kb_ok", r.status_code == 200, f"status={r.status_code}")
+        # 超过上传上限（按 config 算，不真传 10MB）
+        over = b"x" * (config.UPLOAD_MAX_BYTES + 200_000)
+        r2 = await client.post(f"/api/files?name={NAME}",
+                               files={"file": ("超大.txt", over, "text/plain")})
+        record("upload_over_upload_cap_413", r2.status_code == 413, f"status={r2.status_code}")
+        # 其它接口仍然挡超大 JSON
+        r3 = await client.post("/api/chat", json={"name": NAME, "message": "x" * 300_000,
+                                                  "files": []})
+        record("json_body_cap_kept", r3.status_code == 413, f"status={r3.status_code}")
+    asyncio.run(api_case("body_limits", body))
+
+
+def test_chat_history_image_replay() -> None:
+    """历史附图：第二轮没有新附件，也应该把上一轮的图重新带上。"""
+    captured: dict = {}
+    saved_json, saved_stream = llm.complete_json, llm.stream
+    NAME2 = "test_视觉回放"
+
+    async def fake_json(messages, **kw):
+        if kw.get("caller") == "router":
+            return {"intent": "chat", "mood": "normal", "affair_id": None, "reason": "t"}
+        return {}
+
+    async def fake_stream(messages, **kw):
+        captured.setdefault("turns", []).append(messages)
+        yield "好的。"
+
+    llm.complete_json, llm.stream = fake_json, fake_stream
+    try:
+        async def body(client, token):
+            up = await client.post(f"/api/files?name={NAME2}",
+                                   files={"file": ("题图.png", make_png(900, 700), "image/png")})
+            fid = up.json()["file"]["id"]
+            up_txt = await client.post(f"/api/files?name={NAME2}",
+                                       files={"file": ("讲义.txt", "第三题：1/2+1/3=?".encode(),
+                                                       "text/plain")})
+            fid_txt = up_txt.json()["file"]["id"]
+            async with client.stream("POST", "/api/chat",
+                                     json={"name": NAME2, "message": "这题怎么做",
+                                           "files": [fid, fid_txt]}) as resp:
+                [l async for l in resp.aiter_lines() if l.startswith("data:")]
+            async with client.stream("POST", "/api/chat",
+                                     json={"name": NAME2, "message": "那第二步呢", "files": []}) as resp:
+                [l async for l in resp.aiter_lines() if l.startswith("data:")]
+            turns = captured.get("turns", [])
+            record("history_turn_count", len(turns) == 2, f"turns={len(turns)}")
+            last = turns[-1] if turns else []
+            with_img = [m for m in last if isinstance(m.get("content"), list)
+                        and any(p.get("type") == "image" for p in m["content"])]
+            record("history_image_replayed", len(with_img) == 1, f"with_image={len(with_img)}")
+            sys_msg = str(last[0].get("content") if last else "")
+            record("history_vision_rule", "关于这次发来的图片" in sys_msg)
+            record("history_text_file_replayed",
+                   "<history_file_data>" in sys_msg and "1/2+1/3" in sys_msg)
+            record("history_ask_text_kept",
+                   any(m.get("content") == "那第二步呢" for m in last))
+        asyncio.run(api_case("history_replay", body))
+    finally:
+        llm.complete_json, llm.stream = saved_json, saved_stream
+
+
+def test_chat_vision_fallback() -> None:
+    """provider 拒绝带图时：去掉图片重试一次，并先给孩子一句人话（不是"管家挂了"）。"""
+    captured: dict = {}
+    saved_json, saved_stream = llm.complete_json, llm.stream
+    NAME3 = "test_视觉降级"
+
+    async def fake_json(messages, **kw):
+        if kw.get("caller") == "router":
+            return {"intent": "chat", "mood": "normal", "affair_id": None, "reason": "t"}
+        return {}
+
+    async def fake_stream(messages, **kw):
+        if llm.count_images(messages):
+            raise llm.LLMVisionUnsupported("400 Bad Request")
+        captured["retry"] = messages
+        yield "你把题目打给我，我就能讲。"
+
+    llm.complete_json, llm.stream = fake_json, fake_stream
+    try:
+        async def body(client, token):
+            up = await client.post(f"/api/files?name={NAME3}",
+                                   files={"file": ("题图.png", make_png(700, 500), "image/png")})
+            fid = up.json()["file"]["id"]
+            events = []
+            async with client.stream("POST", "/api/chat",
+                                     json={"name": NAME3, "message": "这题怎么做", "files": [fid]}) as resp:
+                async for line in resp.aiter_lines():
+                    if line.startswith("data:"):
+                        events.append(json.loads(line[5:]))
+            text = "".join(e.get("text") or "" for e in events if e.get("type") == "token")
+            record("vision_fallback_told_user", "打不开" in text, text[:40])
+            record("vision_fallback_answered", "打给我" in text, text[:40])
+            retry = captured.get("retry") or []
+            record("vision_fallback_stripped_images", llm.count_images(retry) == 0)
+            record("vision_fallback_rule_added",
+                   "看不到图片内容" in str(retry[0].get("content") if retry else ""))
+            hist = (await client.get(f"/api/history?name={NAME3}")).json().get("history", [])
+            record("vision_fallback_in_history",
+                   any("打不开" in str(m.get("content")) for m in hist))
+        asyncio.run(api_case("vision_fallback", body))
+    finally:
+        llm.complete_json, llm.stream = saved_json, saved_stream
+
+
+def test_chat_no_vision_config() -> None:
+    """LLM_VISION=off：不发起注定失败的带图请求，直接告诉孩子看不到图。"""
+    captured: dict = {}
+    saved_json, saved_stream = llm.complete_json, llm.stream
+    old_vision = config.LLM_VISION
+    NAME4 = "test_无视觉配置"
+
+    async def fake_json(messages, **kw):
+        if kw.get("caller") == "router":
+            return {"intent": "chat", "mood": "normal", "affair_id": None, "reason": "t"}
+        return {}
+
+    async def fake_stream(messages, **kw):
+        captured["msgs"] = messages
+        yield "这张图我看不了，你把题目打字发我。"
+
+    llm.complete_json, llm.stream = fake_json, fake_stream
+    config.LLM_VISION = "off"
+    try:
+        async def body(client, token):
+            up = await client.post(f"/api/files?name={NAME4}",
+                                   files={"file": ("题图.png", make_png(600, 400), "image/png")})
+            fid = up.json()["file"]["id"]
+            async with client.stream("POST", "/api/chat",
+                                     json={"name": NAME4, "message": "这题怎么做", "files": [fid]}) as resp:
+                [l async for l in resp.aiter_lines() if l.startswith("data:")]
+            msgs = captured.get("msgs") or []
+            record("no_vision_no_image_parts", llm.count_images(msgs) == 0)
+            sys_msg = str(msgs[0].get("content") if msgs else "")
+            record("no_vision_note_in_prompt", "看不了图片" in sys_msg, sys_msg[-160:])
+        asyncio.run(api_case("no_vision", body))
+    finally:
+        config.LLM_VISION = old_vision
+        llm.complete_json, llm.stream = saved_json, saved_stream
+
+
 def main() -> int:
     try:
         test_kind_and_name()
@@ -526,8 +934,25 @@ def main() -> int:
         test_injection_fencing()
         test_injection_budget()
         test_multimodal_messages()
+        test_openai_wire_format()
+        test_vision_rejection_helpers()
+        test_extract_pptx()
+        test_serve_mime_whitelist()
+        test_attach_memory_note()
+        test_synth_gets_attach_ctx()
+        test_image_png_photo_falls_back_to_jpeg()
+        test_probe_and_unreadable_image()
+        test_pdf_scan_rendered_as_images()
+        test_image_budget_cap()
+        test_history_keeps_files()
+        test_prepare_pipeline_notes()
+        test_vision_off_mode()
         test_api_upload_flow()
+        test_api_body_limits()
         test_chat_with_attachment()
+        test_chat_history_image_replay()
+        test_chat_vision_fallback()
+        test_chat_no_vision_config()
     finally:
         shutil.rmtree(SANDBOX, ignore_errors=True)
     passed = sum(1 for _, ok, _ in RESULTS if ok)

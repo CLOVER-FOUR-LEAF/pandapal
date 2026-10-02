@@ -68,7 +68,7 @@ cp .env.example .env   # 然后填入你的 LLM_API_KEY 等
 | 通知落地「一份通知，千家千版」：学校/机构通知 → 按孩子记忆出专属版 + 自动建事务/清单/提醒；admin 可批量下发 | `server/family.py` `POST /api/notice` |
 | 童年备忘录导出：整份档案打包 zip 交还孩子（家长 403） | `server/family.py` `GET /api/export` |
 | PWA：可添加到主屏幕；断网时档案类数据用缓存撑起，AI 端点不缓存（缓存键按 token 隔离） | `web/sw.js` + `web/manifest.webmanifest` |
-| 多模态附件：上传图片/PDF/Word/Excel/文本（拖拽或点选），图片走视觉、文档抽取正文进上下文 | `server/files.py` + `POST /api/files` |
+| 多模态附件：上传图片/PDF/Word/Excel/PPT/文本（拖拽、点选或粘贴），图片走视觉、扫描件 PDF 渲染成图、文档抽取正文进上下文；附件跨轮可追问、可管理 | `server/files.py` + `POST /api/files` |
 
 **降级不降真**：DAG 规划失败 → 单 LLM 直出卡片（跳过拆解展示，绝不跳过生成）；节点失败 → 标记后继续；联网工具失败/没搜到 → 如实告诉孩子"没查到"，不编造结果。
 
