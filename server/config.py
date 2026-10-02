@@ -112,6 +112,30 @@ SESSION_IDLE_S = float(os.getenv("PANDA_SESSION_IDLE", "1800"))
 
 SETTINGS_PATH = DATA_DIR / "settings.json"
 
+
+def _truthy(v) -> bool:
+    """后台覆盖用的布尔归一化。
+
+    这几个开关（TTS_ENABLED / TTS_SPEAK_*）在 .env 里是靠 `not in ("0","false",...)`
+    读成 bool 的。后台写进来的是字符串——如果直接存 "0"，它在 Python 里是真值，
+    「关掉」就变成了「还是开着」。所以这里必须显式转回 bool。
+    """
+    return str(v).strip().lower() not in ("0", "false", "no", "off", "")
+
+
+def _one_of(*allowed: str):
+    """枚举值归一化：只认白名单里的（大小写不敏感），其余抛错。
+
+    抛错是故意的——apply_settings 会跳过非法值并保留基线，比悄悄存一个
+    "MP4" 进去、然后 TTS 那边拿着它去请求、最后报一个看不懂的错要好。
+    """
+    def norm(v):
+        s = str(v).strip().lower()
+        if s not in allowed:
+            raise ValueError(f"只能是 {'/'.join(allowed)}，收到 {v!r}")
+        return s
+    return norm
+
 # 可在后台编辑的键 → （本模块属性名, 归一化函数, 是否密钥）。不在表里的键一律不收。
 SETTINGS_KEYS: dict[str, tuple[str, object, bool]] = {
     "LLM_PROTOCOL": ("LLM_PROTOCOL", lambda v: str(v).strip().lower(), False),
@@ -129,12 +153,15 @@ SETTINGS_KEYS: dict[str, tuple[str, object, bool]] = {
     "TTS_MODEL": ("TTS_MODEL", lambda v: str(v).strip(), False),
     "TTS_MODEL_DESIGN": ("TTS_MODEL_DESIGN", lambda v: str(v).strip(), False),
     "TTS_VOICE": ("TTS_VOICE", lambda v: str(v).strip(), False),
-    "TTS_ENABLED": ("TTS_ENABLED", lambda v: str(v).strip(), False),
-    "TTS_DEFAULT_MODE": ("TTS_DEFAULT_MODE", lambda v: str(v).strip().lower(), False),
+    "TTS_ENABLED": ("TTS_ENABLED", _truthy, False),
+    "TTS_DEFAULT_MODE": ("TTS_DEFAULT_MODE", _one_of("design", "builtin"), False),
     "TTS_DEFAULT_STYLE": ("TTS_DEFAULT_STYLE", lambda v: str(v).strip(), False),
-    "TTS_FORMAT": ("TTS_FORMAT", lambda v: str(v).strip().lower(), False),
+    "TTS_FORMAT": ("TTS_FORMAT", _one_of("mp3", "wav"), False),
     "TTS_MAX_CHARS": ("TTS_MAX_CHARS", lambda v: int(v) or 400, False),
     "TTS_CARD_MAX_CHARS": ("TTS_CARD_MAX_CHARS", lambda v: int(v) or 120, False),
+    "TTS_SPEAK_GREETING": ("TTS_SPEAK_GREETING", lambda v: _truthy(v), False),
+    "TTS_SPEAK_BRIEFING": ("TTS_SPEAK_BRIEFING", lambda v: _truthy(v), False),
+    "TTS_SPEAK_CARD": ("TTS_SPEAK_CARD", lambda v: _truthy(v), False),
 }
 
 

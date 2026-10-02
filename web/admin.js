@@ -102,8 +102,15 @@ async function loadOverview() {
       ["LLM", data.llm.configured ? "已配置" : "未配置",
         `${data.llm.protocol} · ${data.llm.model}${data.llm.backup ? " · 有备 Key" : ""}`],
       ["联网搜索", data.search.configured ? "已配置" : "未配置", "未配置时用必应网页解析兜底"],
-      ["TTS 语音", data.tts.configured ? "已配置" : "待接入",
-        data.tts.model || "Key/端点可先在此配置，调用链路后续接入"],
+      // TTS 分三态说清楚：能不能用（available）取决于开关 + Key 都在，
+      // 只填了 Key 但 TTS_ENABLED=0 照样是关的——别让"已配置"看起来像"已启用"。
+      ["TTS 语音", data.tts.available ? "已启用"
+        : data.tts.configured ? "已配置但关闭" : "未配置",
+        data.tts.available
+          ? `${data.tts.model} · ${data.tts.voice} · ${data.tts.mode}`
+          : (data.tts.configured
+            ? "已填 Key，但 TTS_ENABLED 是关的（见 API 配置页）"
+            : "在 API 配置页填 TTS_API_KEY 即可让管家开口说话")],
       ["LLM 调用", data.logs, "累计留痕条数（记录页可查）"],
       ["后台覆盖项", data.overrides.length, data.overrides.join("、") || "全部走 .env / 默认值"],
     ];

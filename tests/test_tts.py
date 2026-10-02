@@ -117,9 +117,9 @@ def test_clamp_cuts_at_sentence_boundary():
 def test_design_mode_role_convention():
     res, sink = _speak("你好呀", {"mode": "design", "style": "清纯甜美的少女声"})
     assert res and res["format"] == "mp3"
-    # BASE_URL 留空时 tts.py 会回落到 MiMo 官方端点，断言按同一条回落规则算
-    base = (config.TTS_BASE_URL or "").strip().rstrip("/") or tts.DEF_BASE_URL
-    assert sink["url"] == f"{base}/chat/completions"
+    # BASE_URL 留空时 tts.py 会回落到 MiMo 官方端点。这里直接问 tts.base_url()
+    # 而不是把回落规则再抄一遍——抄的那份迟早会跟实现对不上（这正是上一版的毛病）。
+    assert sink["url"] == f"{tts.base_url()}/chat/completions"
     assert sink["headers"]["api-key"] == "sk-test"
     body = sink["json"]
     assert body["model"] == "mimo-v2.5-tts-voicedesign"
