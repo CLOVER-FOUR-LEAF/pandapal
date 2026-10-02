@@ -6,8 +6,9 @@
 演示账号（server/auth.py 种子）：小豆/panda123（孩子）、豆豆妈/mama123（家长）、admin/admin123（评委）。
 
 会话隔离用例会临时注册一个「评测员B」账号；打到本机服务时，脚本会在开始前和
-结束（含异常退出）后自动清理该账号的档案目录与 profiles.json 条目——后者是被 git
-追踪的，不清理就会把测试账号带进公开仓库。打到远程服务则跳过清理（残留由服务端管）。
+结束（含异常退出）后自动清理该账号的档案目录与 profiles.json 映射条目——这些
+运行时文件已被 .gitignore 排除，清理只是不让本地 data/ 累积测试残留、保证重跑
+拿到一份全新档案。打到远程服务则跳过清理（残留由服务端管）。
 """
 from __future__ import annotations
 
@@ -39,8 +40,8 @@ def _is_local(base: str) -> bool:
 def _cleanup() -> None:
     """删掉本脚本造出来的评测员B 档案与 profiles.json 条目。
 
-    profiles.json 是**被 git 追踪**的：不收尾的话，跑一次测试就把测试账号
-    写进公开仓库了。data/child_*/ 本身在 .gitignore 里，但一并删掉更干净。
+    profiles.json 与 data/child_*/ 都已被 .gitignore 排除，不会进仓库；
+    清掉只是让本地 data/ 不留测试残留。
     """
     shutil.rmtree(GUEST_DIR, ignore_errors=True)
     try:
@@ -143,7 +144,7 @@ def main() -> int:
         return _run(base)
     finally:
         if local:
-            _cleanup()  # 别把测试账号留在公开仓库里
+            _cleanup()  # 别把测试账号留在本地 data/ 里
 
 
 def _run(base: str) -> int:
