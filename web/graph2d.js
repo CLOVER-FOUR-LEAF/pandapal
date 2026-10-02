@@ -33,7 +33,7 @@ function daysAgo(dateStr) {
 }
 
 /** 智能多行标签排版，防止出现单调的截断 ... */
-function renderMultiLineLabel(g, text, r, color, light) {
+function renderMultiLineLabel(g, text, r, color) {
   const s = String(text == null ? "" : text).trim();
   const label = document.createElementNS(NS, "text");
   label.setAttribute("x", "0");
@@ -44,7 +44,7 @@ function renderMultiLineLabel(g, text, r, color, light) {
   label.setAttribute("font-weight", "600");
   label.style.letterSpacing = "0.02em";
   label.style.paintOrder = "stroke fill";
-  label.style.stroke = light ? "rgba(255,255,255,0.92)" : "rgba(10,18,15,0.92)";
+  label.style.stroke = "rgba(10,18,15,0.92)";
   label.style.strokeWidth = "3px";
   label.style.strokeLinejoin = "round";
 
@@ -87,20 +87,17 @@ export function renderFallback(containerEl, graph, opts = {}) {
   const ids = new Set(nodes.map((n) => n.id));
   let edges = edges0.filter((e) => ids.has(e.source) && ids.has(e.target));
 
-  // 深浅色主题自适应
-  const light = typeof document !== "undefined" && !!document.body && document.body.dataset.theme !== "dark";
+  // 夜色竹林（唯一主题）
   const C = {
-    bgGlow: light
-      ? [[0, "rgba(56,189,248,.12)"], [0.55, "rgba(52,211,153,.10)"], [1, "rgba(240,253,244,0)"]]
-      : [[0, "rgba(52,211,153,.15)"], [0.55, "rgba(30,58,47,.45)"], [1, "rgba(11,19,17,0)"]],
-    edge: light ? "rgba(71,85,105,.24)" : "rgba(148,163,184,.26)",
-    hot: light ? "#d97706" : "#fbbf24",
-    ringDone: light ? "#d97706" : "#f59e0b",
-    dropFill: light ? "rgba(148,163,184,.25)" : "rgba(100,116,139,.35)",
-    dropStroke: light ? "rgba(100,116,139,.45)" : "rgba(148,163,184,.45)",
-    priv: light ? "#9333ea" : "#c084fc",
-    label: light ? "#0f172a" : "#f8fafc",
-    labelDropped: light ? "rgba(100,116,139,.65)" : "rgba(148,163,184,.65)",
+    bgGlow: [[0, "rgba(52,211,153,.15)"], [0.55, "rgba(30,58,47,.45)"], [1, "rgba(11,19,17,0)"]],
+    edge: "rgba(148,163,184,.26)",
+    hot: "#fbbf24",
+    ringDone: "#f59e0b",
+    dropFill: "rgba(100,116,139,.35)",
+    dropStroke: "rgba(148,163,184,.45)",
+    priv: "#c084fc",
+    label: "#f8fafc",
+    labelDropped: "rgba(148,163,184,.65)",
   };
 
   // 时间轴筛选
@@ -244,7 +241,7 @@ export function renderFallback(containerEl, graph, opts = {}) {
     dom.setAttribute("cy", String(p.y));
     dom.setAttribute("r", "64");
     dom.setAttribute("fill", DOMAIN_COLOR[p.dom] || "#8fa3a0");
-    dom.setAttribute("opacity", light ? "0.12" : "0.09");
+    dom.setAttribute("opacity", "0.09");
     gDomain.appendChild(dom);
 
     const txt = document.createElementNS(NS, "text");
@@ -328,7 +325,7 @@ export function renderFallback(containerEl, graph, opts = {}) {
     const haloEl = document.createElementNS(NS, "circle");
     haloEl.setAttribute("r", String(r + 8));
     haloEl.setAttribute("fill", base);
-    haloEl.setAttribute("opacity", light ? "0.22" : "0.16");
+    haloEl.setAttribute("opacity", "0.16");
     g.appendChild(haloEl);
 
     const circle = document.createElementNS(NS, "circle");
@@ -338,8 +335,8 @@ export function renderFallback(containerEl, graph, opts = {}) {
       circle.setAttribute("stroke", C.dropStroke);
       circle.setAttribute("stroke-dasharray", "3 3");
     } else {
-      circle.setAttribute("fill", shade(base, light ? 0.15 : -0.35 * (1 - recency)));
-      circle.setAttribute("stroke", shade(base, light ? -0.2 : 0.4 * recency));
+      circle.setAttribute("fill", shade(base, -0.35 * (1 - recency)));
+      circle.setAttribute("stroke", shade(base, 0.4 * recency));
     }
     circle.setAttribute("stroke-width", "1.8");
     circle.setAttribute("opacity", dropped ? "0.6" : String(recency.toFixed(2)));
@@ -373,7 +370,7 @@ export function renderFallback(containerEl, graph, opts = {}) {
 
     // 智能多行高清晰标签
     const labelColor = dropped ? C.labelDropped : C.label;
-    renderMultiLineLabel(g, n.label, r, labelColor, light);
+    renderMultiLineLabel(g, n.label, r, labelColor);
 
     // 悬浮与点击交互
     const onEnter = () => {
