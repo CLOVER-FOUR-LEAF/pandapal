@@ -93,7 +93,7 @@ export function renderFallback(containerEl, graph, opts = {}) {
     bgGlow: light
       ? [[0, "rgba(56,189,248,.12)"], [0.55, "rgba(52,211,153,.10)"], [1, "rgba(240,253,244,0)"]]
       : [[0, "rgba(52,211,153,.15)"], [0.55, "rgba(30,58,47,.45)"], [1, "rgba(11,19,17,0)"]],
-    edge: light ? "rgba(71,85,105,.24)" : "rgba(148,163,184,.26)",
+    edge: light ? "rgba(51,65,85,.34)" : "rgba(148,163,184,.26)",
     hot: light ? "#d97706" : "#fbbf24",
     ringDone: light ? "#d97706" : "#f59e0b",
     dropFill: light ? "rgba(148,163,184,.25)" : "rgba(100,116,139,.35)",
@@ -273,7 +273,7 @@ export function renderFallback(containerEl, graph, opts = {}) {
     line.setAttribute("y2", b.y.toFixed(1));
     const hot = hlEdgeKey.has(`${e.source}>${e.target}`) || hlEdgeKey.has(`${e.target}>${e.source}`);
     line.setAttribute("stroke", hot ? C.hot : C.edge);
-    line.setAttribute("stroke-width", hot ? "2.4" : "1.3");
+    line.setAttribute("stroke-width", hot ? "2.4" : light ? "1.6" : "1.3");
     if (e.rel) line.setAttribute("stroke-dasharray", hot ? "none" : "3 4");
     gEdges.appendChild(line);
     edgeEls.push({ el: line, e, hot });

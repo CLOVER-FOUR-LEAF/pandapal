@@ -1592,15 +1592,20 @@ function addMsg(cls, text, secret) {
   if (secret) div.appendChild(secretTag());
   div.appendChild(document.createTextNode(shown));
   box.appendChild(div);
-  scrollBottom();
+  scrollBottom(cls === "me");
   return div;
 }
 
 function addSys(text) { return addMsg("sys", text); }
 
-function scrollBottom() {
+// 只在本来就在底部（或用户自己发消息）时才滚到底——
+// 流式回复时用户上翻读历史，不能再被拽回底部
+function scrollBottom(force) {
   const c = chatBox();
-  if (c) c.scrollTop = c.scrollHeight;
+  if (!c) return;
+  if (force || c.scrollHeight - c.scrollTop - c.clientHeight < 140) {
+    c.scrollTop = c.scrollHeight;
+  }
 }
 
 function addTyping() {
@@ -2147,6 +2152,7 @@ function renderTimeline() {
     .map((n) => String(n.first_seen || "").slice(0, 7))
     .filter((s) => /^\d{4}-\d{2}$/.test(s))
     .sort();
+  if (range) range.disabled = !months.length;
   if (range && months.length) {
     const min = months[0];
     const max = months[months.length - 1];
@@ -3017,7 +3023,13 @@ function buildTabbar() {
     b.appendChild(el("span", null, label));
     bar.appendChild(b);
   });
-  // 窄屏下主视图顶栏导航是隐藏的，退出入口只能放底部 tab
+  // 窄屏下主视图顶栏导航是隐藏的，主题切换和退出入口只能放底部 tab
+  const themeBtn = el("button", "nav-btn theme-toggle");
+  themeBtn.type = "button";
+  themeBtn.appendChild(icon("i-sun"));
+  themeBtn.appendChild(el("span", "tt-label", "浅色"));
+  themeBtn.onclick = toggleTheme;
+  bar.appendChild(themeBtn);
   const out = el("button", "nav-btn");
   out.type = "button";
   out.setAttribute("aria-label", "退出登录");
@@ -3026,6 +3038,8 @@ function buildTabbar() {
   out.onclick = logout;
   bar.appendChild(out);
   document.body.appendChild(bar);
+  // 补建的 tabbar 里有新的主题按钮，重新跑一遍 applyTheme 同步图标/文案
+  applyTheme(document.body.dataset.theme === "dark" ? "dark" : "light");
   // 断点跨越后才建的话，登录时的 applyAuth() 早就跑完了，角色收口不会自动补上——
   // 孩子/家长会看到自己没有的入口（服务端仍会 403，但界面不该漏）。
   applyAuth();

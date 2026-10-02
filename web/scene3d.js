@@ -55,18 +55,24 @@ const THEMES = {
   dark: {
     top: "#0b1a1f", bottom: "#10302a", glow: "rgba(63,174,116,0.16)",
     fog: 0x0d2224, fogD: 0.014, hemi: 0.85, hemiGround: 0x0b1a1f,
-    edge: 0.34, additive: true, bloom: 0.62,
+    key: 1.9, rim: 0.9, fill: 22, env: 0.7, rough: 0.42, emiss: 1, exposure: 1.12,
+    edge: 0.34, edgeShade: 1, additive: true, bloom: 0.62, bloomT: 0.8,
     dust: 0xa6e3c8, dustOp: 0.55, core: 0x7fd8ae, coreOp: 0.16,
     disc: BAMBOO, discOp: 0.22, circle: 0x8fd9b6, circleOp: 0.10,
-    spoke: 0x9fd9bf, spokeOp: 0.13,
+    spoke: 0x9fd9bf, spokeOp: 0.13, haloBoost: 1,
+    orbit: 0.22, arc: 0xcfe9de, arcOp: 0.32,
   },
   light: {
     top: "#edf4ee", bottom: "#c6ddcd", glow: "rgba(72,160,110,0.22)",
-    fog: 0xd8e8dc, fogD: 0.016, hemi: 1.35, hemiGround: 0x9db8a8,
-    edge: 0.42, additive: false, bloom: 0.18,
-    dust: 0x4a9070, dustOp: 0.45, core: 0x3f9e6e, coreOp: 0.30,
-    disc: 0x3f9e6e, discOp: 0.16, circle: 0x4a9a72, circleOp: 0.16,
-    spoke: 0x4a9a72, spokeOp: 0.20,
+    // 浅底要把半球光压暗、方向光/环境反射拉高，球体才有明暗和高光；
+    // 连线颜色乘 edgeShade 压深一档、透明度拉高，否则浅彩色在浅底上几乎看不见。
+    fog: 0xd8e8dc, fogD: 0.013, hemi: 0.6, hemiGround: 0x9db8a8,
+    key: 1.5, rim: 0.55, fill: 7, env: 1.15, rough: 0.32, emiss: 1.5, exposure: 1.02,
+    edge: 0.68, edgeShade: 0.44, additive: false, bloom: 0.3, bloomT: 0.85,
+    dust: 0x3d8263, dustOp: 0.5, core: 0x3f9e6e, coreOp: 0.32,
+    disc: 0x3f9e6e, discOp: 0.18, circle: 0x3d8a62, circleOp: 0.3,
+    spoke: 0x3d8a62, spokeOp: 0.4, haloBoost: 1.6,
+    orbit: 0.45, arc: 0x4a7a64, arcOp: 0.5,
   },
 };
 
@@ -565,6 +571,7 @@ function build(container, hiddenCanvas, OrbitControls, CSS2D, pandaMod, post) {
     theme: cfg.theme,
     composer: null, bloom: null, envTex, pmrem,
     edgeMat, edgeLines: null, edgeCap: 0, edgeList: [],
+    edgeShade: 1, haloBoost: 1,
     sphereGeo, satGeo,
     nodes: new Map(), // id -> ns
     order: [], // ns 列表（稳定）
@@ -969,7 +976,8 @@ function buildAdjacency(edges) {
 
 function createNodeState(n) {
   const group = new THREE.Group();
-  const mat = new THREE.MeshStandardMaterial({ roughness: 0.42, metalness: 0.08, transparent: true, envMapIntensity: 0.7 });
+  const th = THEMES[R.theme] || THEMES.dark;
+  const mat = new THREE.MeshStandardMaterial({ roughness: th.rough, metalness: 0.08, transparent: true, envMapIntensity: th.env });
   const mesh = new THREE.Mesh(R.sphereGeo, mat);
   mesh.userData.nid = n.id;
   group.add(mesh);
@@ -993,7 +1001,7 @@ function createNodeState(n) {
     id: n.id, data: n, group, mesh, mat, halo, label, el, txt,
     ring: null, priv: null,
     p: new THREE.Vector3(), v: new THREE.Vector3(),
-    mob: 1, r: 0.4, rec: 1, baseOpacity: 1,
+    mob: 1, r: 0.4, rec: 1, baseOpacity: 1, emissBase: 0.2,
     vis: 0, visTarget: 1, dim: 1, dimTarget: 1,
     appear: 0, appearDelay: 0, dying: false,
     pulseUntil: 0, pulseColor: AMBER, spawnedAt: 0,
@@ -1015,7 +1023,8 @@ function styleNode(ns) {
   if (dropped) c.lerp(R.gray, 0.65);
   ns.mat.color.copy(c);
   ns.mat.emissive.copy(c);
-  ns.mat.emissiveIntensity = dropped ? 0.12 : 0.22 + 0.6 * ns.rec;
+  ns.emissBase = dropped ? 0.12 : 0.22 + 0.6 * ns.rec;
+  ns.mat.emissiveIntensity = ns.emissBase * (THEMES[R.theme] || THEMES.dark).emiss;
   ns.baseOpacity = dropped ? 0.42 : 1;
   ns.halo.material.color.copy(c);
   ns.haloBase = dropped ? 0.08 : 0.16 + 0.42 * ns.rec;
@@ -1178,8 +1187,35 @@ function applyTheme() {
   R.scene.fog.density = th.fogD;
   R.hemi.intensity = th.hemi;
   R.hemi.groundColor.setHex(th.hemiGround);
+  R.key.intensity = th.key;
+  R.rim.intensity = th.rim;
+  R.fill.intensity = th.fill;
+  R.renderer.toneMappingExposure = th.exposure;
   R.edgeBase = th.edge;
-  if (R.bloom) R.bloom.strength = th.bloom; // 浅底 + bloom 会整屏泛白，压低强度
+  R.edgeShade = th.edgeShade;
+  R.haloBoost = th.haloBoost;
+  if (R.bloom) { // 浅底 + bloom 会整屏泛白：压低强度、抬高阈值
+    R.bloom.strength = th.bloom;
+    R.bloom.threshold = th.bloomT;
+  }
+  // PBR 星球材质随主题调：浅底需要更低粗糙度 + 更强环境反射才有立体感/高光
+  for (const ns of R.order) {
+    ns.mat.envMapIntensity = th.env;
+    ns.mat.roughness = th.rough;
+    ns.mat.emissiveIntensity = ns.emissBase * th.emiss;
+  }
+  if (R.plan) {
+    for (const sat of R.plan.sats.values()) {
+      sat.mat.envMapIntensity = th.env;
+      sat.mat.roughness = th.rough;
+      sat.mat.emissiveIntensity = (sat.emissBase || 0.15) * th.emiss;
+    }
+    R.plan.orbit.material.opacity = th.orbit;
+    if (R.plan.arcs) {
+      R.plan.arcs.material.color.setHex(th.arc);
+      R.plan.arcs.material.opacity = th.arcOp;
+    }
+  }
   R.dustMat.color.setHex(th.dust);
   R.dustMat.opacity = th.dustOp;
   R.coreMat.color.setHex(th.core);
@@ -1278,7 +1314,7 @@ function renderFrame(dt) {
       ns.halo.material.color.copy(ns.mat.color);
     }
     ns.haloTinted = pulse > 0;
-    ns.halo.material.opacity = (ns.haloBase + 0.5 * pulse + 0.2 * hov) * ns.vis * ns.dim;
+    ns.halo.material.opacity = Math.min(1, (ns.haloBase + 0.5 * pulse + 0.2 * hov) * ns.vis * ns.dim * R.haloBoost);
     if (ns.ring) {
       ns.ring.scale.setScalar(s * 2.9);
       ns.ring.material.opacity = 0.9 * ns.vis * ns.dim;
@@ -1300,7 +1336,7 @@ function renderFrame(dt) {
     c.group.position.lerp(c.target, dt === 0 ? 1 : k6 * 0.5);
     const want = cnt > 0 ? (c.dimmed ? 0.04 : 0.12) : 0;
     c.alpha += (want - c.alpha) * (dt === 0 ? 1 : k6);
-    c.halo.material.opacity = c.alpha;
+    c.halo.material.opacity = Math.min(1, c.alpha * R.haloBoost);
     c.halo.visible = c.alpha > 0.003;
     const vis = cnt > 0;
     if (c.lab.visible !== vis) c.lab.visible = vis;
@@ -1371,6 +1407,7 @@ function updateEdges(tms, time) {
     let alpha = base * (0.55 + 0.08 * e.w) * vis * dim;
     ca.copy(a.mat.color);
     cb.copy(b.mat.color);
+    if (R.edgeShade !== 1) { ca.multiplyScalar(R.edgeShade); cb.multiplyScalar(R.edgeShade); }
     if (e.hlUntil > tms) {
       const rem = Math.min(1, ((e.hlUntil - tms) / RECALL_MS) * 3);
       const p = (0.6 + 0.4 * Math.sin(time * 9)) * rem;
@@ -1701,6 +1738,7 @@ function buildPlan(list) {
   }
   if (!items.length) return;
   const ordered = planOrder(items);
+  const th = THEMES[R.theme] || THEMES.dark;
   const group = new THREE.Group();
   const self = R.selfId && R.nodes.get(R.selfId);
   group.position.set(0, (self ? self.r : 0.6) + 1.6, 0);
@@ -1716,12 +1754,12 @@ function buildPlan(list) {
   }
   const orbit = new THREE.Line(
     new THREE.BufferGeometry().setFromPoints(orbitPts),
-    new THREE.LineBasicMaterial({ color: AMBER, transparent: true, opacity: 0.22, depthWrite: false })
+    new THREE.LineBasicMaterial({ color: AMBER, transparent: true, opacity: th.orbit, depthWrite: false })
   );
   group.add(orbit);
   ordered.forEach((it, i) => {
     const a = -Math.PI / 2 + (i / ordered.length) * Math.PI * 2;
-    const mat = new THREE.MeshStandardMaterial({ roughness: 0.35, metalness: 0.15, transparent: true, envMapIntensity: 0.7 });
+    const mat = new THREE.MeshStandardMaterial({ roughness: th.rough, metalness: 0.15, transparent: true, envMapIntensity: th.env });
     const mesh = new THREE.Mesh(R.satGeo, mat);
     mesh.position.set(Math.cos(a) * radius, 0, Math.sin(a) * radius);
     mesh.scale.setScalar(0.001);
@@ -1775,7 +1813,7 @@ function buildPlan(list) {
   if (arcPts.length) {
     arcs = new THREE.LineSegments(
       new THREE.BufferGeometry().setFromPoints(arcPts),
-      new THREE.LineBasicMaterial({ color: 0xcfe9de, transparent: true, opacity: 0.32, depthWrite: false })
+      new THREE.LineBasicMaterial({ color: th.arc, transparent: true, opacity: th.arcOp, depthWrite: false })
     );
     group.add(arcs);
   }
@@ -1790,7 +1828,8 @@ function setSatStatus(sat, status) {
   const c = R.col.setHex(PLAN_COLOR[st]);
   sat.mat.color.copy(c);
   sat.mat.emissive.copy(c);
-  sat.mat.emissiveIntensity = st === "pending" ? 0.15 : 0.7;
+  sat.emissBase = st === "pending" ? 0.15 : 0.7;
+  sat.mat.emissiveIntensity = sat.emissBase * (THEMES[R.theme] || THEMES.dark).emiss;
   sat.halo.material.color.copy(c);
   sat.el.className = "s3d-sat is-" + st;
   sat.el.style.setProperty("--c", "#" + c.getHexString());
@@ -1828,7 +1867,7 @@ function updatePlan(dt, tms, time) {
     sat.mesh.scale.setScalar(Math.max(0.001, s));
     sat.mesh.rotation.y += dt * 0.8;
     sat.halo.scale.setScalar(Math.max(0.001, s * 5));
-    sat.halo.material.opacity = hb * k;
+    sat.halo.material.opacity = Math.min(1, hb * k * R.haloBoost);
     sat.mat.opacity = k;
   }
 }

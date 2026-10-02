@@ -780,11 +780,17 @@ body[data-theme="light"] .theme-toggle:hover { color: var(--amber-deep); }
   }
   #topbar { grid-area: topbar; }
   #left-col { grid-area: left; overflow: hidden; position: relative; }
+  /* 桌面端 body 是 overflow:hidden，这几个视图必须自己限定高度并内部滚动 */
+  #parent-view, #growth-view, #memory-view { height: 100dvh; min-height: 0; }
+  .memory-body, #growth-evidence, #parent-inbox { min-height: 0; }
+  /* 矮视口下登录卡片改内部滚动，避免顶部标题/底部按钮被裁掉 */
+  #login-view { height: 100dvh; overflow-y: auto; }
+  .login-shell { margin: auto; }
   #center-col { grid-area: center; }
   #right-col { grid-area: right; overflow: hidden; }
 
-  #briefing-card { flex: 0 0 auto; max-height: 30%; }
-  #briefing-card .panel-body { overflow-y: auto; overscroll-behavior: contain; }
+  #briefing-card { flex: 0 0 auto; max-height: 30%; display: flex; flex-direction: column; }
+  #briefing-card .panel-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
   #affair-board { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
   #affair-board .panel-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
   #affair-detail {
@@ -1041,6 +1047,15 @@ body[data-theme="dark"] #panda-bubble::after {
   overflow: hidden;
 }
 body[data-theme="light"] .progress-track { background: rgba(24, 44, 36, .10); }
+/* 浅色模式下白底不可见的白色半透明元素 */
+body[data-theme="light"] .mini-track { background: rgba(24, 44, 36, .10); }
+body[data-theme="light"] .skeleton { background: rgba(24, 44, 36, .05); }
+body[data-theme="light"] .skeleton::after { background: linear-gradient(100deg, transparent 20%, rgba(255, 255, 255, .8) 50%, transparent 80%); }
+body[data-theme="light"] .skeleton-lines::before,
+body[data-theme="light"] .skeleton-lines::after { background: rgba(24, 44, 36, .08); }
+body[data-theme="light"] .node-pill { background: rgba(24, 44, 36, .04); }
+body[data-theme="light"] .check-item:hover { background: rgba(24, 44, 36, .05); }
+body[data-theme="light"] .affair-card.clickable:hover { box-shadow: 0 8px 20px rgba(24, 44, 36, .12); }
 .progress-fill { display: block; height: 100%; border-radius: inherit; background: var(--stage, var(--bamboo)); }
 .progress-num { font-size: 10.5px; color: var(--ink-dim); }
 
@@ -1777,7 +1792,8 @@ body[data-theme="dark"] .btn-reject { color: #fb7185; background: rgba(251, 113,
 #memory-view { display: flex; flex-direction: column; gap: var(--gap); padding: var(--gap); min-height: 100dvh; }
 #memory-view .topbar { flex: none; }
 .memory-body { flex: 1; display: flex; flex-direction: column; gap: var(--gap); overflow-y: auto; padding-bottom: 30px; }
-.memory-body .panel { padding: 16px 18px; }
+/* flex 列容器 + .panel{overflow:hidden} 会让面板被压缩裁掉、永远滚不动——子项必须不收缩 */
+.memory-body .panel { flex: none; padding: 16px 18px; }
 .memory-body h3 { font-size: 13px; font-weight: 700; color: var(--bamboo); margin-bottom: 10px; letter-spacing: .03em; }
 .memory-md {
   font-size: 13.5px; line-height: 1.8; color: var(--ink-2);
