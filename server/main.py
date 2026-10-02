@@ -829,11 +829,13 @@ async def _chat_stream(sess, raw_message: str, ctx: dict, resume: ResumeReq | No
             except planner.PlanError:
                 plan = None
             if plan:
-                if created and affair:
+                ptitle = (plan.get("title") or "").strip()[:18]
+                if created and affair and ptitle and ptitle not in _GENERIC_TITLES:
                     # 事务名用规整后的计划名，不拿用户原句切片当标题；
-                    # 存量事务的标题不动——那是用户/管家已经叫顺了的名字
+                    # 存量事务的标题不动——那是用户/管家已经叫顺了的名字。
+                    # 模型没给标题时 planner 兜底成"筹备计划"，这种泛化名不覆盖占位标题
                     affair = await asyncio.to_thread(
-                        a_store.update, affair["id"], {"title": plan["title"][:18]},
+                        a_store.update, affair["id"], {"title": ptitle},
                         actor="butler", note="定下事务名")
                     await emit({"type": "affair", "action": "update", "affair": affair})
                 await emit({
@@ -844,26 +846,19 @@ async def _chat_stream(sess, raw_message: str, ctx: dict, resume: ResumeReq | No
                 results, statuses = await executor.run_plan(plan, sess.store, message, emit)
                 if affair:
                     # 执行链连同节点终态存进事务，详情抽屉的"DAG 回放"展示真链而非伪造
-                    # 顺带把看板标题换成规划器起的短名：它在剥掉口语尾巴后还能顺带
-                    # 去掉"我想…""要…"这类主语前缀，比原话更适合当看板标题
                     patch = {"plan": {
                         "title": plan["title"],
                         "nodes": [{"id": n["id"], "title": n["title"], "tool": n["tool"],
                                    "depends_on": n["depends_on"],
                                    "status": statuses.get(n["id"], "done")} for n in plan["nodes"]],
                     }}
-                    # 用规划器起的短名覆盖看板标题：它比原话干净（去主语前缀）。
-                    # 但模型没给标题时 planner 会兜底成"筹备计划"，拿它覆盖会把
-                    # 好标题冲掉，所以这种泛化名一律不用。
-                    ptitle = (plan.get("title") or "").strip()[:18]
-                    if ptitle and ptitle != affair.get("title") and ptitle not in _GENERIC_TITLES:
-                        patch["title"] = ptitle
                     await asyncio.to_thread(a_store.update, affair["id"], patch,
                                             actor="butler", note="执行链已存档")
                 await emit({"type": "phase", "phase": "synthesizing"})
                 card = await _card_with_fallback(
                     sess.store, message, results=results, title=plan["title"],
-                    pairs=[(n["title"], results.get(n["id"], "")) for n in plan["nodes"]])
+                    pairs=[(n["title"], results.get(n["id"], "")) for n in plan["nodes"]
+                           if statuses.get(n["id"]) != "error"])
             else:
                 await emit({"type": "phase", "phase": "synthesizing"})
                 card = await _card_with_fallback(sess.store, message, use_synth=False)
@@ -1097,6 +1092,10 @@ def _clean_affair_title(message: str) -> str:
     return t if len(t) >= 2 else "新的事"
 
 
+_SYNTH_BUDGET = 75.0   # 汇总：实测最慢 52.6s，留余量
+_DIRECT_BUDGET = 25.0  # 直出：实测 ~5s
+
+
 async def _card_with_fallback(store, message: str, *, results: dict | None = None,
                               title: str = "", pairs=(), use_synth: bool = True) -> dict:
     """出卡片的三档降级：汇总 → 单次直出 → 纯本地摊结果。
@@ -1109,15 +1108,22 @@ async def _card_with_fallback(store, message: str, *, results: dict | None = Non
     连它也没赶上，就用本地那档把节点真实结果如实摊开，末尾说明是"来不及
     整理"的版本，不假装成综合过的方案。
     """
+    # 每档给总时限：LLM_TIMEOUT 只是 httpx 单次读超时，流一直滴答或 JSON 重试一次
+    # 都能把一档拖过几分钟。孩子端等不了那么久，超时即降级。
     if use_synth:
         try:
-            return await synth.synthesize(store, message, results or {})
-        except Exception as e:  # noqa: BLE001
-            print(f"[card] 汇总失败，降级到直出：{e}")
+            return await asyncio.wait_for(
+                synth.synthesize(store, message, results or {}), _SYNTH_BUDGET)
+        except Exception as e:  # noqa: BLE001 含 TimeoutError；CancelledError 不在此列，照常上抛
+            print(f"[card] 汇总失败，降级：{e!r}")
+        if results:
+            # 已经有真实查询结果时不走直出：直出看不到这些结果，可能编出和
+            # 刚查到的车次/时间对不上的内容。直接摊真结果，降级不降真。
+            return synth.assemble_from_results(title, list(pairs))
     try:
-        return await synth.direct_card(store, message)
+        return await asyncio.wait_for(synth.direct_card(store, message), _DIRECT_BUDGET)
     except Exception as e:  # noqa: BLE001
-        print(f"[card] 直出也失败，用本地兜底：{e}")
+        print(f"[card] 直出也失败，用本地兜底：{e!r}")
     return synth.assemble_from_results(title, list(pairs))
 
 
@@ -1231,11 +1237,13 @@ async def _execute_actions(sess, a_store, affair: dict, card: dict, message: str
     if affair.get("stage") == "planning":
         if done_kinds:
             need_parent = "parent_confirm" in done_kinds
-            stage = "executing"
+            stage = "waiting" if need_parent else "executing"
             owner = "parent" if need_parent else "child"
             summary = "等家长确认" if need_parent else "管家已备好，照着做就行"
         else:
-            stage, owner, summary = "done", "child", "方案已给到，照着做就行"
+            # 没有可落地的动作（纯目标型，如"我想学钢琴"）不等于办完了：
+            # 推到执行中、球在孩子手里，别让刚开始的事从活跃看板上消失
+            stage, owner, summary = "executing", "child", "方案已给到，照着做就行"
         affair = await asyncio.to_thread(
             a_store.update, affair["id"],
             {"stage": stage, "owner_next": owner, "summary": summary},

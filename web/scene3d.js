@@ -1456,9 +1456,18 @@ function updateLabels(tms) {
     const r = labelRectAt(R.v4, c);
     if (r) taken.push({ x: r.x, y: r.y, w: r.w, h: r.h });
   }
+  // 悬停 / 聚焦的节点是用户正盯着的那一个：最先占位、不受配额和互斥限制
+  for (const ns of R.order) {
+    if (!ns.group.visible || ns.vis <= 0.3) continue;
+    if (R.hover !== ns && R.focusId !== ns.id) continue;
+    ns.wantLabel = true;
+    const r = labelRectAt(ns.p, ns);
+    if (r) taken.push({ x: r.x, y: r.y, w: r.w, h: r.h });
+  }
   // 节点标签按权重抢位
   for (let i = 0; i < cand.length && i < budget; i++) {
     const ns = cand[i];
+    if (ns.wantLabel) continue;
     const r = labelRectAt(ns.p, ns);
     if (!r) continue;
     let hit = false;
@@ -1472,7 +1481,7 @@ function updateLabels(tms) {
   for (const ns of R.order) {
     if (ns.wantLabel || bonus <= 0) continue;
     if (!ns.group.visible || ns.vis <= 0.3) continue;
-    const exempt = ns.pulseUntil > tms || R.hover === ns || R.focusId === ns.id ||
+    const exempt = ns.pulseUntil > tms ||
                    (ns.spawnedAt && tms - ns.spawnedAt < 6000);
     if (!exempt) continue;
     const r = labelRectAt(ns.p, ns);

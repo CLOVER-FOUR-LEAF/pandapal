@@ -83,7 +83,11 @@ def _drop_summary_tail(plan: dict) -> None:
     deps = set(last.get("depends_on") or [])
     others = {n["id"] for n in nodes[:-1]}
     if len(deps & others) >= 2 and len(deps & others) * 2 >= len(others):
-        nodes.pop()
+        gone = nodes.pop()["id"]
+        # 别留悬空依赖：DAG 视图会画出一条指向不存在节点的边
+        for n in nodes:
+            if gone in (n.get("depends_on") or []):
+                n["depends_on"] = [d for d in n["depends_on"] if d != gone]
 
 
 async def make_plan(store: MemoryStore, message: str, affairs_snapshot: dict | None = None) -> dict:
