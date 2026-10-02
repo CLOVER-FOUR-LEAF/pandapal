@@ -22,6 +22,14 @@ class LLMError(RuntimeError):
     pass
 
 
+class LLMVisionUnsupported(LLMError):
+    """provider 明确拒了带图的请求（多半是当前模型没有视觉能力）。
+
+    单独一个类型，是为了让上层能"去掉图片重试一次并如实告诉孩子"，
+    而不是把 400 原样抛成"管家的大脑连不上"。
+    """
+
+
 # ---------------------------------------------------------------- 共享连接池
 # 每轮对话有分类→生成→沉淀多次调用；每回新建 AsyncClient 就要重做一次 TCP+TLS
 # 握手。按事件循环复用一个带连接池的客户端（与 store.lock_for 同一套循环绑定法），
@@ -175,6 +183,54 @@ def count_images(messages: list[dict]) -> int:
     return n
 
 
+# ---------------------------------------------------------------- OpenAI 协议（图片）
+_OPENAI_IMAGE_MIME = {"image/png", "image/jpeg", "image/webp", "image/gif"}
+
+
+def _openai_messages(messages: list[dict]) -> list[dict]:
+    """把统一结构翻译成 OpenAI 的 content 数组：text + image_url(data URL)。
+
+    这一步以前是漏的：内部块 {"type":"image","data":…,"mime":…} 被原样塞进请求体，
+    而 OpenAI 兼容端点只认 {"type":"image_url","image_url":{"url":"data:…"}}——
+    于是"图片走视觉"在默认 openai 协议下从来没成立过（只有 anthropic 分支做了翻译）。
+    """
+    out: list[dict] = []
+    for msg in messages:
+        content = msg.get("content")
+        if not isinstance(content, list) or msg.get("role") == "system":
+            # 纯文本消息原样透传：不碰它的字段，避免影响非多模态链路
+            out.append({**msg, "content": content if content is not None else ""})
+            continue
+        blocks: list[dict] = []
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") == "text":
+                blocks.append({"type": "text", "text": str(part.get("text") or "")})
+            elif part.get("type") == "image":
+                mime = str(part.get("mime") or "image/png")
+                data = str(part.get("data") or "")
+                if mime not in _OPENAI_IMAGE_MIME or not data:
+                    # 冷门类型如实说明，不静默丢图（否则模型会答"图里什么都没有"）
+                    blocks.append({"type": "text", "text": f"（不支持的图片类型 {mime}，已跳过）"})
+                    continue
+                blocks.append({"type": "image_url",
+                               "image_url": {"url": f"data:{mime};base64,{data}"}})
+        out.append({**msg, "content": blocks or [{"type": "text", "text": "（这条消息没有可读内容）"}]})
+    return out
+
+
+# 这些状态码 + 请求里带图 = 几乎一定是"模型不支持视觉"，而不是网络/额度问题
+_VISION_REJECT_CODES = {400, 404, 415, 422}
+
+
+def _vision_rejected(err: Exception, messages: list[dict]) -> bool:
+    if not count_images(messages):
+        return False
+    resp = getattr(err, "response", None)
+    return resp is not None and getattr(resp, "status_code", None) in _VISION_REJECT_CODES
+
+
 def estimate_tokens(messages: list[dict]) -> int:
     """粗估 token：中文约 1 字 1 token、英文约 4 字符 1 token，图片按张折算。
 
@@ -254,7 +310,7 @@ async def complete(
                 return out
             body = {
                 "model": config.LLM_MODEL,
-                "messages": messages,
+                "messages": _openai_messages(messages),
                 "max_tokens": max_tokens,
                 "temperature": temperature,
                 "stream": False,
@@ -275,6 +331,10 @@ async def complete(
             log_call(caller, True, (time.monotonic() - t0) * 1000, tokens=toks)
             return out
         except Exception as e:  # noqa: BLE001 主备切换需要捕获一切
+            if _vision_rejected(e, messages):
+                # 换 key 也不会让模型长出眼睛：立刻上报，交给上层去掉图片重试并如实说明
+                log_call(caller, False, (time.monotonic() - t0) * 1000, f"视觉被拒: {e}")
+                raise LLMVisionUnsupported(str(e)) from e
             last_err = e
     log_call(caller, False, (time.monotonic() - t0) * 1000, str(last_err))
     raise LLMError(f"LLM 调用失败: {last_err}")
@@ -329,7 +389,7 @@ async def stream(
                 else:
                     body = {
                         "model": config.LLM_MODEL,
-                        "messages": messages,
+                        "messages": _openai_messages(messages),
                         "max_tokens": budget,
                         "temperature": temperature,
                         "stream": True,
@@ -381,6 +441,9 @@ async def stream(
             except Exception as e:  # noqa: BLE001 主备切换需要捕获一切
                 if got:
                     raise  # 已经吐了 token，换 Key 重发会让回复重复
+                if _vision_rejected(e, messages):
+                    log_call(caller, False, (time.monotonic() - t0) * 1000, f"视觉被拒: {e}")
+                    raise LLMVisionUnsupported(str(e)) from e
                 last_err = e
                 break
     log_call(caller, False, (time.monotonic() - t0) * 1000, str(last_err))
