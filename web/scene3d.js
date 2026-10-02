@@ -40,8 +40,8 @@ const BAMBOO = 0x3fae74;
 const GOLD = 0xf3c65c;
 const PLAN_COLOR = { pending: 0x5f7d78, running: AMBER, done: BAMBOO, error: 0xf07a6a };
 
-const ANCHOR_R = 8.5;
-const ANCHOR_Y = [1.4, -0.4, 0.9, -1.1, 0.2];
+const ANCHOR_R = 10.5;
+const ANCHOR_Y = [0.9, -0.5, 0.6, -0.8, 0.2];
 const RECENT_DAYS = 540;
 const FOV = 45;
 const IDLE_RESUME_MS = 20000;
@@ -51,17 +51,22 @@ const RECALL_MS = 3200;
 // 角色只决定"看得到哪些节点"，不改场景明暗（否则切视角时整屏闪）。
 const THEMES = {
   dark: {
-    top: "#0b1a1f", bottom: "#10302a", glow: "rgba(63,174,116,0.16)",
-    fog: 0x0d2224, fogD: 0.014, hemi: 0.85, hemiGround: 0x0b1a1f,
-    key: 1.9, rim: 0.9, fill: 22, env: 0.7, rough: 0.42, emiss: 1, exposure: 1.12,
-    edge: 0.34, edgeShade: 1, additive: true, bloom: 0.62, bloomT: 0.8,
-    dust: 0xa6e3c8, dustOp: 0.55, core: 0x7fd8ae, coreOp: 0.16,
-    disc: BAMBOO, discOp: 0.22, circle: 0x8fd9b6, circleOp: 0.10,
-    spoke: 0x9fd9bf, spokeOp: 0.13, haloBoost: 1,
+    top: "#02030a", bottom: "#0b0720", glow: "rgba(120,90,220,0.20)",
+    fog: 0x04050f, fogD: 0.0045, hemi: 0.42, hemiGround: 0x05060f,
+    key: 1.1, rim: 0.9, fill: 950, env: 0.25, rough: 0.78, emiss: 1, exposure: 1.05,
+    edge: 0.36, edgeShade: 1, additive: true, bloom: 0.6, bloomT: 0.8,
+    dust: 0xb9c7ff, dustOp: 0.5, core: 0xffd9a0, coreOp: 0.13,
+    disc: 0x6a5cff, discOp: 0.10, circle: 0x93a8ff, circleOp: 0.13,
+    spoke: 0xa9b8ff, spokeOp: 0.09, haloBoost: 1,
     orbit: 0.22, arc: 0xcfe9de, arcOp: 0.32,
   },
-
 };
+
+// 行星质感变体：0 气态巨行星（条纹） 1 岩质（大陆/海洋/极冠） 2 涡旋云海
+const PLANET_VARIANTS = 3;
+const GALAXY_STARS = 7000;
+const GALAXY_RADIUS = 58;
+const BACK_STARS = 1400;
 
 const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
 const easeInOut = (t) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
@@ -97,7 +102,7 @@ let initPromise = null;
 
 const STYLE_ID = "s3d-style";
 const CSS = `
-.s3d-root{position:absolute;inset:0;overflow:hidden;border-radius:inherit;background:#0b1a1f;user-select:none;-webkit-user-select:none}
+.s3d-root{position:absolute;inset:0;overflow:hidden;border-radius:inherit;background:#02030a;user-select:none;-webkit-user-select:none}
 .s3d-root>canvas{position:absolute;inset:0;display:block;width:100%;height:100%;outline:none;touch-action:none}
 .s3d-vignette{position:absolute;inset:0;pointer-events:none;background:radial-gradient(ellipse 75% 70% at 50% 46%,rgba(0,0,0,0) 55%,var(--s3d-vignette,rgba(2,9,10,.55)) 100%)}
 .s3d-css2d{position:absolute;inset:0;pointer-events:none;overflow:hidden}
@@ -110,8 +115,8 @@ const CSS = `
 .s3d-label.is-hl{border-color:var(--s3d-amber,#f0a24a);color:var(--s3d-ink-strong,#fff6ea);box-shadow:0 0 0 1px rgba(240,162,74,.35),0 0 14px rgba(240,162,74,.45)}
 .s3d-label.is-hover{border-color:rgba(232,241,236,.4)}
 .s3d-cluster{display:flex;flex-direction:column;align-items:center;gap:1px;font-family:var(--s3d-font,"PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans SC",system-ui,sans-serif);transition:opacity .35s;animation:s3d-in .4s ease-out both}
-.s3d-cluster-ch{font-size:22px;font-weight:700;line-height:1;color:var(--c);text-shadow:0 0 16px var(--c),0 1px 2px rgba(0,0,0,.5)}
-.s3d-cluster-name{font-size:10.5px;letter-spacing:.24em;padding-left:.24em;color:var(--s3d-ink,#e8f1ec);opacity:.62}
+.s3d-cluster-ch{font-size:17px;font-weight:700;line-height:1;color:var(--c);text-shadow:0 0 16px var(--c),0 1px 2px rgba(0,0,0,.5);opacity:.85}
+.s3d-cluster-name{font-size:10px;letter-spacing:.2em;padding-left:.2em;color:var(--s3d-ink,#e8f1ec);opacity:.5}
 .s3d-cluster.is-dim{opacity:.25}
 .s3d-sat{display:flex;align-items:center;gap:6px;transform:translateY(-15px);font:600 11px/1.2 var(--s3d-font,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif);color:var(--s3d-ink,#e8f1ec);white-space:nowrap;animation:s3d-in .3s ease-out both}
 .s3d-sat-n{min-width:17px;height:17px;border-radius:50%;display:grid;place-items:center;font-size:10px;background:rgba(7,20,22,.8);border:1px solid var(--c,#5f7d78);color:var(--c,#cfe)}
@@ -215,6 +220,168 @@ function makeBackground(theme) {
   });
 }
 
+// ---- 程序化行星贴图：值噪声 + fbm，按领域主色调色，三种质感 ----
+function hash2(x, y, seed) {
+  let h = (x * 374761393 + y * 668265263 + seed * 2147483647) | 0;
+  h = (h ^ (h >>> 13)) * 1274126177;
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967295;
+}
+function vnoise(x, y, seed, period) {
+  const xi = Math.floor(x), yi = Math.floor(y);
+  const xf = x - xi, yf = y - yi;
+  const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
+  const w = (i) => ((i % period) + period) % period; // 横向无缝
+  const a = hash2(w(xi), yi, seed), b = hash2(w(xi + 1), yi, seed);
+  const c = hash2(w(xi), yi + 1, seed), d = hash2(w(xi + 1), yi + 1, seed);
+  return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v;
+}
+function fbm(x, y, seed, period, oct) {
+  let amp = 0.5, f = 1, sum = 0, norm = 0;
+  for (let o = 0; o < oct; o++) {
+    sum += amp * vnoise(x * f, y * f, seed + o * 17, Math.round(period * f));
+    norm += amp; amp *= 0.5; f *= 2;
+  }
+  return sum / norm;
+}
+const mixc = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+const hexRgb = (hex) => [(hex >> 16) & 255, (hex >> 8) & 255, hex & 255];
+
+function planetTexture(hex, variant, seed) {
+  const W = 256, H = 128;
+  const c = document.createElement("canvas");
+  c.width = W; c.height = H;
+  const g = c.getContext("2d");
+  const img = g.createImageData(W, H);
+  const base = hexRgb(hex);
+  const deep = mixc(base, [8, 10, 28], 0.62);
+  const light = mixc(base, [255, 255, 255], 0.55);
+  const warm = mixc(base, [255, 214, 150], 0.45);
+  const P = 4; // 基础横向周期（整数，保证左右接缝无缝）
+  for (let y = 0; y < H; y++) {
+    const lat = y / (H - 1);                 // 0 北极 → 1 南极
+    const polar = Math.abs(lat - 0.5) * 2;   // 0 赤道 → 1 极点
+    for (let x = 0; x < W; x++) {
+      const u = (x / W) * P, v = lat * 2.2;
+      let col;
+      if (variant === 0) {                   // 气态巨行星：带状 + 湍流
+        const warp = fbm(u, v * 3, seed, P, 4) * 0.55;
+        const band = 0.5 + 0.5 * Math.sin((lat * 11 + warp * 5) * Math.PI);
+        const t = band * 0.75 + fbm(u * 2, v * 9, seed + 5, P * 2, 3) * 0.25;
+        col = t < 0.5 ? mixc(deep, base, t * 2) : mixc(base, light, (t - 0.5) * 1.6);
+      } else if (variant === 1) {            // 岩质：大陆 / 海洋 / 极冠
+        const h = fbm(u, v * 2.4, seed, P, 5);
+        if (h < 0.5) col = mixc(deep, mixc(base, deep, 0.35), h * 2);        // 海
+        else col = mixc(mixc(base, warm, 0.5), light, (h - 0.5) * 2.2);      // 陆
+        if (polar > 0.82) col = mixc(col, [240, 246, 255], clamp((polar - 0.82) * 5, 0, 0.92));
+      } else {                               // 涡旋云海
+        const w1 = fbm(u, v * 2.2, seed, P, 4);
+        const w2 = fbm(u * 2 + w1 * 2.2, v * 4.4 + w1 * 2.2, seed + 9, P * 2, 4);
+        const t = clamp(w2 * 1.25, 0, 1);
+        col = mixc(mixc(deep, base, 0.5), mixc(base, light, 0.7), t);
+      }
+      const i = (y * W + x) * 4;
+      img.data[i] = col[0]; img.data[i + 1] = col[1]; img.data[i + 2] = col[2]; img.data[i + 3] = 255;
+    }
+  }
+  g.putImageData(img, 0, 0);
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.wrapS = THREE.RepeatWrapping;
+  t.anisotropy = 4;
+  return t;
+}
+
+// 星球图鉴：同领域同变体共用贴图，避免每个节点各生成一张（disposeScene 时统一释放）
+const _planetTexCache = new Map();
+function getPlanetTex(domainKey, variant) {
+  const di = DOMAIN_KEYS.indexOf(domainKey);
+  const key = domainKey + ":" + variant;
+  let t = _planetTexCache.get(key);
+  if (!t) {
+    t = planetTexture(domainOf(domainKey).hex, variant, 3 + variant * 11 + (di < 0 ? 3 : di * 7));
+    _planetTexCache.set(key, t);
+  }
+  return t;
+}
+function hashStr(sv) {
+  let h = 2166136261;
+  for (let i = 0; i < sv.length; i++) { h ^= sv.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return h >>> 0;
+}
+
+// 大气层：菲涅尔边缘辉光（边缘最亮、正对相机处透明）
+function atmosphereMaterial(hex) {
+  return new THREE.ShaderMaterial({
+    uniforms: { uColor: { value: new THREE.Color(hex) }, uOpacity: { value: 1 } },
+    vertexShader: "varying vec3 vN; varying vec3 vV;\n" +
+      "void main(){ vec4 mv = modelViewMatrix * vec4(position,1.0); vN = normalize(normalMatrix * normal); vV = normalize(-mv.xyz); gl_Position = projectionMatrix * mv; }",
+    fragmentShader: "uniform vec3 uColor; uniform float uOpacity; varying vec3 vN; varying vec3 vV;\n" +
+      "void main(){ float f = pow(1.0 - max(dot(normalize(vN), normalize(vV)), 0.0), 2.6); gl_FragColor = vec4(uColor * (0.6 + f), f * uOpacity); }",
+    transparent: true, depthWrite: false, side: THREE.BackSide, blending: THREE.AdditiveBlending,
+  });
+}
+
+// 螺旋星系背景：对数螺旋臂 + 中心核球，顶点色按半径从暖金渐变到冷蓝紫
+function buildGalaxy(glowTex) {
+  const N = GALAXY_STARS;
+  const pos = new Float32Array(N * 3), col = new Float32Array(N * 3);
+  const inner = new THREE.Color(0xffd9a0), mid = new THREE.Color(0xc9a8ff), outer = new THREE.Color(0x6fa3ff);
+  const tmp = new THREE.Color();
+  const ARMS = 4;
+  for (let i = 0; i < N; i++) {
+    const bulge = Math.random() < 0.22;
+    const r = bulge ? Math.pow(Math.random(), 2.2) * 9 : 6 + Math.pow(Math.random(), 0.8) * (GALAXY_RADIUS - 6);
+    const arm = Math.floor(Math.random() * ARMS);
+    const spin = r * 0.11;
+    const spread = (bulge ? 1.6 : 0.5 + r * 0.045) * (Math.random() + Math.random() - 1);
+    const a = (arm / ARMS) * Math.PI * 2 + spin + (bulge ? Math.random() * 6.28 : spread * 0.12);
+    const jx = (Math.random() - 0.5) * (bulge ? 3 : 1.4 + r * 0.05);
+    const jz = (Math.random() - 0.5) * (bulge ? 3 : 1.4 + r * 0.05);
+    pos[i * 3] = Math.cos(a) * r + jx + spread * Math.cos(a + 1.57);
+    pos[i * 3 + 1] = (Math.random() - 0.5) * (bulge ? 4.2 : 1.2) * (1 - Math.min(1, r / GALAXY_RADIUS) * 0.6) - 0.3;
+    pos[i * 3 + 2] = Math.sin(a) * r + jz + spread * Math.sin(a + 1.57);
+    const t = clamp(r / GALAXY_RADIUS, 0, 1);
+    tmp.copy(t < 0.4 ? inner.clone().lerp(mid, t / 0.4) : mid.clone().lerp(outer, (t - 0.4) / 0.6));
+    const br = 0.45 + Math.random() * 0.55;
+    col[i * 3] = tmp.r * br; col[i * 3 + 1] = tmp.g * br; col[i * 3 + 2] = tmp.b * br;
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+  geo.setAttribute("color", new THREE.BufferAttribute(col, 3));
+  const mat = new THREE.PointsMaterial({
+    size: 0.9, map: glowTex, vertexColors: true, transparent: true, opacity: 0.85,
+    depthWrite: false, blending: THREE.AdditiveBlending, sizeAttenuation: true, fog: false,
+  });
+  const pts = new THREE.Points(geo, mat);
+  pts.rotation.x = 0.12;
+  return pts;
+}
+
+// 远景星空：球壳上均匀撒点，大小/亮度各异
+function buildBackStars(glowTex) {
+  const N = BACK_STARS;
+  const pos = new Float32Array(N * 3), col = new Float32Array(N * 3);
+  const tmp = new THREE.Color();
+  const tints = [0xffffff, 0xcfe0ff, 0xffe9c8, 0xd9c8ff];
+  for (let i = 0; i < N; i++) {
+    const r = 150 + Math.random() * 120;
+    const th = Math.random() * Math.PI * 2, ph = Math.acos(2 * Math.random() - 1);
+    pos[i * 3] = r * Math.sin(ph) * Math.cos(th);
+    pos[i * 3 + 1] = r * Math.cos(ph);
+    pos[i * 3 + 2] = r * Math.sin(ph) * Math.sin(th);
+    tmp.setHex(tints[(Math.random() * tints.length) | 0]);
+    const b = 0.25 + Math.pow(Math.random(), 3) * 0.9;
+    col[i * 3] = tmp.r * b; col[i * 3 + 1] = tmp.g * b; col[i * 3 + 2] = tmp.b * b;
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+  geo.setAttribute("color", new THREE.BufferAttribute(col, 3));
+  return new THREE.Points(geo, new THREE.PointsMaterial({
+    size: 1.6, map: glowTex, vertexColors: true, transparent: true, opacity: 0.9,
+    depthWrite: false, blending: THREE.AdditiveBlending, sizeAttenuation: true, fog: false,
+  }));
+}
+
 // additive 材质登记处（夜色竹林的发光光晕统一走 AdditiveBlending）。
 // R 建好之前创建的材质（如领域簇 halo）先存 early，R 初始化时并入。
 const _earlyAdditive = [];
@@ -244,7 +411,7 @@ function anchorOf(key, out) {
 
 function radiusOf(w) {
   const x = Number(w);
-  return 0.2 + 0.085 * Math.sqrt(Number.isFinite(x) && x > 0 ? Math.min(x, 400) : 1);
+  return 0.42 + 0.13 * Math.sqrt(Number.isFinite(x) && x > 0 ? Math.min(x, 400) : 1);
 }
 
 function timeOf(s) {
@@ -385,15 +552,15 @@ function build(container, hiddenCanvas, OrbitControls, CSS2D, pandaMod, post) {
   root.appendChild(tip);
   container.appendChild(root);
 
-  renderer.setClearColor(0x0b1a1f, 1);
+  renderer.setClearColor(0x02030a, 1);
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.12;
 
   // ---- 场景 ----
   const scene = new THREE.Scene();
-  const camera = new THREE.PerspectiveCamera(FOV, 1, 0.1, 400);
-  camera.position.set(0, 9, 30);
+  const camera = new THREE.PerspectiveCamera(FOV, 1, 0.1, 600);
+  camera.position.set(0, 12, 34);
   const tex = makeTextures();
   const bgTex = { dark: makeBackground(THEMES.dark) };
   scene.background = bgTex.dark;
@@ -409,16 +576,16 @@ function build(container, hiddenCanvas, OrbitControls, CSS2D, pandaMod, post) {
     } catch (_) { envTex = null; }
   }
 
-  const hemi = new THREE.HemisphereLight(0xcdeee2, THEMES.dark.hemiGround, THEMES.dark.hemi);
+  const hemi = new THREE.HemisphereLight(0x9fb4ff, THEMES.dark.hemiGround, THEMES.dark.hemi);
   scene.add(hemi);
-  const key = new THREE.DirectionalLight(0xfff4e0, 1.9);   // 月光主光（暖白）
+  const key = new THREE.DirectionalLight(0xdfe6ff, 1.1);   // 月光主光（暖白）
   key.position.set(6, 12, 9);
   scene.add(key);
-  const rim = new THREE.DirectionalLight(0x8fe0bc, 0.9);   // 冷绿轮廓光
+  const rim = new THREE.DirectionalLight(0x8a6cff, 0.9);   // 冷绿轮廓光
   rim.position.set(-8, 3, -10);
   scene.add(rim);
-  const fill = new THREE.PointLight(0xf0a24a, 22, 30, 1.8); // 暖色底光（灯笼感）
-  fill.position.set(0, -4.2, 6);
+  const fill = new THREE.PointLight(0xffc98a, 950, 0, 2); // 暖色底光（灯笼感）
+  fill.position.set(0, 0.6, 0);
   scene.add(fill);
 
   // 中心"星球"柔光核：远处看是一颗微光星球
@@ -435,16 +602,16 @@ function build(container, hiddenCanvas, OrbitControls, CSS2D, pandaMod, post) {
 
   // 地台：柔光圆盘 + 同心圆
   const ground = new THREE.Group();
-  ground.position.y = -6.5;
+  ground.position.y = -0.3;
   const discMat = new THREE.MeshBasicMaterial({
     map: tex.glow, color: THEMES.dark.disc, transparent: true, opacity: THEMES.dark.discOp,
     blending: THREE.AdditiveBlending, depthWrite: false, fog: false,
   });
-  const disc = new THREE.Mesh(new THREE.PlaneGeometry(34, 34), discMat);
+  const disc = new THREE.Mesh(new THREE.PlaneGeometry(46, 46), discMat);
   disc.rotation.x = -Math.PI / 2;
   ground.add(disc);
   const circleMat = new THREE.LineBasicMaterial({ color: THEMES.dark.circle, transparent: true, opacity: THEMES.dark.circleOp, depthWrite: false });
-  for (const r of [6, 10.5, 15]) {
+  for (const r of [5, 10.5, 16, 22]) {
     const pts = [];
     for (let i = 0; i <= 96; i++) {
       const a = (i / 96) * Math.PI * 2;
@@ -473,6 +640,11 @@ function build(container, hiddenCanvas, OrbitControls, CSS2D, pandaMod, post) {
   });
   const dust = new THREE.Points(dustGeo, dustMat);
   scene.add(dust);
+  // 银河：螺旋臂星盘（缓慢自转）+ 远景星空球壳
+  const galaxy = buildGalaxy(tex.glow);
+  scene.add(galaxy);
+  const backStars = buildBackStars(tex.glow);
+  scene.add(backStars);
 
   // 中心到五领域的虚线辐条
   const spokeMat = new THREE.LineDashedMaterial({ color: THEMES.dark.spoke, dashSize: 0.35, gapSize: 0.45, transparent: true, opacity: THEMES.dark.spokeOp, depthWrite: false });
@@ -520,7 +692,7 @@ function build(container, hiddenCanvas, OrbitControls, CSS2D, pandaMod, post) {
   const edgeMat = new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, depthWrite: false });
 
   // 共享几何
-  const sphereGeo = new THREE.SphereGeometry(1, 28, 20);
+  const sphereGeo = new THREE.SphereGeometry(1, 40, 26);
   const satGeo = new THREE.IcosahedronGeometry(1, 1);
 
   // ---- 控制 ----
@@ -531,7 +703,7 @@ function build(container, hiddenCanvas, OrbitControls, CSS2D, pandaMod, post) {
   controls.zoomSpeed = 0.8;
   controls.panSpeed = 0.7;
   controls.minDistance = 4;
-  controls.maxDistance = 70;
+  controls.maxDistance = 96;
   controls.maxPolarAngle = Math.PI * 0.86;
   controls.autoRotate = true;
   controls.autoRotateSpeed = 0.45;
@@ -539,7 +711,7 @@ function build(container, hiddenCanvas, OrbitControls, CSS2D, pandaMod, post) {
 
   R = {
     container, hiddenCanvas, restorePos, root, canvas, renderer, css2d, CSS2D, tip,
-    scene, camera, controls, world, tex, bgTex, hemi, key, rim, fill, core, ground, dust, spokes, clusters,
+    scene, camera, controls, world, tex, bgTex, hemi, key, rim, fill, core, ground, dust, galaxy, backStars, spokes, clusters,
     discMat, circleMat, spokeMat, dustMat, coreMat,
     additive: new Set([coreMat, discMat, dustMat, ..._earlyAdditive]),
     composer: null, bloom: null, envTex, pmrem,
@@ -977,6 +1149,13 @@ function createNodeState(n) {
   const th = THEMES[R.theme] || THEMES.dark;
   const mat = new THREE.MeshStandardMaterial({ roughness: th.rough, metalness: 0.08, transparent: true, envMapIntensity: th.env });
   const mesh = new THREE.Mesh(R.sphereGeo, mat);
+  const variant = hashStr(String(n.id)) % PLANET_VARIANTS;
+  const atmoMat = atmosphereMaterial(0xffffff);
+  const atmo = new THREE.Mesh(R.sphereGeo, atmoMat);
+  atmo.scale.setScalar(1.16);
+  mesh.add(atmo);
+  const spin = 0.05 + ((hashStr(String(n.id) + 's') % 100) / 100) * 0.14;
+  mesh.rotation.z = ((hashStr(String(n.id) + 't') % 100) / 100 - 0.5) * 0.7;
   mesh.userData.nid = n.id;
   group.add(mesh);
   const halo = new THREE.Sprite(regAdditive(new THREE.SpriteMaterial({
@@ -996,7 +1175,7 @@ function createNodeState(n) {
   group.visible = false;
   R.world.add(group);
   return {
-    id: n.id, data: n, group, mesh, mat, halo, label, el, txt,
+    id: n.id, data: n, group, mesh, mat, halo, label, el, txt, atmo, atmoMat, spin, variant, tint: new THREE.Color(),
     ring: null, priv: null,
     p: new THREE.Vector3(), v: new THREE.Vector3(),
     mob: 1, r: 0.4, rec: 1, baseOpacity: 1, emissBase: 0.2,
@@ -1019,9 +1198,13 @@ function styleNode(ns) {
   const dropped = n.status === "dropped";
   const c = R.col.setHex(d.hex);
   if (dropped) c.lerp(R.gray, 0.65);
-  ns.mat.color.copy(c);
-  ns.mat.emissive.copy(c);
-  ns.emissBase = dropped ? 0.12 : 0.22 + 0.6 * ns.rec;
+  ns.tint.copy(c);
+  const ptex = getPlanetTex(DOMAINS[n.domain] ? n.domain : 'ethics', ns.variant);
+  if (ns.mat.map !== ptex) { ns.mat.map = ptex; ns.mat.emissiveMap = ptex; ns.mat.needsUpdate = true; }
+  ns.mat.color.set(dropped ? 0x7d8b99 : 0xffffff);
+  ns.mat.emissive.set(0xffffff);
+  ns.emissBase = n.id === R.selfId ? 0.85 : dropped ? 0.05 : 0.07 + 0.2 * ns.rec;
+  ns.atmoMat.uniforms.uColor.value.copy(c);
   ns.mat.emissiveIntensity = ns.emissBase * (THEMES[R.theme] || THEMES.dark).emiss;
   ns.baseOpacity = dropped ? 0.42 : 1;
   ns.halo.material.color.copy(c);
@@ -1074,7 +1257,7 @@ function simTick() {
       D.subVectors(a.p, b.p);
       let d2 = D.lengthSq();
       if (d2 < 0.0001) { D.set(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5); d2 = 0.01; }
-      const minD = (a.r + b.r) * 1.6;
+      const minD = (a.r + b.r) * 2.0;
       const f = (5.5 * alpha) / Math.max(d2, 0.25) + (d2 < minD * minD ? 0.25 * alpha : 0);
       const inv = f / Math.sqrt(d2);
       a.v.addScaledVector(D, inv * a.mob);
@@ -1275,16 +1458,18 @@ function renderFrame(dt) {
     const hov = R.hover === ns ? 1 : 0;
     const s = ns.r * ap * (0.35 + 0.65 * ns.vis) * (1 + 0.18 * pulse + 0.1 * hov);
     ns.mesh.scale.setScalar(s);
+    ns.mesh.rotation.y += dt * ns.spin;
     const op = ns.baseOpacity * ns.vis * ns.dim;
     ns.mat.opacity = op;
     ns.mat.depthWrite = op > 0.9;
     ns.mesh.visible = op > 0.01;
+    ns.atmoMat.uniforms.uOpacity.value = 0.85 * op;
     const breathe = 1 + 0.06 * Math.sin(time * 1.6 + ns.p.x);
     ns.halo.scale.setScalar(s * (4.2 + 2.4 * pulse + hov) * breathe);
     if (pulse > 0) {
-      ns.halo.material.color.copy(ns.mat.color).lerp(R.amber, 0.6 * pulse);
+      ns.halo.material.color.copy(ns.tint).lerp(R.amber, 0.6 * pulse);
     } else if (ns.haloTinted) {
-      ns.halo.material.color.copy(ns.mat.color);
+      ns.halo.material.color.copy(ns.tint);
     }
     ns.haloTinted = pulse > 0;
     ns.halo.material.opacity = Math.min(1, (ns.haloBase + 0.5 * pulse + 0.2 * hov) * ns.vis * ns.dim * R.haloBoost);
@@ -1321,6 +1506,8 @@ function renderFrame(dt) {
   updateBursts(dt);
 
   R.dust.rotation.y += dt * 0.01;
+  R.galaxy.rotation.y += dt * 0.006;
+  R.backStars.rotation.y -= dt * 0.002;
 
   // 悬停拾取
   if (R.pointer.dirty && !R.dragging) {
@@ -1378,8 +1565,8 @@ function updateEdges(tms, time) {
     const vis = Math.min(a.vis, b.vis) * Math.min(a.appear, b.appear);
     const dim = Math.min(a.dim, b.dim);
     let alpha = base * (0.55 + 0.08 * e.w) * vis * dim;
-    ca.copy(a.mat.color);
-    cb.copy(b.mat.color);
+    ca.copy(a.tint);
+    cb.copy(b.tint);
     if (R.edgeShade !== 1) { ca.multiplyScalar(R.edgeShade); cb.multiplyScalar(R.edgeShade); }
     if (e.hlUntil > tms) {
       const rem = Math.min(1, ((e.hlUntil - tms) / RECALL_MS) * 3);
@@ -1531,6 +1718,7 @@ function reapNodes() {
 function disposeNode(ns) {
   R.world.remove(ns.group);
   ns.mat.dispose();
+  ns.atmoMat.dispose();
   ns.halo.material.dispose();
   if (ns.ring) ns.ring.material.dispose();
   if (ns.priv) ns.priv.material.dispose();
@@ -1711,7 +1899,8 @@ function fitDistance(radius) {
 function fitOverview(instant) {
   if (!R) return;
   const c = new THREE.Vector3();
-  const r = visibleBounds(c);
+  // 兜底半径：图谱未加载完（或只剩一两个节点）时也框住整个银河盘，否则相机贴脸、其余星球出画。
+  const r = Math.max(visibleBounds(c), ANCHOR_R + 3);
   const dist = fitDistance(r);
   const dir = new THREE.Vector3(0, 0.42, 1);
   if (instant) {
@@ -2054,7 +2243,7 @@ export const attachTo = safe(function attachTo(el, mode) {
   R.w = -1; // 强制重算尺寸
   measure();
   updateRunning();
-  if (mode === "graph") fitOverview(false);
+  fitOverview(mode !== "graph");
   return true;
 });
 
@@ -2225,6 +2414,9 @@ export const disposeScene = safe(function disposeScene() {
     if (S.envTex) S.envTex.dispose();
     if (S.pmrem) S.pmrem.dispose();
   } catch (_) {}
+  // 行星贴图由缓存共享，统一释放
+  for (const t of _planetTexCache.values()) t.dispose();
+  _planetTexCache.clear();
   for (const t of Object.values(S.tex)) t.dispose();
   for (const t of Object.values(S.bgTex)) t.dispose();
   try { S.renderer.dispose(); S.renderer.forceContextLoss(); } catch (_) {}
