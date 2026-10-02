@@ -75,18 +75,34 @@ def log_call(caller: str, ok: bool, ms: float, err: str = "") -> None:
         pass
 
 
-def read_logs(limit: int = 50) -> list[dict]:
+def read_logs(limit: int = 50, offset: int = 0) -> dict:
+    """按页读调用留痕（新→旧）：offset=0 取最新 limit 条，offset 往历史翻。
+
+    返回 {"calls","total","limit","offset"}。limit 夹在 1..200，offset 夹在 >=0，
+    挡住 `?limit=999999` 这类把整份日志拉爆内存的请求。
+    """
+    try:
+        limit = max(1, min(int(limit), 200))
+    except (TypeError, ValueError):
+        limit = 50
+    try:
+        offset = max(0, int(offset))
+    except (TypeError, ValueError):
+        offset = 0
     try:
         lines = (LOG_DIR / "llm_calls.jsonl").read_text(encoding="utf-8").splitlines()
     except OSError:
-        return []
+        return {"calls": [], "total": 0, "limit": limit, "offset": offset}
+    total = len(lines)
+    end = total - offset
+    start = max(0, end - limit)
     out = []
-    for line in lines[-limit:]:
+    for line in lines[start:end] if end > 0 else []:
         try:
             out.append(json.loads(line))
         except json.JSONDecodeError:
             continue
-    return out
+    return {"calls": out, "total": total, "limit": limit, "offset": offset}
 
 
 def _keys() -> list[str]:

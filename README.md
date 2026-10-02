@@ -85,10 +85,16 @@ cp .env.example .env   # 然后填入你的 LLM_API_KEY 等
 ## 七、测试说明
 
 ```bash
-# 服务启动后：
+# 服务启动后（打真实接口 + 真实 LLM）：
 .venv/bin/python tests/test_api.py --base http://localhost:8000
+
+# 不联网、不花钱的离线自检（monkeypatch LLM，指向临时沙箱，不碰真实 data/）：
+.venv/bin/python tests/test_offline.py
 ```
-覆盖：健康检查、登录、问候、闲聊流式、规划链全链路（plan→node→card）、记忆本、记忆沉淀落盘、双会话并发隔离。
+`test_api.py` 覆盖：健康检查、登录/注册/找回、问候（含 SSE 流式）、闲聊流式、规划链全链路（plan→node→card）、
+记忆本与沉淀落盘、图谱（含家长视角过滤 + 时间轴切片）、事务详情/更新（POST/PATCH）、清单、家长收件箱、
+传话筒、日历导出、成长雷达、梦想、日志分页、双会话并发隔离与权限矩阵。
+`test_offline.py` 覆盖：上述主链路的离线版（SSE 事件顺序、悄悄话隔离、账号越权防线、executor 作用域）。
 
 ## 八、团队成员
 

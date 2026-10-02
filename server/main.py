@@ -38,7 +38,7 @@ from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -57,6 +57,10 @@ app = FastAPI(title="PandaButler", docs_url=None, redoc_url=None, lifespan=_life
 
 @app.middleware("http")
 async def _security_headers(request: Request, call_next):
+    # 基础体积防护：字段级 max_length 之外再兜一道，挡住把超大 JSON 灌进来的请求
+    length = request.headers.get("content-length")
+    if length and length.isdigit() and int(length) > 256_000:
+        return JSONResponse({"detail": "请求体太大啦"}, status_code=413)
     resp = await call_next(request)
     resp.headers["X-Content-Type-Options"] = "nosniff"
     resp.headers["Referrer-Policy"] = "same-origin"
@@ -109,6 +113,24 @@ class AffairReq(BaseModel):
     data: dict | None = None   # 兼容旧调用方
 
 
+class AffairPatchReq(BaseModel):
+    """PATCH /api/affairs/{aid}：顶层字段与 `patch` 二选一，契约 §2.6 的语义。"""
+
+    name: str = Field(default="", max_length=24)
+    note: str = Field(default="", max_length=200)
+    patch: dict | None = None
+    title: str | None = Field(default=None, max_length=60)
+    kind: str | None = Field(default=None, max_length=20)
+    stage: str | None = Field(default=None, max_length=20)
+    due: str | None = Field(default=None, max_length=20)
+    owner_next: str | None = Field(default=None, max_length=20)
+    summary: str | None = Field(default=None, max_length=400)
+    progress: dict | None = None
+    checklist_id: str | None = Field(default=None, max_length=60)
+    linked_nodes: list[str] | None = None
+    actions: list[dict] | None = None
+
+
 class ChecklistReq(BaseModel):
     name: str = Field(default="", max_length=24)
     index: int
@@ -134,6 +156,31 @@ class DreamReq(BaseModel):
 
 def _sse(event: dict) -> str:
     return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+
+_SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+
+
+async def _stream_text(messages: list[dict], *, max_tokens: int, caller: str,
+                       done: dict | None = None, fallback: str = ""):
+    """把一次 LLM 补全转成 SSE：逐 token 下发，末尾补一个 done 事件（可夹带本地数据）。
+
+    晨报/问候的首屏等待全压在 LLM 上，逐字下发配合前端扫描动画能把等待盖住。
+    LLM 失败或一个 token 都没吐时，用 fallback（基于本地数据的实话）整段补偿，
+    绝不回 500——此时响应头早已发出，抛错只会让前端拿到半截流。
+    """
+    got: list[str] = []
+    try:
+        async for tok in llm.stream(messages, max_tokens=max_tokens, caller=caller):
+            got.append(tok)
+            yield _sse({"type": "token", "text": tok})
+    except Exception as e:  # noqa: BLE001 流已开始，只能用兜底文本收尾
+        print(f"[{caller}] 流式失败，已降级：{e}")
+    text = "".join(got) or fallback
+    if not got and fallback:
+        for i in range(0, len(fallback), 12):
+            yield _sse({"type": "token", "text": fallback[i:i + 12]})
+    yield _sse({"type": "done", "text": text, **(done or {})})
 
 
 async def _get_session(name: str):
@@ -330,22 +377,27 @@ async def api_session(request: Request, req: SessionReq):
 
 
 @app.get("/api/greeting")
-async def api_greeting(request: Request, name: str = ""):
+async def api_greeting(request: Request, name: str = "", stream: bool = False):
     _, sess = await _auth_session(request, "greeting", name)
     _, a, _ = _stores(sess)
     block, brief, reminders = await asyncio.to_thread(
         lambda: (sess.store.active_block(), _affairs_brief(a), sess.store.due_reminders()))
+    messages = [{"role": "user", "content": prompts.GREETING.format(
+        name=sess.name,
+        now=_now_text(),
+        affairs_brief=brief,
+        memory_block=block or "（还没有记忆，这是第一次见面）",
+    )}]
+    fallback = f"早呀，{sess.name}！今天有什么想聊的？我一直都在。"
+    if stream:
+        # opt-in 流式：`?stream=1` 走 SSE 逐字下发，默认仍返回 JSON（契约 §4 不变）
+        return StreamingResponse(
+            _stream_text(messages, max_tokens=600, caller="greeting",
+                         done={"reminders": reminders, "name": sess.name},
+                         fallback=fallback),
+            media_type="text/event-stream", headers=_SSE_HEADERS)
     try:
-        text = await llm.complete(
-            [{"role": "user", "content": prompts.GREETING.format(
-                name=sess.name,
-                now=datetime.now().strftime("%Y-%m-%d %H:%M 星期") + "一二三四五六日"[datetime.now().weekday()],
-                affairs_brief=brief,
-                memory_block=block or "（还没有记忆，这是第一次见面）",
-            )}],
-            max_tokens=600,
-            caller="greeting",
-        )
+        text = await llm.complete(messages, max_tokens=600, caller="greeting")
     except llm.LLMError as e:
         raise HTTPException(502, f"LLM 暂不可用：{e}")
     return {"text": text.strip(), "reminders": reminders, "name": sess.name}
@@ -425,38 +477,49 @@ def _briefing_collect(a: affairs.AffairStore, g: graph.GraphStore, m: memory.Mem
     }
 
 
+def _briefing_fallback(name: str, snapshot: dict, due: list[dict]) -> str:
+    """晨报 LLM 不可用时的兜底：只用本地数据说实话，不伪造生成。"""
+    text = f"早，{name}！我替你盯着 {len(snapshot['affairs'])} 件事。" + (
+        f"最近要紧的是：{due[0]['title']}。" if due else "")
+    if not due and not snapshot["affairs"]:
+        text = f"早，{name}！今天还没有要盯的事，有事随时叫我。"
+    return text
+
+
 @app.get("/api/briefing")
-async def api_briefing(request: Request, name: str = ""):
+async def api_briefing(request: Request, name: str = "", stream: bool = False):
     _, sess = await _auth_session(request, "briefing", name)
     g, a, m = _stores(sess)
     data = await asyncio.to_thread(_briefing_collect, a, g, m)
     snapshot, due = data["snapshot"], data["due"]
-
-    try:
-        text = await llm.complete(
-            [{"role": "user", "content": prompts.BRIEFING.format(
-                name=sess.name,
-                now=datetime.now().strftime("%Y-%m-%d %H:%M 星期") + "一二三四五六日"[datetime.now().weekday()],
-                affairs_brief=data["affairs_brief"],
-                due_brief=data["due_brief"],
-                memory_block=data["mem_block"] or "（暂无记忆）",
-            )}],
-            max_tokens=800,
-            caller="briefing",
-        )
-    except llm.LLMError as e:
-        # 晨报失败不影响界面：给一句基于本地数据的兜底
-        text = f"早，{sess.name}！我替你盯着 {len(snapshot['affairs'])} 件事。" + (f"最近要紧的是：{due[0]['title']}。" if due else "")
-        if not due and not snapshot["affairs"]:
-            text = f"早，{sess.name}！今天还没有要盯的事，有事随时叫我。"
-        print(f"[briefing] LLM 不可用，已降级：{e}")
-
-    return {
-        "text": text.strip(),
+    messages = [{"role": "user", "content": prompts.BRIEFING.format(
+        name=sess.name,
+        now=_now_text(),
+        affairs_brief=data["affairs_brief"],
+        due_brief=data["due_brief"],
+        memory_block=data["mem_block"] or "（暂无记忆）",
+    )}]
+    payload = {
         "affairs": snapshot["board"],
         "due_soon": due,
         "suggestions": data["suggestions"],
     }
+    if stream:
+        # opt-in 流式：先逐字出正文，done 事件再带看板/截止/建议，首屏从"整段等"变"边出边看"
+        return StreamingResponse(
+            _stream_text(messages, max_tokens=800, caller="briefing",
+                         done=payload,
+                         fallback=_briefing_fallback(sess.name, snapshot, due)),
+            media_type="text/event-stream", headers=_SSE_HEADERS)
+
+    try:
+        text = await llm.complete(messages, max_tokens=800, caller="briefing")
+    except llm.LLMError as e:
+        # 晨报失败不影响界面：给一句基于本地数据的兜底
+        text = _briefing_fallback(sess.name, snapshot, due)
+        print(f"[briefing] LLM 不可用，已降级：{e}")
+
+    return {"text": text.strip(), **payload}
 
 
 # ---------------------------------------------------------------- 对话主流程
@@ -958,13 +1021,30 @@ async def api_chat(request: Request, req: ChatReq):
 
 # ---------------------------------------------------------------- 图谱 / 事务 / 清单
 
+def _graph_view(user: dict, view: str) -> str:
+    """显式归一图谱视角：家长强制 parent；其余只认 child，未知值一律按 parent 过滤。
+
+    契约 §4 要求 `view` 只认 child|parent，其余按 parent；把判定从 GraphStore.export
+    内部的隐式分支提到入口，行为可读、可测，也不怕前端漏传/传错。
+    """
+    if user["role"] == "parent":
+        return "parent"  # 家长视角的私密过滤在服务端强制，不信客户端参数
+    return "child" if view == "child" else "parent"
+
+
 @app.get("/api/graph")
 async def api_graph(request: Request, name: str = "", view: str = "child"):
     user, sess = await _auth_session(request, "graph", name)
-    if user["role"] == "parent":
-        view = "parent"  # 家长视角的私密过滤在服务端强制，不信客户端参数
     g, _, _ = _stores(sess)
-    return await asyncio.to_thread(g.export, view=view)
+    return await asyncio.to_thread(g.export, view=_graph_view(user, view))
+
+
+@app.get("/api/graph/snapshot")
+async def api_graph_snapshot(request: Request, name: str = "", view: str = "child", until: str = ""):
+    """旧契约 §2.6 的时间轴切片：until=YYYY-MM 只返回该时间点前已出现的节点/边。"""
+    user, sess = await _auth_session(request, "graph", name)
+    g, _, _ = _stores(sess)
+    return await asyncio.to_thread(g.snapshot, until, _graph_view(user, view))
 
 
 @app.get("/api/affairs")
@@ -998,6 +1078,29 @@ async def api_affair_detail(request: Request, aid: str, name: str = ""):
     if affair is None:
         raise HTTPException(404, "事务不存在")
     return {"affair": affair}
+
+
+@app.patch("/api/affairs/{aid}")
+async def api_affair_patch(request: Request, aid: str, req: AffairPatchReq):
+    """旧契约 §2.6 的 PATCH：局部更新事务（stage/note/progress/owner_next/…）。
+
+    顶层字段与 `patch` 字典都收，显式字段优先；空 patch 直接 400，避免静默 no-op。
+    """
+    _, sess = await _auth_session(request, "affairs_write", req.name)
+    _, a, _ = _stores(sess)
+    patch = dict(req.patch or {})
+    for key in ("title", "kind", "stage", "due", "owner_next", "summary",
+                "progress", "checklist_id", "linked_nodes", "actions"):
+        value = getattr(req, key)
+        if value is not None:
+            patch[key] = value
+    if not patch:
+        raise HTTPException(400, "没有要更新的字段")
+    try:
+        return {"affair": await asyncio.to_thread(
+            a.update, aid, patch, actor="user", note=req.note or "看板更新")}
+    except ValueError as e:  # 非法 stage 等 → 400
+        raise HTTPException(400, str(e))
 
 
 @app.get("/api/checklist/{cid}")
@@ -1245,10 +1348,13 @@ async def api_history(request: Request, name: str = ""):
 
 
 @app.get("/api/logs")
-async def api_logs(request: Request, limit: int = 50):
-    """LLM 调用日志：评委可据此核验全部输出为真实生成。仅 admin。"""
+async def api_logs(request: Request, limit: int = 50, offset: int = 0):
+    """LLM 调用日志：评委可据此核验全部输出为真实生成。仅 admin。
+
+    limit/offset 做分页（上限 200/页），日志再长也不会一次全拉。
+    """
     _need(_user(request), "logs")
-    return {"calls": await asyncio.to_thread(llm.read_logs, min(limit, 200))}
+    return await asyncio.to_thread(llm.read_logs, limit, offset)
 
 
 @app.get("/api/health")
