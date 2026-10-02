@@ -1,0 +1,31 @@
+PASS  js_ids_exist_in_html  缺失=[]
+PASS  icons_defined  缺失=[]
+PASS  app.js_braces  {=862 }=862
+PASS  style.css_braces  {=863 }=863
+PASS  app.js_parens  (=2860 )=2860
+PASS  index.html_parens  (=3 )=3
+PASS  pause_btn_in_inputbar  
+PASS  pause_btn_before_send  
+PASS  pause_btn_not_floating  
+PASS  pause_btn_outside_media  depth=0
+PASS  send_hidden_when_busy  
+PASS  pause_wired  
+PASS  esc_pauses  
+PASS  esc_ignores_ime  
+PASS  resume_is_explicit  
+PASS  resume_chip  
+PASS  offline_bar  
+PASS  offline_wired  
+PASS  retry_entry  
+PASS  degraded_note  
+PASS  degraded_greeting_not_in_chat  
+PASS  state_has_chatAbort  
+PASS  state_has_chatPaused  
+PASS  state_has_chatCtx  
+PASS  state_has_chatResume  
+PASS  reset_clears_chatAbort  
+PASS  reset_clears_chatPaused  
+PASS  reset_clears_chatCtx  
+PASS  reset_clears_chatResume  
+
+29/29 通过

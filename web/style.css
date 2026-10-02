@@ -876,6 +876,12 @@ body[data-theme="dark"] #panda-bubble::after {
 /* --------------------------- 7 左栏：晨报/看板/截止条/迷你图 */
 .briefing-text { font-size: 13.2px; line-height: 1.7; color: var(--ink-2); white-space: pre-wrap; }
 .briefing-text + .briefing-text { margin-top: 6px; }
+/* 大模型不可用时的本地兜底标记：明示"非 AI 生成" */
+.degraded-note {
+  display: inline-block; margin: 4px 0 6px; padding: 2px 8px; border-radius: 999px;
+  font-size: 11.5px; line-height: 1.6; color: var(--ink-2);
+  border: 1px dashed currentColor; opacity: .85;
+}
 .chip-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
 
 /* 临近截止：看板头下的横向倒计时条（原独立面板合并进来） */
@@ -1652,6 +1658,32 @@ body[data-theme="dark"] .btn-reject { color: #fb7185; background: rgba(251, 113,
   border-radius: 0 var(--r-sm) var(--r-sm) 0;
 }
 
+/* 家长周报：在收件箱/传话筒上方，按需生成，内容多时自身滚动不挤压下面两栏 */
+#weekly-panel { flex: none; }
+#weekly-panel .panel-head { flex-wrap: wrap; }
+.weekly-out { padding: 4px 18px 16px; max-height: 42vh; overflow-y: auto; }
+.weekly-headline { font-size: 15.5px; font-weight: 700; color: var(--ink); line-height: 1.6; margin: 6px 0 10px; }
+.weekly-stats { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.weekly-stat {
+  font-size: 12px; color: var(--ink-dim);
+  padding: 5px 11px; border-radius: 999px;
+  background: var(--card-2); border: 1px solid var(--line-strong);
+}
+.weekly-stat b { color: var(--bamboo); font-size: 14px; margin-right: 3px; font-variant-numeric: tabular-nums; }
+.weekly-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.weekly-sec-head { font-size: 12px; font-weight: 750; letter-spacing: .06em; color: var(--bamboo-deep); margin-bottom: 6px; }
+.weekly-sec.is-watch .weekly-sec-head { color: var(--amber); }
+.weekly-sec ul { margin: 0; padding-left: 18px; }
+.weekly-sec li { font-size: 13.5px; color: var(--ink-2); line-height: 1.7; }
+.weekly-praise { font-size: 13.5px; color: var(--ink-2); margin: 10px 0 0; }
+.weekly-foot { font-size: 11.5px; color: var(--ink-dim); margin: 10px 0 0; }
+#memory-view .topbar #export-btn { margin-left: 10px; }
+@media (max-width: 720px) {
+  .weekly-grid { grid-template-columns: 1fr; }
+  #memory-view .topbar #export-btn { margin-left: 0; }
+  #parent-view .seg { flex-wrap: wrap; border-radius: var(--r); }
+}
+
 /* --------------------------- 13 成长视图 */
 #growth-view { display: flex; flex-direction: column; gap: var(--gap); padding: var(--gap); min-height: 100dvh; }
 #growth-view .topbar { flex: none; }
@@ -1915,6 +1947,116 @@ body[data-theme="dark"] .btn-reject { color: #fb7185; background: rgba(251, 113,
 @keyframes panda-bounce-slow { 0%, 100% { transform: translateY(0); } 40% { transform: translateY(-8px); } }
 @keyframes panda-tilt { 0%, 100% { transform: rotate(0); } 50% { transform: rotate(-5deg); } }
 @keyframes panda-shake { 20%, 60% { transform: translateX(-5px) rotate(-2deg); } 40%, 80% { transform: translateX(5px) rotate(2deg); } }
+
+/* ---------------------------------------- 后台管理 */
+.admin-wrap {
+  max-width: 1180px; margin: 14px auto 40px; padding: 0 16px;
+  display: flex; flex-direction: column; gap: 12px;
+}
+.admin-tabs { align-self: center; flex-wrap: wrap; }
+.admin-pane { display: flex; flex-direction: column; gap: 12px; }
+.admin-pane.hidden { display: none; }
+.hint.bad { color: var(--bad); }
+
+.admin-cards {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px;
+}
+.admin-card {
+  padding: 16px 18px; border-radius: var(--r-lg);
+  background: var(--card); border: 1px solid var(--line);
+  box-shadow: var(--shadow-card);
+  display: flex; flex-direction: column; gap: 4px;
+}
+.ac-title { font-size: 12px; color: var(--ink-dim); }
+.ac-value { font-size: 22px; font-weight: 750; color: var(--ink); font-family: var(--font-num); }
+.ac-sub { font-size: 11.5px; color: var(--ink-faint); word-break: break-all; }
+
+.admin-sub { padding-bottom: 14px; }
+.admin-sub .panel-head h3 { font-size: 14px; }
+.kv-row {
+  display: flex; align-items: center; gap: 12px;
+  padding: 9px 18px;
+}
+.kv-row + .kv-row { border-top: 1px solid var(--line); }
+.kv-label {
+  flex: none; width: 210px; display: flex; align-items: center; gap: 8px;
+  font-size: 12px; color: var(--ink-2);
+}
+.kv-label code { font-family: var(--font-num); font-size: 11.5px; }
+.kv-input { flex: 1; display: flex; align-items: center; gap: 8px; min-width: 0; }
+.kv-input .text-input { font-size: 13px; padding: 8px 12px; border-radius: var(--r-sm); }
+.kv-btn { flex: none; font-size: 12px; padding: 6px 12px; }
+.kv-btn.danger, .btn-ghost.danger { color: var(--bad); }
+.kv-btn.danger:hover { border-color: var(--bad); }
+.tag.src-settings { color: var(--amber); }
+.tag.src-env { color: var(--bamboo); }
+.tag.src-default { color: var(--ink-dim); }
+.tag.src-unset { color: var(--bad); }
+.tag.tag-child { color: var(--bamboo); }
+.tag.tag-parent { color: var(--dom-intellect); }
+.tag.tag-admin { color: var(--amber); }
+
+.admin-table {
+  border-radius: var(--r-lg); overflow: hidden;
+  background: var(--card); border: 1px solid var(--line);
+  box-shadow: var(--shadow-card);
+}
+.admin-row {
+  display: grid; grid-template-columns: minmax(90px, 1.2fr) minmax(70px, .8fr) minmax(80px, 1fr) minmax(60px, .6fr) minmax(40px, .5fr) auto;
+  align-items: center; gap: 10px;
+  padding: 10px 18px; font-size: 13px; color: var(--ink-2);
+  width: 100%; text-align: left;
+}
+.admin-row + .admin-row, .admin-row + .admin-edit-row { border-top: 1px solid var(--line); }
+.admin-row-head { font-size: 11.5px; color: var(--ink-faint); font-weight: 650; }
+button.admin-row:hover, .admin-pick:hover { background: var(--card-2); }
+.admin-pick { grid-template-columns: minmax(90px, 1.2fr) minmax(80px, 1fr) minmax(80px, 1fr) minmax(70px, .7fr); cursor: pointer; }
+.admin-pick.active { background: rgba(95, 211, 155, .08); }
+.au-name { font-weight: 650; color: var(--ink); }
+.au-ops { display: inline-flex; gap: 6px; justify-content: flex-end; }
+.admin-edit-row {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  padding: 12px 18px; background: var(--card-2);
+}
+.admin-edit-row .text-input { width: auto; flex: 1; min-width: 140px; font-size: 13px; padding: 8px 12px; border-radius: var(--r-sm); }
+.admin-edit-row select.text-input { flex: 0 1 auto; }
+.au-drop { font-size: 12px; color: var(--ink-dim); display: inline-flex; align-items: center; }
+.admin-form {
+  display: flex; flex-wrap: wrap; gap: 10px; padding: 14px 18px;
+}
+.admin-form .text-input { flex: 1; min-width: 150px; font-size: 13px; padding: 9px 12px; border-radius: var(--r-sm); }
+.admin-form .btn { flex: none; }
+
+.admin-split { display: grid; grid-template-columns: minmax(280px, 5fr) minmax(0, 7fr); gap: 12px; align-items: start; }
+.af-files { max-height: 260px; overflow-y: auto; }
+.af-file {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  width: 100%; text-align: left; padding: 8px 18px; font-size: 12.5px;
+}
+.af-file + .af-file { border-top: 1px solid var(--line); }
+.af-file:hover { background: var(--card-2); }
+.af-file.active { background: rgba(95, 211, 155, .08); }
+.af-file code { font-family: var(--font-num); font-size: 11.5px; color: var(--ink-2); word-break: break-all; }
+.af-meta { flex: none; font-size: 11px; color: var(--ink-faint); font-family: var(--font-num); }
+.af-editor { display: flex; flex-direction: column; gap: 8px; padding: 12px 18px 16px; }
+.af-editor.hidden { display: none; }
+.af-editor-bar { display: flex; align-items: center; gap: 8px; }
+.af-editor-bar .btn { font-size: 12.5px; padding: 7px 16px; }
+.af-path { font-family: var(--font-num); font-size: 12px; color: var(--bamboo); word-break: break-all; }
+.af-text {
+  min-height: 300px; resize: vertical;
+  font-family: var(--font-num); font-size: 12px; line-height: 1.6;
+  white-space: pre; padding: 12px;
+}
+
+@media (max-width: 899px) {
+  .admin-split { grid-template-columns: 1fr; }
+  .admin-row { grid-template-columns: minmax(80px, 1fr) minmax(60px, .7fr) minmax(70px, .8fr) auto; }
+  .admin-row > :nth-child(4), .admin-row-head > :nth-child(4) { display: none; }
+  .admin-row > :nth-child(5), .admin-row-head > :nth-child(5) { display: none; }
+  .kv-row { flex-direction: column; align-items: stretch; gap: 6px; }
+  .kv-label { width: auto; }
+}
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .001s !important; transition-duration: .001s !important; }

@@ -33,6 +33,7 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import json
+import mimetypes
 import re
 import time
 from contextlib import asynccontextmanager
@@ -52,6 +53,8 @@ async def _lifespan(_app: FastAPI):
     yield
     await llm.close_shared_clients()
 
+
+mimetypes.add_type("application/manifest+json", ".webmanifest")  # PWA 清单，默认会被当成 octet-stream
 
 app = FastAPI(title="PandaButler", docs_url=None, redoc_url=None, lifespan=_lifespan)
 
@@ -198,21 +201,25 @@ async def _stream_text(messages: list[dict], *, max_tokens: int, caller: str,
     """把一次 LLM 补全转成 SSE：逐 token 下发，末尾补一个 done 事件（可夹带本地数据）。
 
     晨报/问候的首屏等待全压在 LLM 上，逐字下发配合前端扫描动画能把等待盖住。
-    LLM 失败或一个 token 都没吐时，用 fallback（基于本地数据的实话）整段补偿，
+    LLM 失败或一个 token 都没吐时，用 fallback（基于本地数据的实话）收尾，
     绝不回 500——此时响应头早已发出，抛错只会让前端拿到半截流。
+
+    兜底文本**不走 token 事件**、不做逐字动画，只放在 done 里并标 `degraded: true`：
+    前端据此打上"大模型暂不可用"标记，绝不让本地兜底看起来像 AI 在实时生成。
     """
     got: list[str] = []
+    err = ""
     try:
         async for tok in llm.stream(messages, max_tokens=max_tokens, caller=caller):
             got.append(tok)
             yield _sse({"type": "token", "text": tok})
     except Exception as e:  # noqa: BLE001 流已开始，只能用兜底文本收尾
+        err = str(e)[:120]
         print(f"[{caller}] 流式失败，已降级：{e}")
-    text = "".join(got) or fallback
-    if not got and fallback:
-        for i in range(0, len(fallback), 12):
-            yield _sse({"type": "token", "text": fallback[i:i + 12]})
-    yield _sse({"type": "done", "text": text, **(done or {})})
+    degraded = not got
+    text = "".join(got) if got else fallback
+    extra = {"degraded": True, "degraded_reason": err or "大模型没有返回内容"} if degraded else {}
+    yield _sse({"type": "done", "text": text, **extra, **(done or {})})
 
 
 async def _get_session(name: str):
@@ -456,7 +463,8 @@ async def api_greeting(request: Request, name: str = "", stream: bool = False):
         affairs_brief=brief,
         memory_block=block or "（还没有记忆，这是第一次见面）",
     )}]
-    fallback = f"早呀，{sess.name}！今天有什么想聊的？我一直都在。"
+    # 兜底只说实话：AI 不可用就明说，不冒充一句生成的问候
+    fallback = f"{sess.name}，管家暂时连不上大模型，问候稍后再补上～"
     if stream:
         # opt-in 流式：`?stream=1` 走 SSE 逐字下发，默认仍返回 JSON（契约 §4 不变）
         return StreamingResponse(
@@ -587,14 +595,16 @@ async def api_briefing(request: Request, name: str = "", stream: bool = False):
                          fallback=_briefing_fallback(sess.name, snapshot, due)),
             media_type="text/event-stream", headers=_SSE_HEADERS)
 
+    degraded = False
     try:
         text = await llm.complete(messages, max_tokens=800, caller="briefing")
     except llm.LLMError as e:
-        # 晨报失败不影响界面：给一句基于本地数据的兜底
+        # 晨报失败不影响界面：给一句基于本地数据的兜底，并显式标记降级
         text = _briefing_fallback(sess.name, snapshot, due)
+        degraded = True
         print(f"[briefing] LLM 不可用，已降级：{e}")
 
-    return {"text": text.strip(), **payload}
+    return {"text": text.strip(), "degraded": degraded, **payload}
 
 
 # ---------------------------------------------------------------- 对话主流程
@@ -1570,6 +1580,24 @@ async def api_health():
 async def index():
     return FileResponse(config.WEB_DIR / "index.html")
 
+
+@app.get("/sw.js")
+async def service_worker():
+    """PWA service worker 必须从根路径下发，作用域才能覆盖整个应用；no-cache 保证升级及时生效。"""
+    return FileResponse(config.WEB_DIR / "sw.js", media_type="text/javascript",
+                        headers={"Cache-Control": "no-cache"})
+
+
+# 家庭侧服务（周报 / 通知落地 / 导出）与后台管理都在独立模块里，复用本文件的鉴权辅助，
+# 故放在末尾挂载。两个模块都按需（请求时）取本文件的辅助函数，不用顶层 import——
+# 否则 `python -m server.main` 会把 server.main 二次导入，触发循环导入启动失败。
+from .family import router as _family_router  # noqa: E402
+
+app.include_router(_family_router)
+
+from .admin import router as _admin_router  # noqa: E402
+
+app.include_router(_admin_router)
 
 app.mount("/static", StaticFiles(directory=config.WEB_DIR), name="static")
 

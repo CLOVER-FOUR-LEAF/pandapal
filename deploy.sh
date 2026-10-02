@@ -16,6 +16,7 @@ rsync -avz --delete \
   --exclude='.DS_Store' --exclude='*.log' \
   --exclude='data/logs/' --exclude='data/users.json' \
   --exclude='data/tokens.json' --exclude='data/profiles.json' \
+  --exclude='data/settings.json' \
   --exclude='history.json' \
   --include='data/child_xiaodou/***' --exclude='data/child_*' \
   ./ "${REMOTE}:${APP_DIR}/"

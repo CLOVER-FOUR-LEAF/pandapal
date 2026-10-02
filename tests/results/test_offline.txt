@@ -1,0 +1,81 @@
+PASS  login  {'token': 'a8a8935a0523ac7d456d3052af7e2afae9573fdc433f65fa', 'username': 'admin
+PASS  session  {'name': 'test_离线', 'is_new': True, 'child': 'test_离线', 'graph_nodes': 0, 'affai
+PASS  briefing  我盯着几件事，最要紧的是比赛。
+PASS  plan_sse_order  events=['mode', 'affair', 'affair', 'plan', 'node', 'node', 'node', 'node', 'action', 'action', 'action', 'action', 'affair', 'card', 'done', 'memory', 'suggest']
+PASS  plan_sse_fields  mode=plan nodes=2 actions=['reminder', 'reminder', 'checklist', 'parent_confirm']
+PASS  actions_ran  ['reminder', 'reminder', 'checklist', 'parent_confirm']
+PASS  memory_event  {'type': 'memory', 'added_nodes': [{'id': 'n_76a71442', 'label': '机器人比赛', 'domai
+PASS  affair_created  affairs=1
+PASS  checklist_persisted  cid=我报名了机器人比赛帮我准备_pack
+PASS  checklist_linked  linked=我报名了机器人比赛帮我准备
+PASS  plan_archived  nodes=2
+PASS  inbox_persisted  items=1
+PASS  reminder_persisted  reminders=2
+PASS  graph_node_added  nodes=1
+PASS  daily_written  daily=1
+PASS  draft_action  ok=True title=离线自我介绍
+PASS  drafts_list  drafts=1
+PASS  draft_detail  
+PASS  draft_linked  linked=我报名了机器人比赛帮我写一份自我介绍
+PASS  draft_persisted  
+PASS  secret_marked  {'type': 'memory', 'added_nodes': [{'id': 'n_86a0ebdc', 'label': '秘密心事', 'domain
+PASS  private_isolation  child=True parent=False bad=False
+PASS  secret_not_in_files  
+PASS  history_persisted  entries=6 secret=True
+PASS  history_restored  restored=6
+PASS  bad_stage_400  status=400
+PASS  checklist_404  status=404
+PASS  parent_login  
+PASS  parent_checklist_403  status=403
+PASS  parent_affairs_403  status=403
+PASS  parent_chat_403  status=403
+PASS  parent_read_ok  status=200
+PASS  parent_inbox_allowed  status=404
+PASS  alias_login_ok  status=200 user=小豆
+PASS  alias_no_bypass  status=401
+PASS  alias_register_blocked  status=400
+PASS  slug_collision_users  statuses=True,200
+PASS  dir_collision_split  ['child_a_b', 'child_a_b_2']
+PASS  dir_owner_distinct  ['a.b', 'a_b']
+PASS  query_token_rejected  status=401
+PASS  ics_query_token_ok  status=404
+PASS  chat_rate_limit  codes=30x200 tail=429
+PASS  exec_ancestor_scope  s_ctx=根/甲/乙ok
+PASS  tools_registry  tools=['now', 'race_lookup', 'transport_lookup', 'weather', 'web_browse', 'web_search']
+PASS  tools_planner_aligned  VALID_TOOLS=['llm', 'now', 'race_lookup', 'transport_lookup', 'weather', 'web_browse', 'web_search']
+PASS  tool_now_format  现在是 2026-10-03 00:54，星期六（本地时间）
+PASS  tool_now_tz  tz=现在是 2026-10-03 00:54，星期六（Asia/ bad=时区「不存在的时区」不认得——可以写 A
+PASS  tool_unknown_raises  KeyError
+PASS  tool_bing_parse  [{'title': '结果一', 'url': 'https://a.cn/x', 'snippet': '摘要一'}, {'title': '结果二', 'url': 'https://b.cn'
+PASS  tool_bing_rss_parse  [{'title': '条目甲', 'url': 'https://a.cn/1', 'snippet': '描述甲加粗'}, {'title': '条目乙', 'url': 'https://b.c
+PASS  tool_bing_rss_badxml  坏 XML 安静返回空
+PASS  tool_html_extract  title=测试页 body=标题
+第一段
+第二段
+PASS  tool_ssrf_guard  localhost/内网拦、公网放
+PASS  tool_might_need  漏判=[] 误判=[]
+PASS  tool_describe  查交通「威海→西安」
+PASS  growth  dims=5
+PASS  dream_invite  {'text': 'dream 的离线回复', 'llm': True}
+PASS  relay  {'direction': 'child2teacher', 'message': '', 'advice': ''}
+PASS  affair_patch  status=200 stage=waiting
+PASS  affair_patch_empty_400  status=400
+PASS  graph_snapshot  early=0 late=2
+PASS  logs_pagination  total=0 limit=5
+PASS  logs_limit_clamped  limit=200
+PASS  greeting_stream  events=['token', 'token', 'done']
+PASS  briefing_stream  events=['token', 'token', 'done']
+[greeting] 流式失败，已降级：离线自检：模拟断网
+PASS  greeting_degraded_flag  events=['done'] degraded=True
+[briefing] 流式失败，已降级：离线自检：模拟断网
+PASS  briefing_degraded_flag  events=['done'] degraded=True
+[briefing] LLM 不可用，已降级：离线自检：模拟断网
+PASS  briefing_degraded_json  degraded=True
+PASS  briefing_not_degraded_when_live  degraded=False
+PASS  security_headers  csp=y vendor_cache=public, max-age=86400, immutable
+PASS  xff_trust  
+PASS  inbox_decide  status=200 item=approved stage=followup
+PASS  affair_dedup_claim  claimed=我报名了机器人比赛帮我准备 want=我报名了机器人比赛帮我准备
+PASS  affair_dedup_new  new=周末想去露营需要带啥
+
+74/74 通过

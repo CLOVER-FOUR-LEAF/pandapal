@@ -64,6 +64,10 @@ cp .env.example .env   # 然后填入你的 LLM_API_KEY 等
 | 工具脚手架（声明式注册表，@tool 注册即接入 planner/executor/闲聊通道）：看时间 `now` / 本地赛事库 `race_lookup` / 交通参考 `transport_lookup` / wttr.in 天气 `weather` / 联网搜索 `web_search`（Tavily 兼容端点，未配置则必应网页解析兜底）/ 打开网页 `web_browse` | `server/tools.py` |
 | 闲聊直答的工具轮：启发式命中 → 调度器挑工具 → 结果注入 system → 流式回复（`tool` SSE 事件驱动前端工具条） | `server/main.py` `_tool_round` + `server/prompts.py` `TOOL_PICK` |
 | 记忆本页：主题分组+时间线+长期记忆 | `web/` + `GET /api/memory` |
+| 家长周报（本周事务进展+新变化统计→LLM 写成一页纸；悄悄话只计数不进 prompt；LLM 挂了只报统计） | `server/family.py` `GET /api/parent/weekly` |
+| 通知落地「一份通知，千家千版」：学校/机构通知 → 按孩子记忆出专属版 + 自动建事务/清单/提醒；admin 可批量下发 | `server/family.py` `POST /api/notice` |
+| 童年备忘录导出：整份档案打包 zip 交还孩子（家长 403） | `server/family.py` `GET /api/export` |
+| PWA：可添加到主屏幕；断网时档案类数据用缓存撑起，AI 端点不缓存（缓存键按 token 隔离） | `web/sw.js` + `web/manifest.webmanifest` |
 
 **降级不降真**：DAG 规划失败 → 单 LLM 直出卡片（跳过拆解展示，绝不跳过生成）；节点失败 → 标记后继续；联网工具失败/没搜到 → 如实告诉孩子"没查到"，不编造结果。
 
@@ -86,12 +90,17 @@ cp .env.example .env   # 然后填入你的 LLM_API_KEY 等
 
 ## 七、测试说明
 
+**最近一次全量运行记录（场景 / 输入 / 预期 / 实际 + 真实 LLM 调用留痕 + 断网验真）见 [`tests/RESULTS.md`](tests/RESULTS.md)**，原始输出在 `tests/results/`。
+
 ```bash
 # 不花 Key 的离线自检（monkeypatch LLM，指向临时沙箱，不碰真实 data/）：
 .venv/bin/python tests/test_offline.py
 
 # 记忆层自检：不联网不起服务，直接打 MemoryStore 读写
 .venv/bin/python tests/test_memory.py
+
+# 家庭侧服务离线自检：周报/通知落地/批量下发/导出 + 悄悄话不进 prompt + 越权 403
+.venv/bin/python tests/test_family.py
 
 # 前端静态一致性：id/图标/括号配平，暂停键与断网条等关键钩子是否接上
 .venv/bin/python tests/test_web_static.py
@@ -120,5 +129,7 @@ cp .env.example .env   # 然后填入你的 LLM_API_KEY 等
 PandaButler 团队（西客松 · AI 软件赛道）
 
 ## Roadmap（路演话术）
+
+新形态与新业态详见 [`docs/新形态与新业态.md`](docs/新形态与新业态.md)（PWA ✅ · 通知落地 ✅ · 家长周报 ✅ · 童年备忘录 ✅ · IM 渠道/撮合/升学素材 🗺）。
 
 APP/手表/电子宠物形态 · 家长端/老师端 · 企业接口直连（订票等真实操作）· 常驻主动规划 · 私有化部署（数据即文件，孩子数据不出自家服务器）

@@ -572,6 +572,35 @@ async def _run(client: httpx.AsyncClient) -> None:
            and "suggestions" in bdone,
            f"events={btypes}")
 
+    # 10b. 断网验真：LLM 全挂时晨报/问候只给本地兜底，且必须显式标 degraded、
+    #      不走 token 事件（不许把兜底文本伪装成 AI 逐字生成）
+    async def _dead_stream(*a, **k):
+        raise llm.LLMError("离线自检：模拟断网")
+        yield  # pragma: no cover  让它成为异步生成器
+
+    async def _dead_complete(*a, **k):
+        raise llm.LLMError("离线自检：模拟断网")
+
+    live_stream, live_complete = llm.stream, llm.complete
+    llm.stream, llm.complete = _dead_stream, _dead_complete
+    try:
+        for ep in ("greeting", "briefing"):
+            ev = await get_sse(client, f"/api/{ep}{q}&stream=1")
+            types = _types(ev)
+            done = next((e for e in ev if e["type"] == "done"), {})
+            record(f"{ep}_degraded_flag",
+                   "token" not in types and done.get("degraded") is True
+                   and bool(done.get("text")),
+                   f"events={types} degraded={done.get('degraded')}")
+        b = await get_json(client, f"/api/briefing{q}")
+        record("briefing_degraded_json", b.get("degraded") is True and bool(b.get("text")),
+               f"degraded={b.get('degraded')}")
+    finally:
+        llm.stream, llm.complete = live_stream, live_complete
+    b = await get_json(client, f"/api/briefing{q}")
+    record("briefing_not_degraded_when_live", b.get("degraded") is False,
+           f"degraded={b.get('degraded')}")
+
     # 11. 安全/缓存响应头：CSP 收口 'self'；vendor 依赖 immutable 长缓存
     r = await client.get("/")
     csp = r.headers.get("content-security-policy", "")

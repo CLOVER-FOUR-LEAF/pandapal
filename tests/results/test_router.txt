@@ -1,0 +1,22 @@
+PASS  continuation:接着说  
+PASS  continuation:继续说完  
+PASS  continuation:接着上面继续说  
+PASS  continuation:往下说  
+PASS  continuation:继续  
+PASS  continuation:接着说吧！  
+PASS  continuation:然后呢？  
+PASS  not_continuation:帮我准备下周的比  
+PASS  not_continuation:什么是利息  
+PASS  not_continuation:我今天有点难过  
+PASS  not_continuation:  
+PASS  not_continuation:我想接着说说下周  
+PASS  not_continuation:接着上面的，明天  
+PASS  not_continuation:继续练钢琴好累  
+PASS  long_text_not_continuation  len=86
+PASS  continuation_intent_chat  {'intent': 'chat', 'mood': 'normal', 'affair_id': None, 'reason': '续写指令'}
+PASS  continuation_skips_llm  llm 调用=0
+PASS  fallback_new_affair  
+PASS  fallback_chat  
+PASS  router_prompt_has_rule  
+
+20/20 通过

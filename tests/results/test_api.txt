@@ -1,0 +1,27 @@
+PASS  health  llm_configured=True
+PASS  no_token_401  status=401
+PASS  login_child  role=child
+PASS  login_bad_pw  status=401
+PASS  login_parent_admin  parent=parent admin=admin
+PASS  greeting  小豆，周六的机器人课又要见到你啦，巡线小车调得怎么样了？对了，西安的车票方案妈妈确认了没——记得把还在吃的感冒药也塞进背
+PASS  chat_stream  reply=嗨，小豆。
+
+我认得你，你不用重新介绍自己的。
+
+就是啊，这会儿都快一点啦。咱俩
+PASS  plan_chain  nodes=5 done=5 card=yes
+PASS  memory  topics=6
+PASS  memory_written  daily=4
+PASS  isolation_403  parent_chat=403 parent_logs=403 child_inbox=403 cross=403
+PASS  parent_filter  inbox=200 graph=200 leaked_private=0 admin_graph=200
+PASS  parent_readonly  cl=403 affairs_post=403 affairs_get=200
+PASS  endpoints_matrix  detail=200 cl=200 ics=200 suggest=200 growth=200 briefing=200 dream=200 logs=200
+PASS  endpoints_matrix2  detail=200 patch=200 snap=200/200 logs=200 relay=200
+PASS  stream_briefing_greeting  greeting=[token×47, done] briefing=[token×97, done]
+PASS  register_reset  reg=200 dup=400 q=200 wrong=400 reset=200 old_tk=401 old_pw=401
+PASS  register_parent  parent=200 orphan=400
+PASS  history_relay  hist=16 relay=200
+PASS  inbox_decide_route  status=404
+PASS  concurrent  sessions=['评测员B', '小豆'] guest_new=True
+
+21/21 通过

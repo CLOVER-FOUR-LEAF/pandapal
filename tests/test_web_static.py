@@ -90,6 +90,10 @@ def test_wiring() -> None:
            and ".offline-bar" in css)
     record("offline_wired", "setupOfflineBar();" in js)
     record("retry_entry", "retryableError" in js and ".msg.sys.retryable" in css)
+    # 断网验真：兜底文本必须带"非 AI 生成"标记，且兜底问候不得写进聊天区
+    record("degraded_note", "function degradedNote" in js and ".degraded-note" in css
+           and js.count("degradedNote(") >= 4)
+    record("degraded_greeting_not_in_chat", 'data && data.degraded ? "" : text' in js)
 
 
 def test_pause_state_hygiene() -> None:
