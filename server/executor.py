@@ -16,6 +16,7 @@ async def _run_llm_node(ctx: tuple[str, str], event: str, node: dict, results: d
     return await llm.complete(
         [{"role": "user", "content": prompts.NODE_LLM.format(
             name=name,
+            now=tools.now_text(),
             event=event,
             title=node["title"],
             task=node["args"].get("task", node["title"]),

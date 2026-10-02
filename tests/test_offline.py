@@ -3,6 +3,7 @@
 用法：.venv/bin/python tests/test_offline.py
 覆盖：登录 → briefing → plan 全链路 SSE 事件顺序（§5：mode→recall?→affair→plan→
       node*→action*→card→done→memory）→ 记忆/事务落盘（清单回挂、执行链存档）→
+      代办文书 draft（写稿→落盘 drafts.json→draft_ids 挂回事务→/api/drafts 可读）→
       悄悄话 private 强制（即使模型漏标）→ graph 视角白名单 → 家长写权限 403 →
       非法 stage 400。
 数据目录用 PANDA_DATA_DIR 指向一次性沙箱，真实 data/ 一个字节都不碰。
@@ -74,6 +75,8 @@ async def fake_complete_json(messages, *, max_tokens=1200, caller="unknown"):
             {"heading": "提醒事项", "items": ["前一天早睡", "赛前复查装备"]},
             {"heading": "携带清单", "items": ["学生证", "笔记本电脑", "保温杯"]},
         ]}
+    if caller == "draft":
+        return {"title": "离线自我介绍", "body": "大家好，我是小豆，每周六上午都上机器人课。"}
     if caller == "extract_graph":
         # 模板本身含 [[secret]] 字样，必须只看"孩子："那一行里的用户原话
         secret = "[[secret]]" in content.rsplit("孩子：", 1)[-1]
@@ -235,6 +238,35 @@ async def _run(client: httpx.AsyncClient) -> None:
            f"nodes={len(g.get('nodes', []))}")
     daily_files = list((CHILD_DIR / "daily").glob("*.md")) if (CHILD_DIR / "daily").is_dir() else []
     record("daily_written", len(daily_files) >= 1, f"daily={len(daily_files)}")
+
+    # 4b. 代办文书：draft 动作真写稿 → SSE 回执带全文 → 落盘 drafts.json → 挂回事务
+    devs = await post_sse(client, "/api/chat",
+                          {"name": NAME, "message": "我报名了机器人比赛，帮我写一份自我介绍"})
+    dacts = [e for e in devs if e.get("type") == "action" and e.get("kind") == "draft"]
+    dpl = (dacts[0].get("payload") or {}) if dacts else {}
+    record("draft_action",
+           bool(dacts) and dacts[0].get("ok") is True
+           and bool(dpl.get("body")) and bool(dpl.get("draft_id")),
+           f"ok={dacts[0].get('ok') if dacts else '无'} title={dpl.get('title')}")
+    if dpl.get("draft_id"):
+        drs = await get_json(client, f"/api/drafts{q}")
+        record("drafts_list",
+               any(d.get("id") == dpl["draft_id"] for d in drs.get("drafts", [])),
+               f"drafts={len(drs.get('drafts', []))}")
+        one = await get_json(client, f"/api/drafts/{dpl['draft_id']}{q}")
+        record("draft_detail", one.get("draft", {}).get("body") == dpl["body"])
+        aff2 = await get_json(client, f"/api/affairs{q}")
+        linked = [a for a in aff2.get("affairs", [])
+                  if dpl["draft_id"] in (a.get("draft_ids") or [])]
+        record("draft_linked", len(linked) == 1,
+               f"linked={linked[0]['id'] if linked else '无'}")
+        dfile = json.loads((CHILD_DIR / "drafts.json").read_text(encoding="utf-8")) \
+            if (CHILD_DIR / "drafts.json").exists() else {}
+        record("draft_persisted",
+               any(d.get("id") == dpl["draft_id"] for d in dfile.get("drafts", [])))
+    else:
+        for n in ("drafts_list", "draft_detail", "draft_linked", "draft_persisted"):
+            record(n, False, "无 draft action")
 
     # 5. 悄悄话：private 节点只在 child 视角可见（含 view=非parent 不泄露的白名单校验）
     sevs = await post_sse(client, "/api/chat",

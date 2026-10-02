@@ -2,9 +2,8 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import date
 
-from . import llm, prompts
+from . import llm, prompts, tools
 from .memory import MemoryStore
 
 
@@ -36,6 +35,7 @@ async def synthesize(store: MemoryStore, event: str, results: dict[str, str]) ->
             {"role": "user", "content": prompts.SYNTH.format(
                 name=name,
                 event=event,
+                now=tools.now_text(),
                 memory_block=mem or "（暂无记忆）",
                 results=results_text,
             )},
@@ -55,7 +55,7 @@ async def direct_card(store: MemoryStore, event: str) -> dict:
             {"role": "user", "content": prompts.CARD_DIRECT.format(
                 name=name,
                 event=event,
-                today=date.today().isoformat(),
+                now=tools.now_text(),
                 memory_block=mem or "（暂无记忆）",
             )},
         ],
