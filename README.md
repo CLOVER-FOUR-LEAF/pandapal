@@ -64,6 +64,7 @@ cp .env.example .env   # 然后填入你的 LLM_API_KEY 等
 | 工具脚手架（声明式注册表，@tool 注册即接入 planner/executor/闲聊通道）：看时间 `now` / 本地赛事库 `race_lookup` / 交通参考 `transport_lookup` / wttr.in 天气 `weather` / 联网搜索 `web_search`（Tavily 兼容端点，未配置则必应网页解析兜底）/ 打开网页 `web_browse` | `server/tools.py` |
 | 闲聊直答的工具轮：启发式命中 → 调度器挑工具 → 结果注入 system → 流式回复（`tool` SSE 事件驱动前端工具条） | `server/main.py` `_tool_round` + `server/prompts.py` `TOOL_PICK` |
 | 记忆本页：主题分组+时间线+长期记忆 | `web/` + `GET /api/memory` |
+| 多模态附件：上传图片/PDF/Word/Excel/文本（拖拽或点选），图片走视觉、文档抽取正文进上下文 | `server/files.py` + `POST /api/files` |
 
 **降级不降真**：DAG 规划失败 → 单 LLM 直出卡片（跳过拆解展示，绝不跳过生成）；节点失败 → 标记后继续；联网工具失败/没搜到 → 如实告诉孩子"没查到"，不编造结果。
 
@@ -102,6 +103,9 @@ cp .env.example .env   # 然后填入你的 LLM_API_KEY 等
 # 续写指令路由：暂停后点「继续」发来的话必须走闲聊直答，不能误建事务
 .venv/bin/python tests/test_router.py
 
+# 多模态附件：类型识别/内容抽取/配额/提示注入围栏/两种协议的图片消息/上传接口
+.venv/bin/python tests/test_files.py
+
 # 服务启动后的端到端用例（真实打接口 + 真实 LLM）：
 .venv/bin/python tests/test_api.py --base http://localhost:8000
 ```
@@ -113,7 +117,10 @@ cp .env.example .env   # 然后填入你的 LLM_API_KEY 等
 撞档隔离 → query token 收窄 → 限频 → 历史落盘与重启恢复 → 收件箱裁决联动 → 事务去重 → 安全/缓存响应头。
 `test_memory.py` 覆盖：注入字符预算与活跃主题择优、检索相关度/门槛/去重、归档累计计数与行数上限、读缓存写后失效。
 `test_web_static.py` / `test_pause_layout.py` 覆盖：前端 id/图标引用与括号配平、"暂停键在输入栏内且与发送键同位置"、
-窄屏可见、断网条与「重试/继续」入口都接上了；`test_router.py` 覆盖续写指令的路由（不误建事务、跳过多余的 LLM 分类调用）。
+窄屏可见、断网条与「重试/继续」入口、附件入口与文件卡都接上了；`test_router.py` 覆盖续写指令的路由（不误建事务、跳过多余的 LLM 分类调用）。
+`test_files.py` 覆盖：扩展名/MIME 识别与文件名消毒（路径穿越只留在展示名里）、文本/GBK/CSV/Word/Excel/PDF 取正文、
+扫描件如实告知读不出、图片压缩到 1280 长边并保持 16 倍数、附件配额淘汰最旧、正文注入的字符预算与 `<file_data>` 围栏、
+OpenAI/Anthropic 两种协议的图片消息构造、上传接口的 415/413/400/403/404 边界、带附件的一轮对话（含悄悄话不带附件）。
 
 ## 八、团队成员
 

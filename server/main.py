@@ -31,19 +31,21 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import ipaddress
 import json
 import re
 import time
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
+from urllib.parse import quote
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import (actions, affairs, auth, config, executor, graph, llm, memory, planner,
+from . import (actions, affairs, auth, config, executor, files, graph, llm, memory, planner,
                prompts, router, sessions, store, suggest, synth, tools)
 
 
@@ -136,6 +138,8 @@ class ChatReq(BaseModel):
     name: str = Field(default="", max_length=24)
     message: str = Field(min_length=1, max_length=2000)
     resume: ResumeReq | None = None
+    # 本轮带上的附件 id（先 POST /api/files 拿到 id 再随消息发来）
+    files: list[str] = Field(default_factory=list, max_length=config.UPLOAD_MAX_FILES_PER_REQUEST)
 
 
 class AffairReq(BaseModel):
@@ -427,6 +431,56 @@ def _stores(sess):
     )
 
 
+def _file_store(sess) -> files.FileStore:
+    return files.FileStore(sess.dir)
+
+
+def _resolve_files(sess, ids: list[str]) -> tuple[list[dict], list[str]]:
+    """把前端传来的附件 id 解析成附件元数据（保持顺序，过滤失效 id）。
+
+    悄悄话轮不解析附件：私密原话不上传文件是对的，附件内容也不该进公共链路。
+    """
+    if not ids:
+        return [], []
+    return _file_store(sess).resolve(ids[: config.UPLOAD_MAX_FILES_PER_REQUEST])
+
+
+def _file_public(sess, item: dict) -> dict:
+    """附件的公开视图（不含抽取正文）。"""
+    return _file_store(sess).public(item)
+
+
+def _file_system_note(items: list[dict]) -> str:
+    """附件清单（只写文件名/类型/大小/抽取情况，不写正文）——让模型知道手里有什么。"""
+    if not items:
+        return ""
+    lines = [f"- {files.prompt_note(i)}" for i in items]
+    return "孩子这一轮发来的文件：\n" + "\n".join(lines)
+
+
+def _attachment_parts(store, items: list[dict]) -> list[dict]:
+    """附件转成多模态 content 块：图片走视觉（压缩后 base64），文本走正文块。"""
+    parts: list[dict] = []
+    for item in items:
+        if item.get("kind") != "image":
+            continue
+        data = store.content(item)
+        if not data:
+            continue
+        payload, mime = files.vision_payload(data, str(item.get("mime") or ""))
+        if len(payload) > config.IMAGE_MAX_BYTES:
+            # 压完还是太大：不带图，只在文字里如实说明（避免整轮请求被 provider 拒掉）
+            item["note"] = (item.get("note") or "") + "；图片过大，未能附带原图"
+            continue
+        parts.append({
+            "type": "image",
+            "data": base64.b64encode(payload).decode("ascii"),
+            "mime": mime,
+            "name": item.get("name") or "图片",
+        })
+    return parts
+
+
 # ---------------------------------------------------------------- 会话
 
 @app.post("/api/session")
@@ -600,11 +654,12 @@ async def api_briefing(request: Request, name: str = "", stream: bool = False):
 # ---------------------------------------------------------------- 对话主流程
 
 def _chat_messages(sess, message: str, recall_block: str = "", extra_rule: str = "",
-                   tool_ctx: str = "") -> list[dict]:
+                   tool_ctx: str = "", attachments: list[dict] | None = None) -> list[dict]:
     """人设 + 当前时间 + 活跃关注点块 + 图谱检索 + 历史尾部。
 
     extra_rule 用于 explain 等分支追加讲解规则；tool_ctx 是工具轮刚查到的
     实时资料块（联网搜索/天气/看时间），有就直接摆给模型用。
+    attachments 是本轮附件：文本类正文进 system（围栏保护），图片进首条 user 的多模态块。
     """
     system = prompts.PERSONA.format(name=sess.name)
     system += f"\n\n现在是 {_now_text()}（服务器本地时间），回答时间相关问题直接用，别说自己看不到时间。"
@@ -622,12 +677,24 @@ def _chat_messages(sess, message: str, recall_block: str = "", extra_rule: str =
     if tool_ctx:
         mem_parts.append(
             f"你刚刚为这句话查到的实时资料（工具真实返回，可直接引用；查得不准就如实说）：\n{tool_ctx}")
+    if attachments:
+        note = _file_system_note(attachments)
+        if note:
+            mem_parts.append(note)
+        body = files.file_context(attachments)
+        if body:
+            mem_parts.append(body)
     if mem_parts:
         system += "\n\n" + "\n\n".join(mem_parts)
     msgs = [{"role": "system", "content": system}]
     # 只透传 role/content：secret 等内部字段不能进 LLM 请求体
     msgs.extend({"role": m["role"], "content": m["content"]} for m in sess.history)
-    msgs.append({"role": "user", "content": message})
+    user_parts = _attachment_parts(_file_store(sess), attachments or [])
+    if user_parts:
+        # 有图：首条 user 用多模态块（文本在前、图片在后，两家 provider 都认这个顺序）
+        msgs.append({"role": "user", "content": [{"type": "text", "text": message}, *user_parts]})
+    else:
+        msgs.append({"role": "user", "content": message})
     return msgs
 
 
@@ -680,14 +747,15 @@ async def _tool_round(sess, message: str, emit) -> str:
 
 async def _chat_reply(sess, message: str, hit: dict, emit, *,
                       extra_rule: str = "", caller: str = "chat",
-                      use_tools: bool = True) -> str:
+                      use_tools: bool = True, attachments: list[dict] | None = None) -> str:
     """闲聊类分支共用：工具轮 → 拼消息 → 流式回复。返回回复全文。
 
     use_tools=False 关掉工具轮（悄悄话：私密原话不能送进联网工具）。
+    attachments 是本轮附件（图片走视觉、文本走围栏正文），悄悄话轮不传。
     """
     tool_ctx = await _tool_round(sess, message, emit) if use_tools else ""
     msgs = await asyncio.to_thread(
-        _chat_messages, sess, message, hit["block"], extra_rule, tool_ctx)
+        _chat_messages, sess, message, hit["block"], extra_rule, tool_ctx, attachments)
     chunks = []
     async for tok in llm.stream(msgs, max_tokens=600, caller=caller):
         chunks.append(tok)
@@ -736,17 +804,21 @@ async def _settle_memory(sess, user_msg: str, reply: str, is_secret: bool = Fals
     return gdata
 
 
-async def _chat_stream(sess, raw_message: str, ctx: dict, resume: ResumeReq | None = None):
+async def _chat_stream(sess, raw_message: str, ctx: dict, resume: ResumeReq | None = None,
+                       attachments: list[dict] | None = None):
     """对话主链路的 SSE 流：跑到 done 为止，整个过程持有会话锁。
 
     ctx 带出本轮的 reply_text / is_secret / message / intent，由调用方在锁释放后
     接力跑 _chat_settle——沉淀与话题建议带 LLM 调用，占着锁会让下一条消息白吃 429。
+    resume 是暂停后的续写（带原问题与半截回答）；attachments 是本轮附件
+    （图片走视觉、文本走围栏正文，悄悄话轮一律不进）。
     """
     queue: asyncio.Queue[dict | None] = asyncio.Queue()
     is_secret = raw_message.startswith(SECRET_PREFIX)
     message = raw_message[len(SECRET_PREFIX):].strip() if is_secret else raw_message
     if not message:
         message = "（发来一条没写内容的悄悄话）"  # [[secret]] 空消息兜底，不进意图分类
+    attachments = [] if is_secret else (attachments or [])
 
     async def emit(event: dict) -> None:
         await queue.put(event)
@@ -765,6 +837,9 @@ async def _chat_stream(sess, raw_message: str, ctx: dict, resume: ResumeReq | No
 
     async def work():
         nonlocal reply_text
+        # 附件先回执：前端不必等 mode 就能把文件卡画出来（大图上传后尤其明显）
+        if attachments:
+            await emit({"type": "files", "files": [_file_public(sess, a) for a in attachments]})
         if resume:
             # 续写不分类、不建事务：带着原问题和半截回答直接接着往下说
             last_turn["intent"] = "chat"
@@ -773,7 +848,8 @@ async def _chat_stream(sess, raw_message: str, ctx: dict, resume: ResumeReq | No
             cont = (f"（我刚才问的是：{message}\n你回答到这里被我暂停了：\n{resume.partial}\n"
                     "请从断点处直接接着往下说：不要重复已经说过的内容，不要加开场白，"
                     "如果断在半句话里就把这句接完。）")
-            tail = await _chat_reply(sess, cont, hit, emit, use_tools=False)
+            tail = await _chat_reply(sess, cont, hit, emit, use_tools=False,
+                                     attachments=attachments)
             # 历史里存完整的一问一答：原问题 + 半截 + 续写
             reply_text = resume.partial + tail if tail else ""
             return
@@ -869,19 +945,19 @@ async def _chat_stream(sess, raw_message: str, ctx: dict, resume: ResumeReq | No
             except Exception:  # noqa: BLE001 事务 id 失效时照常聊天
                 pass
             reply_text = await _chat_reply(sess, message, hit, emit,
-                                           use_tools=not is_secret)
+                                           use_tools=not is_secret, attachments=attachments)
 
         elif intent == "explain":
             # 讲懂知识点：复用闲聊通道，但在人设后追加"用自己的经历打比方"的讲解规则
             reply_text = await _chat_reply(
                 sess, message, hit, emit,
                 extra_rule=prompts.EXPLAIN_RULE, caller="explain",
-                use_tools=not is_secret)
+                use_tools=not is_secret, attachments=attachments)
 
         else:
             # 悄悄话不走工具轮：私密原话不能送进联网工具（时间注入仍在）
             reply_text = await _chat_reply(
-                sess, message, hit, emit, use_tools=not is_secret)
+                sess, message, hit, emit, use_tools=not is_secret, attachments=attachments)
 
     async def runner():
         try:
@@ -910,6 +986,9 @@ async def _chat_stream(sess, raw_message: str, ctx: dict, resume: ResumeReq | No
     if reply_text:
         u_entry = {"role": "user", "content": raw_message if is_secret else message}
         a_entry = {"role": "assistant", "content": reply_text}
+        if attachments:
+            # 只存续写所需的元数据：历史回放要能重新画出文件卡，但不把字节搬进 history.json
+            u_entry["files"] = [_file_public(sess, a) for a in attachments]
         if is_secret:
             u_entry["secret"] = a_entry["secret"] = True
         sess.history.extend([u_entry, a_entry])
@@ -1163,6 +1242,9 @@ async def api_chat(request: Request, req: ChatReq):
     user, sess = await _auth_session(request, "chat", req.name)
     if not _chat_throttle(user["username"]):
         raise HTTPException(429, "说得太快啦，喝口水歇五分钟再聊")
+    # 附件先解析成元数据；悄悄话轮不带附件（私密话不该顺手把文件塞进公共链路）
+    is_secret = req.message.startswith(SECRET_PREFIX)
+    attachments = [] if is_secret else _resolve_files(sess, req.files)[0]
     try:
         await asyncio.wait_for(sess.lock.acquire(), timeout=0.3)
     except asyncio.TimeoutError:
@@ -1171,7 +1253,7 @@ async def api_chat(request: Request, req: ChatReq):
     async def guarded():
         ctx: dict = {}
         try:
-            async for chunk in _chat_stream(sess, req.message, ctx, req.resume):
+            async for chunk in _chat_stream(sess, req.message, ctx, req.resume, attachments):
                 yield chunk
         finally:
             sess.lock.release()
@@ -1201,6 +1283,91 @@ async def api_chat(request: Request, req: ChatReq):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+# ---------------------------------------------------------------- 附件（多模态上传）
+
+@app.post("/api/files")
+async def api_files_upload(request: Request, name: str = "", file: UploadFile = None):
+    """上传一个附件（图片 / PDF / Word / Excel / 文本），返回可随消息引用的 id。
+
+    公开可达的写入口，三道闸都在：单文件体积、单档案配额、扩展名白名单。
+    超限一律 4xx + 人话原因，前端直接把这句话显示给用户。
+    """
+    _, sess = await _auth_session(request, "chat", name)
+    if file is None or not file.filename:
+        raise HTTPException(400, "没有收到文件")
+    kind = files.kind_of(file.filename, file.content_type or "")
+    if not kind:
+        raise HTTPException(415, f"这个格式我读不了（{files.safe_name(file.filename)}）；"
+                                "支持图片、PDF、Word、Excel 和常见文本/代码文件")
+    data = await _read_upload_limited(file, config.UPLOAD_MAX_BYTES)
+    if data is None:
+        raise HTTPException(413, f"文件太大了，一个最多 {config.UPLOAD_MAX_BYTES // (1024 * 1024)}MB")
+    if not data:
+        raise HTTPException(400, "文件是空的")
+    store = _file_store(sess)
+    existing = await asyncio.to_thread(store.list)
+    if len(existing) >= config.UPLOAD_MAX_FILES_PER_CHILD:
+        raise HTTPException(409, "附件放满了，先删掉几个旧文件再传")
+    item = await asyncio.to_thread(
+        store.save, data, file.filename, file.content_type or "", kind)
+    return {"file": store.public(item), "count": len(existing) + 1}
+
+
+@app.get("/api/files")
+async def api_files_list(request: Request, name: str = ""):
+    """当前档案的附件清单（不含正文），给前端做"最近上传"与管理入口。"""
+    _, sess = await _auth_session(request, "memory", name)
+    store = _file_store(sess)
+    items = await asyncio.to_thread(store.list)
+    return {"files": [store.public(i) for i in items]}
+
+
+@app.delete("/api/files/{fid}")
+async def api_files_delete(request: Request, fid: str, name: str = ""):
+    """删除一个附件（索引 + 原始字节）。"""
+    _, sess = await _auth_session(request, "chat", name)
+    store = _file_store(sess)
+    ok = await asyncio.to_thread(store.delete, fid)
+    if not ok:
+        raise HTTPException(404, "文件不存在或已删除")
+    return {"ok": True}
+
+
+@app.get("/api/files/{fid}/content")
+async def api_files_content(request: Request, fid: str, name: str = ""):
+    """原文件（图片预览 / 下载）。家长视角看不到悄悄话轮附带的文件。"""
+    user, sess = await _auth_session(request, "memory", name)
+    store = _file_store(sess)
+    item = store.get(fid)
+    if not item:
+        raise HTTPException(404, "文件不存在")
+    path = store.path_of(item)
+    if not path.is_file():
+        raise HTTPException(404, "文件已被清理")
+    download = request.query_params.get("download") in ("1", "true")
+    headers = {"Cache-Control": "private, max-age=600"}
+    if download:
+        # 展示名消毒后再进响应头（防引号/换行注入）
+        safe = re.sub(r'[^\w一-鿿.（）()\- ]', "_", str(item.get("name") or "file"))[:80]
+        headers["Content-Disposition"] = f"attachment; filename*=UTF-8''{quote(safe)}"
+    return FileResponse(path, media_type=item.get("mime") or "application/octet-stream",
+                        headers=headers)
+
+
+async def _read_upload_limited(file: UploadFile, limit: int) -> bytes | None:
+    """分块读上传内容，超过 limit 立刻放弃（不把超大文件整个读进内存）。"""
+    chunks, total = [], 0
+    while True:
+        chunk = await file.read(256 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > limit:
+            return None
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 # ---------------------------------------------------------------- 图谱 / 事务 / 清单

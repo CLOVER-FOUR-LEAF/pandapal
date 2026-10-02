@@ -99,6 +99,9 @@ const state = {
   chatCtx: null,     // 当前轮次的渲染上下文（暂停时按它决定「继续」入口）
   chatResume: null,  // 暂停后待续写的内容 {raw, bubble}
   retryText: "",     // 上一轮因网络失败的消息原文（点「重发」用）
+  attach: [],        // 待发送的附件元数据（上传成功后进这里）
+  attachBusy: false, // 还有附件在上传中，此时不让发
+  attachSeq: 0,      // 上传序号：连点两次上传时不至于互相覆盖
   needGraphRefresh: false,
   relayDir: "teacher2parent",
 };
@@ -891,6 +894,12 @@ function resetUserUI() {
   if (box) box.innerHTML = CHAT_WELCOME;
   const set = (sel, html) => { const n = $(sel); if (n) n.innerHTML = html; };
   set("#chips", ""); // 快捷话题是上一个账号的上下文，清掉等新账号的 /api/suggest
+  // 附件是上一个账号/上一轮的遗留：清干净，别把别人的文件带给下一个账号
+  state.attach = [];
+  state.attachPending = [];
+  renderAttachList();
+  const fi = $("#file-input");
+  if (fi) fi.value = "";
   set("#briefing-card .panel-body", '<div class="skeleton skeleton-lines"></div>');
   set("#affair-board .panel-body", '<p class="empty-hint">管家正在整理事务…</p>');
   setText("#affair-board .panel-sub", "— 件在办");
@@ -1619,15 +1628,212 @@ async function loadHistory() {
     if (history.length > 30) addSys("（只展示最近 30 条对话）");
     history.slice(-30).forEach((m) => {
       if (!m) return;
-      addMsg(m.role === "user" ? "me" : "ai", m.content || "", String(m.content || "").startsWith("[[secret]]"));
+      addMsg(m.role === "user" ? "me" : "ai", m.content || "",
+             String(m.content || "").startsWith("[[secret]]"), m.files || null);
     });
     return history.length;
   } catch { return 0; /* 无历史不阻塞 */ }
 }
 
 /* ==========================================================================
- * 7. 对话渲染
+ * 6.5 附件（多模态上传）
  * ========================================================================== */
+
+const ATTACH_MAX = 5;                       // 与服务端 UPLOAD_MAX_FILES_PER_REQUEST 对齐
+const ATTACH_MAX_BYTES = 10 * 1024 * 1024;  // 与服务端 PANDA_UPLOAD_MAX_MB 对齐
+
+function attachKindCn(kind) {
+  return { image: "图片", pdf: "PDF", docx: "Word", xlsx: "表格", text: "文本",
+           pptx: "PPT", legacy_office: "旧版 Office" }[kind] || "文件";
+}
+
+function attachIcon(file) {
+  const kind = (file && file.kind) || "";
+  if (kind === "image") return "i-image";
+  if (kind === "text") return "i-book";
+  return "i-doc";
+}
+
+function renderAttachList() {
+  const box = $("#attach-list");
+  if (!box) return;
+  box.innerHTML = "";
+  const items = [...(state.attach || []), ...(state.attachPending || [])];
+  if (!items.length) {
+    box.classList.add("hidden");
+    return;
+  }
+  box.classList.remove("hidden");
+  items.forEach((f) => {
+    const chip = el("span", `attach-chip${f.error ? " error" : ""}${f.uploading ? " uploading" : ""}`);
+    if (f.preview) {
+      const img = el("img", "attach-thumb");
+      img.alt = "";
+      img.loading = "lazy";
+      loadPrivateImage(img, f.preview);
+      chip.appendChild(img);
+    } else {
+      chip.appendChild(icon(attachIcon(f)));
+    }
+    chip.appendChild(el("span", "attach-name", f.name || "文件"));
+    const meta = f.uploading ? "读取中…"
+      : f.error ? f.error
+        : `${attachKindCn(f.kind)}${f.size_cn ? " · " + f.size_cn : ""}`;
+    chip.appendChild(el("span", "attach-meta", meta));
+    if (!f.uploading) {
+      const rm = el("button", "icon-btn attach-rm");
+      rm.type = "button";
+      rm.setAttribute("aria-label", `移除 ${f.name || "附件"}`);
+      rm.appendChild(icon("i-x"));
+      rm.onclick = () => removeAttach(f.id);
+      chip.appendChild(rm);
+    }
+    box.appendChild(chip);
+  });
+}
+
+function removeAttach(fid) {
+  state.attachPending = (state.attachPending || []).filter((f) => f.id !== fid);
+  const hit = (state.attach || []).find((f) => f.id === fid);
+  state.attach = (state.attach || []).filter((f) => f.id !== fid);
+  if (hit) {
+    // 顺手把服务端那份也删掉：不留没人引用的孤儿文件占配额
+    api(`/api/files/${encodeURIComponent(fid)}?${q(state.name)}`, { method: "DELETE" })
+      .catch(() => { /* 删不掉不影响使用，配额清理会兜底 */ });
+  }
+  renderAttachList();
+}
+
+/** 上传一批文件：逐个 POST（失败只影响那一个），完成后再放到待发送区。 */
+async function uploadFiles(fileList) {
+  const picked = Array.from(fileList || []);
+  if (!picked.length) return;
+  if (!state.name) return;
+  const room = ATTACH_MAX - ((state.attach || []).length + (state.attachPending || []).length);
+  if (room <= 0) {
+    toast(`一次最多带 ${ATTACH_MAX} 个附件`);
+    return;
+  }
+  const queue = picked.slice(0, room);
+  if (picked.length > room) toast(`一次最多带 ${ATTACH_MAX} 个附件，多的没上传`);
+  state.attachPending = state.attachPending || [];
+  for (const f of queue) {
+    if (f.size > ATTACH_MAX_BYTES) {
+      state.attachPending.push({ id: `err-${f.name}-${Date.now()}`, name: f.name,
+                                 error: `超过 ${Math.round(ATTACH_MAX_BYTES / 1024 / 1024)}MB`, uploading: false });
+      continue;
+    }
+    const slot = { id: `up-${f.name}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+                   name: f.name, uploading: true };
+    state.attachPending.push(slot);
+    renderAttachList();
+    try {
+      const fd = new FormData();
+      fd.append("file", f, f.name);
+      const resp = await api(`/api/files?${q(state.name)}`, { method: "POST", body: fd });
+      const data = await resp.json();
+      state.attachPending = state.attachPending.filter((x) => x !== slot);
+      state.attach.push(data.file);
+    } catch (e) {
+      state.attachPending = state.attachPending.filter((x) => x !== slot);
+      state.attachPending.push({ id: slot.id, name: f.name, error: e.message, uploading: false });
+    }
+    renderAttachList();
+  }
+  state.attachPending = (state.attachPending || []).filter((f) => !f.error);
+  if ((state.attachPending || []).length) {
+    const first = state.attachPending[0];
+    toast(`「${first.name}」${first.error}`);
+    state.attachPending = [];
+  }
+  renderAttachList();
+  const input = $("#msg-input");
+  if (input) input.focus();
+}
+
+/** 带鉴权的图片加载：<img> 不能带 Authorization 头，所以 fetch 成 blob 再挂上去。 */
+async function loadPrivateImage(img, url) {
+  try {
+    const resp = await api(url);
+    const blob = await resp.blob();
+    const objUrl = URL.createObjectURL(blob);
+    img.src = objUrl;
+    img.addEventListener("load", () => URL.revokeObjectURL(objUrl), { once: true });
+  } catch { /* 图加载失败不影响文字 */ }
+}
+
+/** 一轮对话 / 一条历史消息附带的文件卡（点在图片上看大图，其它文件走下载）。 */
+function filesRow(files) {
+  const list = (files || []).filter((f) => f && f.id);
+  if (!list.length) return null;
+  const row = el("div", "msg-files");
+  list.forEach((f) => {
+    const card = el("a", "msg-file");
+    card.href = f.preview || "#";
+    card.setAttribute("aria-label", `${f.name || "文件"}（${attachKindCn(f.kind)}）`);
+    card.onclick = (e) => { e.preventDefault(); downloadAttach(f); };
+    if (f.kind === "image" && f.preview) {
+      const img = el("img");
+      img.alt = "";
+      img.loading = "lazy";
+      loadPrivateImage(img, f.preview);
+      card.appendChild(img);
+    } else {
+      card.appendChild(icon(attachIcon(f)));
+    }
+    const info = el("span", "msg-file-info");
+    info.appendChild(el("span", "msg-file-name", f.name || "文件"));
+    const bits = [attachKindCn(f.kind)];
+    if (f.size_cn) bits.push(f.size_cn);
+    if (f.has_text && f.chars) bits.push(`已读出 ${f.chars} 字`);
+    else if (f.note) bits.push(f.note);
+    info.appendChild(el("span", "msg-file-sub", bits.join(" · ")));
+    card.appendChild(info);
+    row.appendChild(card);
+  });
+  return row;
+}
+
+/** 下载 / 查看原文件：fetch + blob（token 不能进 URL，见日历导出那里的说明）。 */
+async function downloadAttach(f) {
+  if (!f || !f.id) return;
+  try {
+    const resp = await api(`/api/files/${encodeURIComponent(f.id)}/content?${q(state.name)}&download=1`);
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const a = el("a");
+    a.href = url;
+    a.download = f.name || "附件";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  } catch (e) {
+    toast(`下载失败：${e.message}`);
+  }
+}
+
+/** 拖拽上传：拖到聊天区就收（桌面端最顺手的入口）。 */
+function setupDropZone() {
+  const box = chatBox();
+  if (!box) return;
+  const over = (e) => { e.preventDefault(); box.classList.add("drop-active"); };
+  const leave = () => box.classList.remove("drop-active");
+  box.addEventListener("dragover", (e) => {
+    if (!e.dataTransfer) return;
+    over(e);
+    e.dataTransfer.dropEffect = "copy";
+  });
+  box.addEventListener("dragleave", leave);
+  box.addEventListener("drop", (e) => {
+    e.preventDefault();
+    leave();
+    const files = e.dataTransfer && e.dataTransfer.files;
+    if (files && files.length) uploadFiles(files);
+  });
+}
+
+
 
 function chatBox() { return $("#chat"); }
 
@@ -1644,7 +1850,7 @@ function secretTag() {
 }
 
 /** AI 消息 = 熊猫头像 + 全宽正文（markdown 渲染）；用户/系统消息仍是气泡。 */
-function addMsg(cls, text, secret) {
+function addMsg(cls, text, secret, files) {
   const box = chatBox();
   if (!box) return null;
   clearChatHint();
@@ -1658,6 +1864,8 @@ function addMsg(cls, text, secret) {
     const md = el("div", "md");
     setMd(md, shown);
     body.appendChild(md);
+    const filesEl = filesRow(files);
+    if (filesEl) body.appendChild(filesEl);
     append(row, av, body);
     box.appendChild(row);
     scrollBottom();
@@ -1666,6 +1874,8 @@ function addMsg(cls, text, secret) {
   const div = el("div", `msg ${cls}${secret ? " secret" : ""}`);
   if (secret) div.appendChild(secretTag());
   div.appendChild(document.createTextNode(shown));
+  const filesEl = filesRow(files);
+  if (filesEl) div.appendChild(filesEl);
   box.appendChild(div);
   scrollBottom(cls === "me");
   return div;
@@ -1980,8 +2190,17 @@ function pauseChat() {
 async function send(preset, opts = {}) {
   const input = $("#msg-input");
   const raw = preset !== undefined ? String(preset) : input ? input.value : "";
-  const text = raw.trim();
-  if (!text || !state.name) return;
+  let text = raw.trim();
+  // 只发文件不写字也允许：模型看得到图/文档，用户想说的往往就在文件里
+  const attach = preset === undefined ? (state.attach || []) : [];
+  const pending = (state.attachPending || []).length > 0;
+  if (!text && !attach.length) return;
+  if (!state.name) return;
+  if (pending) {
+    toast("附件还在上传，稍等一下再发");
+    return;
+  }
+  if (!text) text = "（看看这个附件）";
   if (state.authRole === "parent") {
     // 家长账号没有聊天能力（服务端 /api/chat 同样 403）。这里必须出声：
     // 静默 return 会让「问问管家」这类入口点了像死机，看不出到底为什么没反应。
@@ -2014,7 +2233,14 @@ async function send(preset, opts = {}) {
   // 续写沿用原问题的悄悄话状态，不看孩子此刻有没有切换开关
   const secret = resume ? resume.question.startsWith("[[secret]]") : state.secret;
   if (input && preset === undefined) input.value = "";
-  if (!resume) addMsg("me", text, secret);
+  if (!resume) {
+    ctx.userRow = addMsg("me", text, secret, secret ? null : attach);
+  }
+  // 附件已经交给这一轮，清空暂存区（图片预览走 id，不受影响）
+  if (attach.length) {
+    state.attach = [];
+    renderAttachList();
+  }
   hideBubble($("#panda-bubble"));
   s3("setPandaMood", "thinking");
   if (pandaSvg) setMood(pandaSvg, "thinking");
@@ -2029,7 +2255,9 @@ async function send(preset, opts = {}) {
     if (ctx.typing) { ctx.typing.remove(); ctx.typing = null; }
   };
 
-  const body = { name: state.name, message: payload };
+  const fileIds = secret ? [] : attach.map((f) => f.id).filter(Boolean);
+  const body = { name: state.name, message: payload, files: fileIds };
+  // 续写：把被打断那一轮的原问题与半截回答带回去（服务端据此接着往下说）
   if (resume) body.resume = { question: resume.question, partial: resume.raw };
   try {
     const resp = await api("/api/chat", { ...jsonOpts(body), signal: abort.signal });
@@ -2125,6 +2353,17 @@ function handleEvent(ev, ctx, dropTyping) {
   if (!ev || !ev.type) return;
   if (ctx && ctx.seq !== undefined && ctx.seq !== state.sendSeq) return; // 过期会话的事件丢弃
   switch (ev.type) {
+    case "files": {
+      // 附件的权威元数据（含抽取结果）：把文件卡挂到本轮用户消息上
+      const box = $("#chat");
+      if (!ctx.userRow || !box || !box.contains(ctx.userRow)) break;
+      const old = ctx.userRow.querySelector(".msg-files");
+      if (old) old.remove();
+      const row = filesRow(ev.files || []);
+      if (row) ctx.userRow.appendChild(row);
+      break;
+    }
+
     case "mode":
       dropTyping();
       modeBadge(MODE_LABEL[ev.mode] ?? ev.mode);
@@ -3269,6 +3508,18 @@ function bind() {
   on("#forgot-reset-btn", forgotReset);
   on("#send-btn", () => send());
   on("#pause-btn", pauseChat);
+  on("#attach-btn", () => {
+    const input = $("#file-input");
+    if (input) input.click();
+  });
+  const fileInput = $("#file-input");
+  if (fileInput) {
+    fileInput.addEventListener("change", () => {
+      uploadFiles(fileInput.files);
+      fileInput.value = ""; // 同一个文件能再传一次
+    });
+  }
+  setupDropZone();
   on("#role-toggle", toggleRole);
   on("#secret-btn", toggleSecret);
   on("#dream-btn", runDream);

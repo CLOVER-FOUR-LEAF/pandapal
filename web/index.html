@@ -76,6 +76,12 @@
   <symbol id="i-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
     <path d="M4.5 12.5l5 5 10-11"/>
   </symbol>
+  <symbol id="i-attach" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M20 11.5 12.3 19a4.6 4.6 0 0 1-6.5-6.5l7.4-7.3a3 3 0 0 1 4.3 4.3l-7.4 7.3a1.5 1.5 0 0 1-2.1-2.1l6.9-6.8"/>
+  </symbol>
+  <symbol id="i-image" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><circle cx="9" cy="10" r="1.6"/><path d="m4.5 17.5 5-4.6 3.6 3.2 3-2.6 3.4 3.1"/>
+  </symbol>
   <symbol id="i-x" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round">
     <path d="M6 6l12 12M18 6L6 18"/>
   </symbol>
@@ -445,7 +451,17 @@
 
       <div id="chips" class="chips" role="group" aria-label="快捷话题"></div>
 
+      <!-- 附件暂存区：发送前先看清这轮带了什么，可逐个移除 -->
+      <div id="attach-list" class="attach-list hidden" aria-live="polite"></div>
+
       <div class="inputbar">
+        <button id="attach-btn" class="icon-btn" type="button"
+                aria-label="上传文件：图片、PDF、Word、Excel、文本"
+                title="上传文件（图片 / PDF / Word / Excel / 文本）">
+          <svg class="ic" aria-hidden="true"><use href="#i-attach"/></svg>
+        </button>
+        <input id="file-input" class="sr-only" type="file" multiple
+               accept="image/*,.pdf,.docx,.xlsx,.pptx,.txt,.md,.csv,.json,.log,.py,.js,.ts,.html,.css">
         <button id="secret-btn" class="icon-btn" type="button"
                 aria-label="悄悄话：家长视角看不到" aria-pressed="false">
           <svg class="ic" aria-hidden="true"><use href="#i-lock"/></svg>
