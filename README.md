@@ -64,6 +64,8 @@ cp .env.example .env   # 然后填入你的 LLM_API_KEY 等
 | 工具脚手架（声明式注册表，@tool 注册即接入 planner/executor/闲聊通道）：看时间 `now` / 本地赛事库 `race_lookup` / 交通参考 `transport_lookup` / wttr.in 天气 `weather` / 联网搜索 `web_search`（Tavily 兼容端点，未配置则必应网页解析兜底）/ 打开网页 `web_browse` | `server/tools.py` |
 | 闲聊直答的工具轮：启发式命中 → 调度器挑工具 → 结果注入 system → 流式回复（`tool` SSE 事件驱动前端工具条） | `server/main.py` `_tool_round` + `server/prompts.py` `TOOL_PICK` |
 | 记忆本页：主题分组+时间线+长期记忆 | `web/` + `GET /api/memory` |
+| 管家朗读（小米 MiMo TTS）：回复定型后合成语音，`voice` 事件落在 `done` 之后不拖慢正文；口播稿先洗成口语（去 markdown/emoji、日期时间口语化、限长收尾）；方案卡只念一句引导稿；对话音优先级高于问候/晨报，发新消息的瞬间就掐断 | `server/tts.py` + `server/voice.py` |
+| 音色档案 `voice.json`：默认清纯甜美女声（voicedesign 按文字生成音色），可一键切内置音色；孩子直接跟管家说"换个温柔的声音"，由管家自行扩写成音色提示词并落档（确定性正则锚点，不动意图分类） | `server/prompts.py` `VOICE_DESIGN` + `POST /api/voice/preview` |
 | 家长周报（本周事务进展+新变化统计→LLM 写成一页纸；悄悄话只计数不进 prompt；LLM 挂了只报统计） | `server/family.py` `GET /api/parent/weekly` |
 | 通知落地「一份通知，千家千版」：学校/机构通知 → 按孩子记忆出专属版 + 自动建事务/清单/提醒；admin 可批量下发 | `server/family.py` `POST /api/notice` |
 | 童年备忘录导出：整份档案打包 zip 交还孩子（家长 403） | `server/family.py` `GET /api/export` |
@@ -77,7 +79,7 @@ cp .env.example .env   # 然后填入你的 LLM_API_KEY 等
 - 模型：由 `.env` 中 `LLM_MODEL` 指定（当前用 `grok-4.7`，走 OpenAI 兼容端点；兼容任意 OpenAI 协议端点，也支持 Anthropic Messages 协议）
 - 调用方式：`server/llm.py` 统一封装双协议客户端；一轮规划型对话是 分类→拆解→执行→整理 四段，闲聊可能多一轮联网工具调用，加上轮后的记忆抽取，最多七八次调用
 - 单轮耗时提示：`planner` 与 `synth` 是最重的两段（各自几十秒），界面会在这两段显示「正在拆解要办的事…」「快好了，正在整理成方案…」，属正常等待
-- **赞助商 API 使用清单**：LLM API（见 `.env`，OpenAI 兼容/Anthropic 兼容）、天气 [wttr.in](https://wttr.in)（免费无需 Key）、联网搜索（配置 `SEARCH_API_KEY`+`SEARCH_BASE_URL` 走 Tavily 兼容端点；未配置时用必应网页结果解析，无需 Key）
+- **赞助商 API 使用清单**：LLM API（见 `.env`，OpenAI 兼容/Anthropic 兼容）、语音合成 [小米 MiMo TTS](https://mimo.mi.com/docs/zh-CN/quick-start/usage-guide/audio/speech-synthesis-v2.5)（`TTS_API_KEY`，可在 admin 后台「API 配置」里改、立即生效；Key 限时免费；留空则整条语音链路静默跳过）、天气 [wttr.in](https://wttr.in)（免费无需 Key）、联网搜索（配置 `SEARCH_API_KEY`+`SEARCH_BASE_URL` 走 Tavily 兼容端点；未配置时用必应网页结果解析，无需 Key）
 
 ## 六、项目结构
 

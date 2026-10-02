@@ -292,10 +292,11 @@ const q = (name) => `name=${encodeURIComponent(name || "")}`;
  * 读 GET 的 SSE 文本流（晨报/问候的 `?stream=1`）：每来一段 token 回调 onToken，
  * 返回 done 事件的载荷（含看板/提醒等本地数据）。服务端不支持流时退化为整段 JSON。
  */
-async function readTextStream(resp, onToken) {
+async function readTextStream(resp, onToken, onEvent) {
   if (!resp.body || !resp.body.getReader) {
     const data = await resp.json().catch(() => ({}));
     if (data.text) onToken(data.text);
+    if (data.voice) onEvent?.({ type: "voice", ...data.voice });
     return data;
   }
   const reader = resp.body.getReader();
@@ -313,6 +314,9 @@ async function readTextStream(resp, onToken) {
       if (!raw.startsWith("data:")) continue;
       let ev;
       try { ev = JSON.parse(raw.slice(5)); } catch { continue; }
+      // done 之后还可能跟 voice 事件（语音在正文上屏后才开始合成），
+      // 交给调用方的通用回调，别在这里把它吞掉
+      onEvent?.(ev);
       if (ev.type === "token") onToken(ev.text || "");
       else if (ev.type === "done") done = ev;
       else if (ev.type === "error") throw new Error(ev.message || "生成失败");
@@ -992,6 +996,7 @@ function resetUserUI() {
 function logout() {
   // 退出 = 注销 token 回登录页；服务端会话仍在，同账号再进会续上历史
   if (state.token) api("/api/auth/logout", jsonOpts({})).catch(() => {});
+  stopVoice();  // 别让上一个账号的回复在登录页继续念
   try { localStorage.removeItem(AUTH_KEY); } catch { /* ignore */ }
   try { sessionStorage.removeItem(AUTH_KEY); } catch { /* ignore */ }
   state.token = null;
@@ -1088,6 +1093,8 @@ async function enterMain() {
   applyRole(state.role);
   renderChips();
   setupMic();
+  // 拉音色档案再放问候/晨报：喇叭图标要先知道服务端到底能不能发声
+  fetchVoiceProfile();
   // 问候、晨报、看板、图谱同时开跑，各渲染各的，谁也不等谁（晨报是一整段 LLM 生成，
   // 以前要等它写完才轮到问候）。启动层只等历史这一项轻量请求——聊天区有内容再揭幕。
   splashStage("history");
@@ -1144,7 +1151,7 @@ async function loadBriefing() {
       swapIn();
       full += tok;
       textEl.textContent = full;
-    });
+    }, onStreamEvent);
     swapIn();                        // 一个 token 都没有也要收掉骨架屏
     renderBriefingExtras(done, full);
     if (done && done.degraded) {
@@ -1679,7 +1686,7 @@ async function loadGreeting() {
     data = await readTextStream(resp, (tok) => {
       full += tok;
       if (span) span.textContent = full;
-    });
+    }, onStreamEvent);
   } catch (e) {
     // 连服务端都没连上：如实说，不写死一句"问候"冒充生成结果
     data = { degraded: true, degraded_reason: e.message };
@@ -2410,6 +2417,10 @@ async function send(preset, opts = {}) {
   }
 
   const seq = ++state.sendSeq;
+  // 发了新消息就立刻闭嘴：晨报/问候那类环境音已经跟当前话题无关了。
+  // 不在这里掐的话，得等新回复的语音做好（十几到几十秒）才会切，
+  // 那一整段时间都在放已经过时的内容。
+  stopVoice();
   state.busy = true;
   state.chatPaused = false;
   clearResumeChip(); // 新一轮开始：上一轮的「继续」入口作废
@@ -2554,6 +2565,259 @@ async function readSSE(resp, ctx, dropTyping) {
   }
 }
 
+// ---------------------------------------------------------------- 管家朗读
+// 浏览器不允许没有用户手势的自动播放，所以声音默认是关的：孩子点一下喇叭
+// 才打开——这既是浏览器要求，也正好是"我想听管家说话"的明确表态。
+const VOICE_KEY = "pandapal.voiceOn";
+const voice = { on: false, avail: false, cur: null, src: null, el: null,
+                lastP: 0, lastT: 0 };
+
+/** 播放失败的原因分类。别把除 NotAllowedError 以外的一律说成"查音量"——
+ *  NotSupportedError 跟音量毫无关系，那是浏览器放不出声音（内嵌面板/无声卡
+ *  的环境最常见），说成音量问题只会把人带偏。 */
+const VOICE_ERR_TEXT = {
+  NotAllowedError: "浏览器拦了自动播放，再点一次喇叭就好",
+  NotSupportedError: "这个浏览器放不出声音，换普通浏览器窗口打开就能听",
+  AbortError: "播放被中断了",
+};
+
+function voiceErrorText(e) {
+  const name = (e && e.name) || "";
+  return VOICE_ERR_TEXT[name] || ("声音没放出来（" + (name || "未知原因") + "）");
+}
+
+/** Web Audio 的 AudioContext：懒创建，整页复用一个。
+ *  它和 <audio> 元素是两条独立通路——<audio> 要先起媒体播放器，Web Audio 直接
+ *  在音频图上渲染。有些环境（无声卡的内嵌面板、被策略限制的 WebView）媒体播放器
+ *  起不来，但 Web Audio 这条还能走。 */
+let audioCtx = null;
+function getAudioCtx() {
+  if (audioCtx) return audioCtx;
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) return null;
+  try {
+    audioCtx = new AC();
+  } catch (e) {
+    console.warn("[voice] 建不了 AudioContext：", e && e.name, e && e.message);
+    return null;
+  }
+  return audioCtx;
+}
+
+/** 0.1 秒静音 WAV：点开开关的那一下顺手播掉，把音频通道"解锁"。
+ *  浏览器对无手势的播放会直接 NotAllowedError；先在真实手势里播一次，
+ *  后面异步拿到音频再播就能过。播放它听不见任何声音。
+ *
+ *  这里故意把错误也打出来：这段音频是浏览器自己现造的 PCM，一定能解，
+ *  连它都失败，就说明是这台浏览器根本没有音频输出能力（内嵌面板、
+ *  无声卡、被静音的系统），跟我们的音频文件、跟电脑音量都无关。 */
+function primeAudio() {
+  try {
+    const sr = 8000, n = 800;
+    const buf = new ArrayBuffer(44 + n * 2);
+    const v = new DataView(buf);
+    const w = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+    w(0, "RIFF"); v.setUint32(4, 36 + n * 2, true); w(8, "WAVEfmt ");
+    v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+    v.setUint32(24, sr, true); v.setUint32(28, sr * 2, true); v.setUint16(32, 2, true);
+    v.setUint16(34, 16, true); w(36, "data"); v.setUint32(40, n * 2, true);
+    const url = URL.createObjectURL(new Blob([buf], { type: "audio/wav" }));
+    const a = new Audio(url);
+    a.volume = 0.01;
+    a.play().catch((e) => {
+      console.warn("[voice] 连浏览器自造的静音音都放不出来：", e && e.name, e && e.message);
+    }).finally(() => URL.revokeObjectURL(url));
+  } catch (e) {
+    console.warn("[voice] 音频解锁失败：", e && e.name, e && e.message);
+  }
+  // 同一个手势里把 AudioContext 也唤醒，省得后面 decode 完才发现是 suspended
+  const ctx = getAudioCtx();
+  if (ctx && ctx.state === "suspended") ctx.resume().catch(() => {});
+}
+
+/** 立刻闭嘴：正在播的掐掉，状态复位。
+ *  Web Audio 的 source 不会自己结束，<audio> 元素也不会——不显式停就会一直出声，
+ *  而新的语音又叠上来，两句话搅在一起正是"对不上"的由来。 */
+function stopVoice() {
+  voice.cur = null;
+  if (voice.src) {
+    try { voice.src.onended = null; voice.src.stop(); } catch { /* 已放完 */ }
+    voice.src = null;
+  }
+  if (voice.el) {
+    try { voice.el.onended = null; voice.el.pause(); } catch { /* 已放完 */ }
+    voice.el = null;
+  }
+  $("#voice-btn")?.classList.remove("speaking");
+  s3("setPandaMood", "idle");
+}
+
+/** 取一段音频并播完（fetch + 鉴权头，同 ICS 导出：裸 <audio src> 带不了 Authorization）。
+ *
+ *  两条通路，先 Web Audio 再 <audio>：
+ *    Web Audio（decodeAudioData）解出来的错误很精确——EncodingError/NotSupportedError
+ *    说明是"音频解不开"（格式问题），而能解出 AudioBuffer 却发不出声才是环境问题。
+ *    而且它不经过 <audio> 的媒体播放器，在无声卡的内嵌面板里反而更可能活下来。
+ *  两条都不通才算真失败，这时才提示用户。
+ *
+ *  done() 只清理"自己那一份"：被新语音接管时（voice.cur 已经换人）就直接收尾，
+ *  别去动新一轮的 speaking 状态和表情——否则旧的一收尾会把新的刚设上的状态抹掉。 */
+function playOne(ev) {
+  return new Promise((resolve) => {
+    let blobUrl = null;
+    const btn = $("#voice-btn");
+    const done = () => {
+      if (blobUrl) URL.revokeObjectURL(blobUrl);
+      if (voice.cur !== ev) return resolve();  // 已被新语音接管，别碰共享状态
+      voice.cur = null;
+      voice.src = null;
+      voice.el = null;
+      btn?.classList.remove("speaking");
+      s3("setPandaMood", "idle");
+      resolve();
+    };
+    (async () => {
+      try {
+        const resp = await api(`${ev.url}?name=${encodeURIComponent(state.name || "")}`);
+        if (!resp.ok) {
+          console.warn("[voice] 音频取不到：", resp.status, ev.url);
+          toast("这段语音没取到，管家先不出声了");
+          return done();
+        }
+        const ab = await resp.arrayBuffer();
+        const mime = resp.headers.get("content-type") || "audio/mpeg";
+
+        // ---- 通路一：Web Audio
+        const ctx = getAudioCtx();
+        if (ctx) {
+          try {
+            if (ctx.state === "suspended") await ctx.resume();
+            // decodeAudioData 会"转移"掉传入的 ArrayBuffer，所以传副本，
+            // 万一这条走不通，下面还能拿原始字节去喂 <audio>
+            const buf = await ctx.decodeAudioData(ab.slice(0));
+            const src = ctx.createBufferSource();
+            src.buffer = buf;
+            src.connect(ctx.destination);
+            voice.src = src;
+            btn?.classList.add("speaking");
+            s3("setPandaMood", "happy");
+            src.onended = () => { voice.src = null; done(); };
+            src.start();
+            return;
+          } catch (e) {
+            console.warn("[voice] Web Audio 这条路走不通：", e && e.name, e && e.message);
+          }
+        }
+
+        // ---- 通路二：<audio> 元素
+        const a = new Audio();
+        blobUrl = URL.createObjectURL(new Blob([ab], { type: mime }));
+        a.src = blobUrl;
+        voice.el = a;              // 登记上去，stopVoice 才掐得断
+        a.onended = done;
+        a.onerror = () => { console.warn("[voice] <audio> 解码失败：", ev.url, mime, ab.byteLength); done(); };
+        btn?.classList.add("speaking");
+        s3("setPandaMood", "happy");
+        await a.play();
+      } catch (e) {
+        // 两条路都试过了还是不行：现在提示才是有依据的
+        console.warn("[voice] 播放失败：", e && e.name, e && e.message);
+        toast(voiceErrorText(e));
+        done();
+      }
+    })();
+  });
+}
+
+/** 收到一段语音：按 (优先级, 轮次) 仲裁，只播"当前最该听"的那一条。
+ *
+ *  priority  2 = 对话音（聊天、试音）  1 = 环境音（问候、晨报）
+ *  turn      服务端在轮次开始时分配的递增序号（不是合成完成时间，否则先开始
+ *             的慢问候反而拿到更大的号，"最新优先"会变成"最晚完成优先"）
+ *
+ *  比较规则先看优先级、再看轮次，于是：
+ *    · 孩子发了新消息 → 对话音优先级更高，立刻把还在念的晨报掐掉
+ *    · 迟到的环境音   → 优先级低，直接丢，绝不插进当前话题
+ *    · 同一类里更新的一轮 → 轮次更大，覆盖上一条
+ *  比较结果记在 lastP/lastT 里；每次页面加载都会重新初始化，所以刷新后
+ *  晨报依然能正常播（不会因为上一轮聊过天就永久被对话音压住）。 */
+function enqueueVoice(ev) {
+  if (!voice.on || !ev || !ev.url) return;
+  const p = Number(ev.priority) || 1;
+  const t = Number(ev.turn) || 0;
+  if (p < voice.lastP || (p === voice.lastP && t <= voice.lastT)) return;
+  voice.lastP = p;
+  voice.lastT = t;
+  stopVoice();                 // 旧的立刻停，只留这一条
+  voice.cur = ev;
+  playOne(ev);
+}
+
+/** 问候/晨报走 readTextStream，不经过 handleEvent，语音事件在这里单独接。 */
+function onStreamEvent(ev) {
+  if (ev && ev.type === "voice") enqueueVoice(ev);
+}
+
+function paintVoiceBtn() {
+  const b = $("#voice-btn");
+  if (!b) return;
+  b.classList.toggle("hidden", !voice.avail);
+  b.setAttribute("aria-pressed", voice.on ? "true" : "false");
+  b.setAttribute("aria-label", voice.on ? "朗读已打开，点一下静音" : "朗读：点一下打开管家的声音");
+  b.title = voice.on ? "管家正在说话（点一下静音）" : "打开管家的声音";
+  const use = b.querySelector("use");
+  if (use) use.setAttribute("href", voice.on ? "#i-sound" : "#i-sound-off");
+}
+
+function loadVoicePref() {
+  try { voice.on = localStorage.getItem(VOICE_KEY) === "1"; } catch { voice.on = false; }
+  paintVoiceBtn();
+}
+
+function saveVoicePref() {
+  try { localStorage.setItem(VOICE_KEY, voice.on ? "1" : "0"); } catch { /* 私密模式 */ }
+}
+
+/** 拉一次服务端音色档案：没配 Key / 关了开关就不显示喇叭。 */
+async function fetchVoiceProfile() {
+  try {
+    const r = await api(`/api/voice?${q(state.name || "")}`);
+    const d = await r.json().catch(() => ({}));
+    voice.avail = !!d.available;
+  } catch {
+    voice.avail = false;
+  }
+  paintVoiceBtn();
+}
+
+/** 试音：点开朗读开关时立刻念一句。听到声音才算真的打开；
+ *  听不到就说明这个浏览器放不出来，当场给原因，别让人干等下一条消息。 */
+async function previewVoice() {
+  try {
+    const r = await api("/api/voice/preview", jsonOpts({ name: state.name || "" }));
+    const d = await r.json().catch(() => ({}));
+    if (!d.voice) throw new Error(r.status === 503 ? "服务端没合成出声音" : "试音失败");
+    enqueueVoice(d.voice);   // 走同一条路：先闭嘴再播，试音也遵守"最新者优先"
+  } catch (e) {
+    console.warn("[voice] 试音失败：", e && e.name, e && e.message);
+    toast(voiceErrorText(e));
+  }
+}
+
+function toggleVoice() {
+  voice.on = !voice.on;
+  saveVoicePref();
+  paintVoiceBtn();
+  if (!voice.on) {
+    stopVoice();
+    toast("好，管家先安静一会儿");
+  } else {
+    primeAudio();  // 趁着这次真实点击把音频通道解锁
+    toast("管家的声音打开了，正在试音…");
+    previewVoice();
+  }
+}
+
 function handleEvent(ev, ctx, dropTyping) {
   if (!ev || !ev.type) return;
   if (ctx && ctx.seq !== undefined && ctx.seq !== state.sendSeq) return; // 过期会话的事件丢弃
@@ -2676,7 +2940,7 @@ function handleEvent(ev, ctx, dropTyping) {
       scrollBottom();
       break;
 
-    // done 之后还可能有 memory 事件：只解锁输入，绝不中断读取
+    // done 之后还可能有 memory / voice 事件：只解锁输入，绝不中断读取
     case "done":
       dropTyping();
       flushMd(ctx);
@@ -2685,6 +2949,21 @@ function handleEvent(ev, ctx, dropTyping) {
       s3("setPandaMood", "idle");
       modeBadge("");
       chatStatus();
+      break;
+
+    // 语音在正文上屏之后才合成好，到达通常晚于 done：排队播，别打断孩子看字
+    case "voice":
+      enqueueVoice(ev);
+      break;
+
+    // 孩子跟管家说了"换个声音"：管家已自行改好音色，这里提示一声
+    case "voice_profile":
+      if (ev.profile) {
+        voice.avail = true;
+        paintVoiceBtn();
+        if (ctx.aiBubble) ctx.aiBubble.classList.remove("streaming");
+        toast(`声音换好啦～现在是${ev.profile.label || "新的声音"}`);
+      }
       break;
 
     case "error":
@@ -3834,6 +4113,7 @@ function bind() {
   setupDropZone();
   on("#role-toggle", toggleRole);
   on("#secret-btn", toggleSecret);
+  on("#voice-btn", toggleVoice);
   on("#dream-btn", runDream);
   on("#relay-btn", runRelay);
   on("#weekly-btn", loadWeekly);
@@ -3950,6 +4230,7 @@ function boot() {
   }
   setHidden("#secret-note", true);
   bind();
+  loadVoicePref();
   try { setupLoginExtras(); } catch (e) { console.warn("[app] 登录页增强失败：", e && e.message); }
   Promise.resolve(restoreAuth()).finally(() => {
     splashDone(); // 已进主界面时 enterMain 早就揭过了，这里是登录页/失败路径的兜底
