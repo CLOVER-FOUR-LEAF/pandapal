@@ -408,8 +408,13 @@ def _left(d: dict) -> str:
     return f"已过期 {-days} 天" if days < 0 else f"还有 {days} 天"
 
 
-def _affairs_brief(a_store, limit: int = 6) -> str:
-    items = a_store.list()[:limit]
+def _affairs_brief(a_store, limit: int = 6, items: list | None = None) -> str:
+    """事务简报；items 传已加载的列表时不再读盘（含 done 的列表需调用方先滤）。"""
+    if items is None:
+        items = a_store.list()
+    else:
+        items = [i for i in items if i.get("stage") != "done"]
+    items = items[:limit]
     if not items:
         return "（目前没有正在跟进的事）"
     lines = []
@@ -426,16 +431,18 @@ def _briefing_collect(a: affairs.AffairStore, g: graph.GraphStore, m: memory.Mem
     最近 10 天内还在提，且还没挂在任何事务上。确定性规则，不靠 LLM 猜。
     注意：private（悄悄话）节点绝不能出现在建议里——那是孩子没打算让人知道的事
     """
+    # affairs.json / graph.json 各读一次、全程复用：同一文件以前要 load 三遍
     snapshot = a.snapshot()
-    due = a.due_soon(days=30)  # 演示档案里主事件在 16 天后，窗口放宽到 30 天
+    gdata = g.load()
+    due = a.due_soon(days=30, items=snapshot["affairs"])  # 演示档案主事件在 16 天后，窗口放宽到 30 天
     mem_block = m.active_block()
-    graph_block = g.brief_block(limit=30)
+    graph_block = g.brief_block(limit=30, g=gdata)
     if graph_block:
         mem_block = f"{mem_block}\n\n{graph_block}"
     linked = {nid for it in snapshot["affairs"] for nid in it.get("linked_nodes") or []}
     cutoff = date.today() - timedelta(days=10)
     candidates = []
-    for n in g.load().get("nodes", []):
+    for n in gdata.get("nodes", []):
         if n.get("private") or n.get("id") in linked:
             continue
         if n.get("type") not in ("goal", "interest") or n.get("status") == "done":
@@ -459,7 +466,7 @@ def _briefing_collect(a: affairs.AffairStore, g: graph.GraphStore, m: memory.Mem
         "due_brief": "\n".join(
             f"- {d['title']}：{d['due']}（{_left(d)}）" for d in due
         ) or "（最近没有临近截止的事）",
-        "affairs_brief": _affairs_brief(a),
+        "affairs_brief": _affairs_brief(a, items=snapshot["affairs"]),
         "mem_block": mem_block,
         "suggestions": suggestions,
     }
@@ -506,7 +513,7 @@ def _chat_messages(sess, message: str, recall_block: str = "", extra_rule: str =
     system = prompts.PERSONA.format(name=sess.name)
     if extra_rule:
         system += "\n\n" + extra_rule
-    active = sess.store.active_block()
+    active = sess.store.active_block(message)
     related = sess.store.retrieve(message)
     mem_parts = []
     if active:
