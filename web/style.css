@@ -65,7 +65,7 @@
   --ink: #f8fafc;
   --ink-2: #cbd5e1;
   --ink-dim: #94a3b8;
-  --ink-faint: #64748b;
+  --ink-faint: #8b9bab;
 
   /* 结构与层次 */
   --r-lg: 20px;
@@ -176,9 +176,15 @@ a { color: var(--bamboo); }
   font-size: 13.5px; font-weight: 650; letter-spacing: .02em;
   display: flex; align-items: center; gap: 8px;
 }
-/* 面板头图标做成竹青小瓷贴，整齐有层次 */
+/* 面板头图标做成竹青小瓷贴，整齐有层次。
+   ⚠ 必须显式 content-box：全局 `*{box-sizing:border-box}` 下，
+   14px 的边框盒会被 5px padding + 1px border 吃光，
+   内容盒只剩 2×2px，24 单位的 viewBox 缩成一个污点（实测 1.1×1.6px）。
+   这里按 .ic-brand 的同款写法声明 content-box：
+   内容盒 14px + padding 4px×2 + border 1px×2 = 24×24 的贴片。 */
 .panel-head .ic {
-  color: var(--bamboo); width: 14px; height: 14px; padding: 5px;
+  box-sizing: content-box;
+  color: var(--bamboo); width: 14px; height: 14px; padding: 4px;
   border-radius: 8px; flex: none;
   background: rgba(95, 211, 155, .10);
   border: 1px solid rgba(95, 211, 155, .18);
@@ -325,7 +331,12 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 #login-view {
   display: flex; align-items: center; justify-content: center;
   padding: 32px 24px calc(32px + var(--safe-b));
-  overflow: hidden;
+  /* 曾经这里只有 overflow:hidden，滚动的例外只写在 ≤899px 与 ≥1100px 两档，
+     于是 900–1099px 成了空档：矮视口下登录卡被居中裁切、又滚不动，
+     而「演示账号·点一下直接进入」正是在卡片底部——讲者的第一次点击落在屏幕外。
+     实测 1024 宽 / 640 高时 overflow-y=hidden、内容 711 > 可视 689、演示按钮不可见。 */
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 .login-bg { position: fixed; inset: 0; pointer-events: none; z-index: 0;
   background: radial-gradient(130% 90% at 50% -6%, #12201b 0%, #0a0f0d 58%, #080d0b 100%);
@@ -794,33 +805,36 @@ body[data-theme="dark"] #scene-fallback .fallback-note {
   display: flex; justify-content: space-between; align-items: center; gap: 10px;
   pointer-events: none; z-index: 3;
 }
+/* ⚠ 这三个浮层压在 #scene-canvas（实时 WebGL）之上。
+   原先它们带 backdrop-filter: blur()，会让浏览器每帧把 WebGL 帧缓冲重新模糊一次，
+   再叠加 UnrealBloom 的后处理链——在核显/软件渲染的会场机器上这是最可能的掉帧源，
+   而且恰好发生在开场最需要顺滑的那几秒。
+   改成更不透明的纯色遮罩，视觉上几乎无差别，成本差一个数量级。 */
 .scene-tag {
   display: inline-flex; align-items: center; gap: 7px;
   font-size: 12px; font-weight: 700; letter-spacing: .04em;
   color: var(--ink);
   padding: 6px 14px; border-radius: 999px;
-  background: rgba(255, 255, 255, .88);
+  background: rgba(255, 255, 255, .94);
   border: 1px solid var(--line-strong);
-  -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
   box-shadow: 0 4px 12px rgba(0, 0, 0, .04);
 }
 .scene-tag .ic { color: var(--bamboo); width: 15px; height: 15px; }
 .scene-hint {
   font-size: 11.5px; color: var(--ink-dim);
   padding: 6px 14px; border-radius: 999px;
-  background: rgba(255, 255, 255, .82);
+  background: rgba(255, 255, 255, .9);
   border: 1px solid var(--line);
-  -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
   box-shadow: 0 2px 8px rgba(0, 0, 0, .03);
 }
 body[data-theme="dark"] .scene-tag {
   color: rgba(241, 245, 249, .9);
-  background: rgba(10, 18, 15, .72);
+  background: rgba(10, 18, 15, .86);
   border-color: rgba(220, 245, 235, .15);
 }
 body[data-theme="dark"] .scene-hint {
   color: rgba(203, 213, 225, .7);
-  background: rgba(10, 18, 15, .6);
+  background: rgba(10, 18, 15, .8);
   border-color: rgba(220, 245, 235, .1);
 }
 
@@ -835,10 +849,9 @@ body[data-theme="dark"] .scene-hint {
   max-width: min(68%, 440px);
   padding: 12px 18px;
   font-size: 14px; line-height: 1.65; color: var(--ink);
-  background: rgba(255, 255, 255, .94);
+  background: rgba(255, 255, 255, .96);
   border: 1px solid var(--line-strong);
   border-radius: 16px 16px 16px 4px;
-  -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
   box-shadow: var(--shadow-pop);
   animation: rise .35s ease-out both;
   transition: opacity .7s ease, transform .7s ease;
@@ -859,7 +872,7 @@ body[data-theme="dark"] .scene-hint {
 }
 body[data-theme="dark"] #panda-bubble {
   color: #f8fafc;
-  background: rgba(19, 34, 28, .92);
+  background: rgba(19, 34, 28, .95);
   border-color: rgba(220, 245, 235, .18);
 }
 body[data-theme="dark"] #panda-bubble::after {
@@ -1307,6 +1320,71 @@ body[data-theme="dark"] .btn-send {
 /* 回答进行中：发送键让位给暂停键（两个按钮同尺寸、同位置，切换不跳动） */
 .inputbar[data-busy="1"] .btn-send { display: none; }
 
+/* --------------------------- 9.5 附件（多模态上传） */
+/* 暂存区：发送前显示这轮带了什么；上传中给一个"正在读"的状态 */
+.attach-list {
+  display: flex; flex-wrap: wrap; gap: 8px;
+  padding: 10px 14px 0; border-top: 1px solid var(--line);
+  background: var(--card);
+}
+.attach-chip {
+  display: inline-flex; align-items: center; gap: 8px;
+  max-width: 260px; padding: 5px 8px 5px 10px;
+  border: 1px solid var(--line-strong); border-radius: 10px;
+  background: var(--card-2); font-size: 12.5px; color: var(--ink-2);
+}
+.attach-chip.uploading { opacity: .7; }
+.attach-chip.error { color: var(--bad); border-color: rgba(243, 130, 122, .5); }
+.attach-chip .ic { width: 15px; height: 15px; flex: none; color: var(--bamboo); }
+.attach-thumb {
+  width: 34px; height: 34px; border-radius: 7px; object-fit: cover; flex: none;
+  border: 1px solid var(--line);
+}
+.attach-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attach-meta { color: var(--ink-dim); font-size: 11px; flex: none; }
+.attach-drop {
+  border: 1px dashed var(--bamboo); border-radius: 10px;
+  background: var(--bamboo-light); padding: 2px 8px; font-size: 12px; color: var(--bamboo);
+}
+/* 最近上传：配额满了要能自己清理，历史里的图也要能再引用一次 */
+.attach-list .attach-recent {
+  flex: 1 1 100%; display: flex; flex-direction: column; gap: 6px;
+  margin-top: 2px; padding-top: 8px; border-top: 1px dashed var(--line);
+}
+.attach-recent-head {
+  font-size: 11.5px; color: var(--ink-dim);
+  display: flex; align-items: center; gap: 6px;
+}
+.attach-recent-row {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 12.5px; color: var(--ink-2); min-width: 0;
+}
+.attach-recent-row .ic { width: 15px; height: 15px; flex: none; color: var(--bamboo); }
+.attach-recent-row .attach-name { flex: 1 1 auto; min-width: 0; }
+.attach-recent-row .attach-meta { flex: none; }
+.attach-recent-row .icon-btn { width: 24px; height: 24px; flex: none; }
+.attach-recent-row .icon-btn .ic { width: 13px; height: 13px; }
+.attach-recent-more {
+  align-self: flex-start; background: none; border: none; padding: 0;
+  font-size: 11.5px; color: var(--bamboo); cursor: pointer; text-decoration: underline;
+}
+/* 聊天区里的文件卡：用户消息下面挂着"这轮发了什么" */
+.msg-files { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.msg-file {
+  display: flex; align-items: center; gap: 8px; max-width: 320px;
+  padding: 8px 10px; border: 1px solid var(--line-strong); border-radius: 10px;
+  background: var(--card-2); font-size: 12.5px; color: var(--ink-2);
+  text-decoration: none;
+}
+.msg-file .ic { width: 16px; height: 16px; flex: none; color: var(--bamboo); }
+.msg-file .msg-file-info { min-width: 0; }
+.msg-file .msg-file-name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.msg-file .msg-file-sub { color: var(--ink-dim); font-size: 11px; }
+.msg-file:hover { border-color: var(--bamboo); }
+.msg-file img { width: 46px; height: 46px; border-radius: 8px; object-fit: cover; flex: none; border: 1px solid var(--line); }
+/* 拖拽到聊天区时的落点提示 */
+#chat.drop-active { outline: 2px dashed var(--bamboo); outline-offset: -8px; border-radius: var(--r); }
+
 /* 暂停后接着往下说的入口：和普通 chip 同尺寸，用琥珀色区分 */
 .chip-resume {
   color: var(--amber);
@@ -1733,19 +1811,18 @@ body[data-theme="dark"] .btn-reject { color: #fb7185; background: rgba(251, 113,
 .evidence-item .ev-row.clickable { cursor: pointer; }
 .evidence-item .ev-row.clickable:hover { color: var(--bamboo); }
 .evidence-item .ev-date-sm { font-family: var(--font-num); font-size: 11px; color: var(--ink-dim); margin-right: 8px; font-weight: 600; }
+/* 「说说我的梦想」= 成长页的主行动。
+   这里曾把它做成白字压在琥珀渐变上（对比度只有 2.15–3.19:1，全文件最差），
+   而琥珀在本系统里是有语义的：临近截止 / 等待家长确认 / 暂停 / 进度。
+   把警示色当主行动色用既不符合系统惯例，也让评委误以为这个按钮在提醒什么。
+   现在它只保留版式，配色交给 .btn-primary（深墨绿字 + 竹青底 ≈ 9.9:1）。 */
 .dream-btn {
   grid-column: 1 / -1;
   justify-self: center;
   padding: 14px 36px; font-size: 15px; font-weight: 750;
   border-radius: 999px;
-  background: linear-gradient(135deg, #f59e0b, #d97706);
-  color: #ffffff;
-  box-shadow: 0 8px 24px -2px rgba(245, 158, 11, .35);
 }
-.dream-btn:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 12px 28px -2px rgba(245, 158, 11, .45);
-}
+.dream-btn:hover { transform: translateY(-2px); }
 .dream-btn .ic { width: 18px; height: 18px; }
 .dream-out {
   grid-column: 1 / -1;

@@ -68,6 +68,7 @@ cp .env.example .env   # 然后填入你的 LLM_API_KEY 等
 | 通知落地「一份通知，千家千版」：学校/机构通知 → 按孩子记忆出专属版 + 自动建事务/清单/提醒；admin 可批量下发 | `server/family.py` `POST /api/notice` |
 | 童年备忘录导出：整份档案打包 zip 交还孩子（家长 403） | `server/family.py` `GET /api/export` |
 | PWA：可添加到主屏幕；断网时档案类数据用缓存撑起，AI 端点不缓存（缓存键按 token 隔离） | `web/sw.js` + `web/manifest.webmanifest` |
+| 多模态附件：上传图片/PDF/Word/Excel/文本（拖拽、点选或粘贴），图片走视觉、扫描件 PDF 渲染成图、文档抽取正文进上下文；附件跨轮可追问、可管理 | `server/files.py` + `POST /api/files` |
 
 **降级不降真**：DAG 规划失败 → 单 LLM 直出卡片（跳过拆解展示，绝不跳过生成）；节点失败 → 标记后继续；联网工具失败/没搜到 → 如实告诉孩子"没查到"，不编造结果。
 
@@ -112,6 +113,9 @@ cp .env.example .env   # 然后填入你的 LLM_API_KEY 等
 # 续写指令路由：暂停后点「继续」发来的话必须走闲聊直答，不能误建事务
 .venv/bin/python tests/test_router.py
 
+# 多模态附件：类型识别/内容抽取/配额/提示注入围栏/两种协议的图片消息/上传接口
+.venv/bin/python tests/test_files.py
+
 # 服务启动后的端到端用例（真实打接口 + 真实 LLM）：
 .venv/bin/python tests/test_api.py --base http://localhost:8000
 ```
@@ -123,7 +127,10 @@ cp .env.example .env   # 然后填入你的 LLM_API_KEY 等
 撞档隔离 → query token 收窄 → 限频 → 历史落盘与重启恢复 → 收件箱裁决联动 → 事务去重 → 安全/缓存响应头。
 `test_memory.py` 覆盖：注入字符预算与活跃主题择优、检索相关度/门槛/去重、归档累计计数与行数上限、读缓存写后失效。
 `test_web_static.py` / `test_pause_layout.py` 覆盖：前端 id/图标引用与括号配平、"暂停键在输入栏内且与发送键同位置"、
-窄屏可见、断网条与「重试/继续」入口都接上了；`test_router.py` 覆盖续写指令的路由（不误建事务、跳过多余的 LLM 分类调用）。
+窄屏可见、断网条与「重试/继续」入口、附件入口与文件卡都接上了；`test_router.py` 覆盖续写指令的路由（不误建事务、跳过多余的 LLM 分类调用）。
+`test_files.py` 覆盖：扩展名/MIME 识别与文件名消毒（路径穿越只留在展示名里）、文本/GBK/CSV/Word/Excel/PDF 取正文、
+扫描件如实告知读不出、图片压缩到 1280 长边并保持 16 倍数、附件配额淘汰最旧、正文注入的字符预算与 `<file_data>` 围栏、
+OpenAI/Anthropic 两种协议的图片消息构造、上传接口的 415/413/400/403/404 边界、带附件的一轮对话（含悄悄话不带附件）。
 
 ## 八、团队成员
 
