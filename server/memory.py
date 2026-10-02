@@ -139,6 +139,30 @@ class MemoryStore:
     def topic_names(self) -> str:
         return ", ".join(self.read_index().get("topics", {}).keys()) or "（空）"
 
+    def due_reminders(self) -> list[dict]:
+        """到期提醒：daily 每天触发；weekly:sat 每周对应日；日期当天及前 2 天提示。"""
+        try:
+            items = json.loads((self.dir / "reminders.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return []
+        if not isinstance(items, list):
+            return []
+        today = date.today()
+        wd_en = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"][today.weekday()]
+        due = []
+        for r in items:
+            t = str(r.get("time", ""))
+            if t == "daily" or t == f"weekly:{wd_en}":
+                due.append(r)
+            else:
+                try:
+                    days = (date.fromisoformat(t) - today).days
+                    if 0 <= days <= 2:
+                        due.append(r)
+                except ValueError:
+                    continue
+        return [{"text": str(r.get("text", "")), "time": str(r.get("time", ""))} for r in due if r.get("text")]
+
     def export(self) -> dict:
         """给记忆本页用的完整档案。"""
         index = self.read_index()
@@ -231,6 +255,7 @@ async def extract_and_store(store: MemoryStore, user_msg: str, assistant_msg: st
                 )},
             ],
             max_tokens=600,
+            caller="extract",
         )
         await store.write_extraction(data)
     except Exception as e:

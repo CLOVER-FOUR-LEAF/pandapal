@@ -74,8 +74,12 @@ body {
 @keyframes blink { 0%, 92%, 100% { transform: scaleY(1); } 95% { transform: scaleY(.08); } }
 .panda-svg.thinking .eye { animation: none; transform: translateY(-2px); }
 .panda-svg.speaking .mouth-open { display: inline; animation: talk .35s ease-in-out infinite alternate; transform-origin: 100px 138px; }
-.panda-svg .mouth-open { display: none; }
+.panda-svg .mouth-open, .panda-svg .mouth-sad { display: none; }
 .panda-svg.speaking .mouth-smile { display: none; }
+.panda-svg.sad .mouth-smile { display: none; }
+.panda-svg.sad .mouth-sad { display: inline; }
+.panda-svg.sad .eye { animation: none; transform: translateY(1px) scaleY(.9); }
+.panda-svg.worried .eye { animation: none; transform: translateY(-1px); }
 @keyframes talk { from { transform: scaleY(.5); } to { transform: scaleY(1.15); } }
 .panda-svg.happy .mouth-smile { transform-origin: 100px 138px; animation: grin 1.2s ease-in-out 2; }
 @keyframes grin { 50% { transform: scale(1.12); } }
@@ -119,6 +123,27 @@ body {
 .card .sec-items { font-size: 14px; line-height: 1.7; padding-left: 4px; }
 .card .sec-items li { margin-left: 16px; }
 .card .card-closing { font-size: 13px; color: var(--accent2); font-weight: 600; margin-top: 8px; }
+
+/* 打字中 */
+.typing { display: inline-flex; gap: 4px; padding: 12px 14px !important; }
+.typing i { width: 7px; height: 7px; border-radius: 50%; background: #c9b998; animation: tp 1s infinite; }
+.typing i:nth-child(2) { animation-delay: .15s; }
+.typing i:nth-child(3) { animation-delay: .3s; }
+@keyframes tp { 0%,60%,100% { transform: translateY(0); opacity: .5; } 30% { transform: translateY(-4px); opacity: 1; } }
+
+/* 提醒小丸 */
+.reminders { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.reminder-pill { font-size: 12px; background: #fff3dd; border: 1px solid #f0dcb8; color: #a97f2f; border-radius: 999px; padding: 4px 10px; }
+
+/* 语音按钮 */
+#mic-btn { padding: 0 12px; border: none; border-radius: 12px; background: #f6ead6; font-size: 17px; cursor: pointer; }
+#mic-btn.recording { background: #f2a541; color: #fff; animation: recp 1s infinite; }
+@keyframes recp { 50% { opacity: .7; } }
+
+/* 日志表 */
+.log-row { font-size: 11px; color: #7a6a52; padding: 3px 0; border-bottom: 1px dashed var(--line); display: flex; gap: 8px; }
+.log-row .ok { color: var(--accent2); }
+.log-row .bad { color: #d96c5f; }
 
 /* chips + 输入 */
 .chips { display: flex; gap: 8px; padding: 6px 14px; overflow-x: auto; }

@@ -68,6 +68,7 @@ async def make_plan(store: MemoryStore, message: str) -> dict:
                 )},
             ],
             max_tokens=1500,
+            caller="planner",
         )
         return _validate(plan)
     except Exception as e:

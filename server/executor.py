@@ -22,6 +22,7 @@ async def _run_llm_node(store: MemoryStore, event: str, node: dict, results: dic
             memory_block=store.active_block() or "（暂无记忆）",
         )}],
         max_tokens=800,
+        caller="node",
     )
 
 

@@ -68,10 +68,11 @@ async def api_greeting(name: str):
                 memory_block=block or "（还没有记忆，这是第一次见面）",
             )}],
             max_tokens=200,
+            caller="greeting",
         )
     except llm.LLMError as e:
         raise HTTPException(502, f"LLM 暂不可用：{e}")
-    return {"text": text.strip()}
+    return {"text": text.strip(), "reminders": sess.store.due_reminders()}
 
 
 def _chat_messages(sess, message: str) -> list[dict]:
@@ -102,7 +103,8 @@ async def _chat_stream(sess, message: str):
 
     async def work():
         nonlocal reply_text
-        kind = await router.classify(message)
+        kind, mood = await router.classify(message)
+        await emit({"type": "mood", "mood": mood})
         if kind == "plan":
             await emit({"type": "mode", "mode": "plan"})
             try:
@@ -125,7 +127,7 @@ async def _chat_stream(sess, message: str):
         else:
             await emit({"type": "mode", "mode": "chat"})
             chunks = []
-            async for tok in llm.stream(_chat_messages(sess, message), max_tokens=600):
+            async for tok in llm.stream(_chat_messages(sess, message), max_tokens=600, caller="chat"):
                 chunks.append(tok)
                 await emit({"type": "token", "text": tok})
             reply_text = "".join(chunks)
@@ -184,6 +186,19 @@ async def api_chat(req: ChatReq):
 async def api_memory(name: str):
     sess = await _get_session(name)
     return sess.store.export()
+
+
+@app.get("/api/history")
+async def api_history(name: str):
+    """本会话内的对话历史（供刷新页面后恢复）。"""
+    sess = await _get_session(name)
+    return {"history": list(sess.history)}
+
+
+@app.get("/api/logs")
+async def api_logs(limit: int = 50):
+    """LLM 调用日志：评委可据此核验全部输出为真实生成。"""
+    return {"calls": llm.read_logs(min(limit, 200))}
 
 
 @app.get("/api/health")

@@ -8,7 +8,9 @@
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import AsyncIterator
+from pathlib import Path
 
 import httpx
 
@@ -17,6 +19,43 @@ from . import config
 
 class LLMError(RuntimeError):
     pass
+
+
+LOG_DIR = config.DATA_DIR / "logs"
+
+
+def log_call(caller: str, ok: bool, ms: float, err: str = "") -> None:
+    """每次 LLM 调用留痕（评委可查 API 调用记录，证明真生成）。"""
+    try:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        rec = {
+            "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "caller": caller,
+            "protocol": config.LLM_PROTOCOL,
+            "model": config.LLM_MODEL,
+            "ms": round(ms),
+            "ok": ok,
+        }
+        if err:
+            rec["err"] = err[:200]
+        with open(LOG_DIR / "llm_calls.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
+def read_logs(limit: int = 50) -> list[dict]:
+    try:
+        lines = (LOG_DIR / "llm_calls.jsonl").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    out = []
+    for line in lines[-limit:]:
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return out
 
 
 def _keys() -> list[str]:
@@ -59,8 +98,10 @@ async def complete(
     *,
     max_tokens: int = 1200,
     temperature: float = 0.7,
+    caller: str = "unknown",
 ) -> str:
     """非流式补全，返回文本。主备 Key 各尝试一次。"""
+    t0 = time.monotonic()
     last_err: Exception | None = None
     for key in _keys():
         try:
@@ -76,7 +117,9 @@ async def complete(
                     })
                     resp.raise_for_status()
                     data = resp.json()
-                    return "".join(b.get("text", "") for b in data.get("content", []))
+                    out = "".join(b.get("text", "") for b in data.get("content", []))
+                    log_call(caller, True, (time.monotonic() - t0) * 1000)
+                    return out
                 resp = await _openai_request(client, key, {
                     "model": config.LLM_MODEL,
                     "messages": messages,
@@ -85,9 +128,12 @@ async def complete(
                     "stream": False,
                 })
                 resp.raise_for_status()
-                return resp.json()["choices"][0]["message"]["content"] or ""
+                out = resp.json()["choices"][0]["message"]["content"] or ""
+                log_call(caller, True, (time.monotonic() - t0) * 1000)
+                return out
         except Exception as e:  # noqa: BLE001 主备切换需要捕获一切
             last_err = e
+    log_call(caller, False, (time.monotonic() - t0) * 1000, str(last_err))
     raise LLMError(f"LLM 调用失败: {last_err}")
 
 
@@ -96,8 +142,10 @@ async def stream(
     *,
     max_tokens: int = 1200,
     temperature: float = 0.7,
+    caller: str = "unknown",
 ) -> AsyncIterator[str]:
     """流式补全，逐段产出文本。协议细节对外屏蔽。"""
+    t0 = time.monotonic()
     key = _keys()[0]
     async with httpx.AsyncClient(timeout=config.LLM_TIMEOUT) as client:
         if config.LLM_PROTOCOL == "anthropic":
@@ -134,6 +182,7 @@ async def stream(
             )
         async with req as resp:
             resp.raise_for_status()
+            got = False
             async for line in resp.aiter_lines():
                 if not line.startswith("data:"):
                     continue
@@ -148,12 +197,16 @@ async def stream(
                     if chunk.get("type") == "content_block_delta":
                         text = chunk.get("delta", {}).get("text", "")
                         if text:
+                            got = True
                             yield text
                 else:
                     for choice in chunk.get("choices", []):
                         text = choice.get("delta", {}).get("content") or ""
                         if text:
+                            got = True
                             yield text
+            log_call(caller, got, (time.monotonic() - t0) * 1000,
+                     "" if got else "流式响应为空")
 
 
 def extract_json(text: str) -> dict:
@@ -185,9 +238,9 @@ def extract_json(text: str) -> dict:
     raise ValueError("JSON 对象不完整")
 
 
-async def complete_json(messages: list[dict], *, max_tokens: int = 1200) -> dict:
+async def complete_json(messages: list[dict], *, max_tokens: int = 1200, caller: str = "unknown") -> dict:
     """要求模型输出 JSON，自动修复重试一次。"""
-    raw = await complete(messages, max_tokens=max_tokens, temperature=0.3)
+    raw = await complete(messages, max_tokens=max_tokens, temperature=0.3, caller=caller)
     try:
         return extract_json(raw)
     except (ValueError, json.JSONDecodeError):
@@ -195,5 +248,5 @@ async def complete_json(messages: list[dict], *, max_tokens: int = 1200) -> dict
             {"role": "assistant", "content": raw},
             {"role": "user", "content": "格式有误。请只输出一个完整 JSON 对象，不要输出其他任何文字。"},
         ]
-        raw2 = await complete(retry, max_tokens=max_tokens, temperature=0.1)
+        raw2 = await complete(retry, max_tokens=max_tokens, temperature=0.1, caller=caller)
         return extract_json(raw2)

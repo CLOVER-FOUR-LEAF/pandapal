@@ -21,8 +21,9 @@ const SVG = `
   <circle cx="148" cy="122" r="8" fill="#f7c8b8" opacity=".65"/>
   <!-- 鼻子 -->
   <ellipse cx="100" cy="122" rx="7.5" ry="5.5" fill="#2e2a26"/>
-  <!-- 嘴：微笑 / 说话张合 -->
+  <!-- 嘴：微笑 / 说话张合 / 担心 -->
   <path class="mouth-smile" d="M88 136 Q100 146 112 136" stroke="#2e2a26" stroke-width="3" fill="none" stroke-linecap="round"/>
+  <path class="mouth-sad" d="M88 142 Q100 134 112 142" stroke="#2e2a26" stroke-width="3" fill="none" stroke-linecap="round"/>
   <ellipse class="mouth-open" cx="100" cy="139" rx="9" ry="7" fill="#b65a4e"/>
   <ellipse class="mouth-open" cx="100" cy="141" rx="5" ry="3.5" fill="#e8907f"/>
 </svg>`;
@@ -39,6 +40,6 @@ export function mountPanda(holder) {
 }
 
 export function setMood(svg, mood) {
-  svg.classList.remove("thinking", "speaking", "happy", "sleepy");
+  svg.classList.remove("thinking", "speaking", "happy", "sleepy", "sad", "worried");
   if (mood && mood !== "normal") svg.classList.add(mood);
 }

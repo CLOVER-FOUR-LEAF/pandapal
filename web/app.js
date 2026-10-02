@@ -6,6 +6,7 @@ let pandaSvg = null;
 
 const STATUS_TAG = { active: ["进行中", "status-active"], dropped: ["放下了", "status-dropped"], done: ["完成啦", "status-done"] };
 const NODE_ICON = { pending: "○", done: "✓", error: "✕" };
+const MOOD_MAP = { happy: "happy", sad: "sad", nervous: "worried", normal: "normal" };
 
 // ---------- 视图切换 ----------
 function show(id) {
@@ -38,6 +39,7 @@ async function doLogin() {
     });
     state.name = name;
     enterMain();
+    loadHistory();
     loadGreeting();
   } catch (e) {
     $("#login-hint").textContent = e.message;
@@ -51,7 +53,16 @@ function enterMain() {
   $("#child-name").textContent = `@ ${state.name}`;
   pandaSvg = mountPanda($("#main-panda"));
   renderChips();
+  setupMic();
   $("#msg-input").focus();
+}
+
+async function loadHistory() {
+  try {
+    const resp = await api(`/api/history?name=${encodeURIComponent(state.name)}`);
+    const { history } = await resp.json();
+    history.forEach((m) => addMsg(m.role === "user" ? "me" : "ai", m.content));
+  } catch { /* 无历史或拉取失败都不阻塞 */ }
 }
 
 async function loadGreeting() {
@@ -60,8 +71,19 @@ async function loadGreeting() {
   bubble.textContent = "……";
   try {
     const resp = await api(`/api/greeting?name=${encodeURIComponent(state.name)}`);
-    const { text } = await resp.json();
+    const { text, reminders } = await resp.json();
     bubble.textContent = text;
+    if (reminders && reminders.length) {
+      const box = document.createElement("div");
+      box.className = "reminders";
+      reminders.forEach((r) => {
+        const pill = document.createElement("span");
+        pill.className = "reminder-pill";
+        pill.textContent = `⏰ ${r.text}`;
+        box.appendChild(pill);
+      });
+      bubble.appendChild(box);
+    }
     addMsg("ai", text);
   } catch (e) {
     bubble.textContent = e.message;
@@ -155,6 +177,13 @@ async function send() {
   $("#panda-bubble").classList.add("hidden");
   setMood(pandaSvg, "thinking");
 
+  const typing = document.createElement("div");
+  typing.className = "msg ai typing";
+  typing.innerHTML = "<i></i><i></i><i></i>";
+  $("#chat").appendChild(typing);
+  scrollBottom();
+  const dropTyping = () => typing.remove();
+
   let aiBubble = null;
   let tree = null;
   try {
@@ -178,12 +207,17 @@ async function send() {
         let ev;
         try { ev = JSON.parse(raw.slice(5)); } catch { continue; }
         if (ev.type === "mode" && ev.mode === "plan") {
+          dropTyping();
           setMood(pandaSvg, "thinking");
+        } else if (ev.type === "mood") {
+          setMood(pandaSvg, MOOD_MAP[ev.mood] || "thinking");
         } else if (ev.type === "token") {
+          dropTyping();
           if (!aiBubble) { aiBubble = addMsg("ai", ""); setMood(pandaSvg, "speaking"); }
           aiBubble.textContent += ev.text;
           scrollBottom();
         } else if (ev.type === "plan") {
+          dropTyping();
           tree = addTaskTree(ev.title, ev.nodes);
         } else if (ev.type === "node" && tree) {
           updateNode(tree, ev);
@@ -191,13 +225,15 @@ async function send() {
           addCard(ev.card);
           setMood(pandaSvg, "happy");
         } else if (ev.type === "error") {
+          dropTyping();
           addMsg("ai", `😵 ${ev.message}`);
         } else if (ev.type === "done") {
-          // 流结束
+          dropTyping();
         }
       }
     }
   } catch (e) {
+    dropTyping();
     addMsg("ai", `😵 ${e.message}`);
   } finally {
     state.busy = false;
@@ -241,6 +277,51 @@ async function openMemory() {
   } catch (e) {
     $("#memory-md").textContent = e.message;
   }
+  loadLogs();
+}
+
+async function loadLogs() {
+  const box = $("#llm-logs");
+  try {
+    const resp = await api("/api/logs?limit=40");
+    const { calls } = await resp.json();
+    box.innerHTML = calls.length ? "" : '<div class="msg sys">还没有调用记录</div>';
+    calls.slice().reverse().forEach((c) => {
+      const div = document.createElement("div");
+      div.className = "log-row";
+      div.innerHTML = `<span>${escapeHtml(c.ts)}</span><span>${escapeHtml(c.caller)}</span>
+        <span>${escapeHtml(c.model)}</span><span>${c.ms}ms</span>
+        <span class="${c.ok ? "ok" : "bad"}">${c.ok ? "✓" : "✕ " + escapeHtml(c.err || "")}</span>`;
+      box.appendChild(div);
+    });
+  } catch {
+    box.innerHTML = '<div class="msg sys">日志暂不可用</div>';
+  }
+}
+
+// ---------- 语音输入 ----------
+function setupMic() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) return;
+  const btn = $("#mic-btn");
+  btn.classList.remove("hidden");
+  const rec = new SR();
+  rec.lang = "zh-CN";
+  rec.interimResults = true;
+  let recording = false;
+  rec.onresult = (e) => {
+    let text = "";
+    for (const r of e.results) text += r[0].transcript;
+    $("#msg-input").value = text;
+  };
+  rec.onend = () => { recording = false; btn.classList.remove("recording"); };
+  rec.onerror = () => { recording = false; btn.classList.remove("recording"); };
+  btn.onclick = () => {
+    if (recording) { rec.stop(); return; }
+    recording = true;
+    btn.classList.add("recording");
+    try { rec.start(); } catch { /* 重复 start 防护 */ }
+  };
 }
 
 // ---------- 启动 ----------

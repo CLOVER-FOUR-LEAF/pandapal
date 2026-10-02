@@ -9,6 +9,7 @@ import asyncio
 import json
 import os
 import re
+import threading
 from collections import deque
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from . import config
 from .memory import MemoryStore
 
 PROFILES_PATH = config.DATA_DIR / "profiles.json"
+_PROFILES_LOCK = threading.Lock()
 
 
 def _read_profiles() -> dict:
@@ -66,17 +68,18 @@ _sessions: dict[str, Session] = {}
 
 def resolve(name: str) -> tuple[Path, bool]:
     """登录名 → 档案目录。命中映射用映射；否则新建空白档。"""
-    profiles = _read_profiles()
-    if name in profiles:
-        child_dir = config.DATA_DIR / profiles[name]
-        child_dir.mkdir(parents=True, exist_ok=True)
-        return child_dir, False
-    child_dir = config.DATA_DIR / _safe_dirname(name)
-    is_new = not child_dir.exists()
-    _scaffold(child_dir, name)
-    profiles[name] = child_dir.name
-    _write_profiles(profiles)
-    return child_dir, is_new
+    with _PROFILES_LOCK:
+        profiles = _read_profiles()
+        if name in profiles:
+            child_dir = config.DATA_DIR / profiles[name]
+            child_dir.mkdir(parents=True, exist_ok=True)
+            return child_dir, False
+        child_dir = config.DATA_DIR / _safe_dirname(name)
+        is_new = not child_dir.exists()
+        _scaffold(child_dir, name)
+        profiles[name] = child_dir.name
+        _write_profiles(profiles)
+        return child_dir, is_new
 
 
 async def login(name: str) -> Session:

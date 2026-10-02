@@ -14,10 +14,11 @@ PERSONA = """你是 PandaButler（熊猫管家），{name} 一个人的专属成
 - 涉及健康（感冒、吃药、休息）要格外贴心
 - 不知道的事诚实说不知道，不编造"""
 
-ROUTER = """判断孩子发来的消息属于哪一类。
+ROUTER = """判断孩子发来的消息属于哪一类，并感受孩子的情绪。
 - "plan"：孩子提出一个需要筹备的事件/任务（出行、比赛、活动、准备某事），需要查信息、拆步骤、给方案。
 - "chat"：闲聊、提问、情绪、分享等不需要多步骤筹备的对话。
-只输出一个 JSON 对象：{{"type": "plan 或 chat", "reason": "一句话"}}
+情绪 mood 取值：happy（开心/兴奋）/ sad（难过/委屈/低落）/ nervous（紧张/焦虑）/ normal（平静或不明）。
+只输出一个 JSON 对象：{{"type": "plan 或 chat", "mood": "happy|sad|nervous|normal", "reason": "一句话"}}
 
 孩子消息：{message}"""
 

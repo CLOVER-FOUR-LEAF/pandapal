@@ -8,5 +8,6 @@ dist/
 *.log
 .pytest_cache/
 data/child_*/
+data/logs/
 daily_tmp/
 !data/child_xiaodou/

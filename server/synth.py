@@ -39,6 +39,7 @@ async def synthesize(store: MemoryStore, event: str, results: dict[str, str]) ->
             )},
         ],
         max_tokens=1500,
+        caller="synth",
     )
     return _normalize_card(data)
 
@@ -56,6 +57,7 @@ async def direct_card(store: MemoryStore, event: str) -> dict:
             )},
         ],
         max_tokens=1500,
+        caller="synth_fallback",
     )
     return _normalize_card(data)
 
