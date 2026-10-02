@@ -20,6 +20,18 @@ _TODO_HINTS = ("要交", "要写", "要做", "要去", "要准备", "要复习",
                "ddl", "作业", "论文", "ppt", "复习", "文章", "报告", "作品")
 _TODO_SPLIT = re.compile(r"[，,；;。、！!？?\n]|然后|以及|另外|还有")
 
+# 「接着刚才没说完的往下说」：客户端在用户暂停后点「继续」时发来的续写指令。
+# 它必须走闲聊直答——一旦被分类成 new_affair/todo，管家会去建事务、出计划卡，
+# 用户只是想接着听完那段话而已。确定性拦截，不依赖模型判对。
+_CONTINUE_HINTS = ("接着说", "继续说完", "接着上面", "继续上面", "往下说",
+                   "接着说下去", "把刚才的说完", "接着没说完")
+
+
+def looks_like_continuation(message: str) -> bool:
+    """是否是「接着上面继续说」的续写指令（长句直接排除，避免误伤正常提问）。"""
+    text = (message or "").strip()
+    return len(text) <= 60 and any(h in text for h in _CONTINUE_HINTS)
+
 
 def looks_like_todos(message: str) -> bool:
     """确定性兜底：拆成片段后，含待办词的片段 ≥2 个就视为多任务。LLM 漏判时用它纠偏。"""
@@ -45,6 +57,9 @@ def _fallback(message: str) -> dict:
 
 async def classify(message: str, affairs_brief: str = "") -> dict:
     """返回 {intent, mood, affair_id, reason}。LLM 分类失败时用关键词保底。"""
+    if looks_like_continuation(message):
+        # 续写指令不需要分类：直接闲聊直答，省一次 LLM 调用，也不会误建事务
+        return {"intent": "chat", "mood": "normal", "affair_id": None, "reason": "续写指令"}
     try:
         data = await llm.complete_json(
             [{"role": "user", "content": prompts.ROUTER.format(

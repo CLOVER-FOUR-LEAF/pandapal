@@ -711,24 +711,8 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   }
   #affair-detail .drawer-body { flex: 1; min-height: 0; overflow-y: auto; }
 
-.chat-panel { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; position: relative; }
-#chat { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
-
-/* 暂停按钮：回答进行中浮在对话栏右下角，点它中止当前回答 */
-.pause-btn {
-  position: absolute; right: 16px; bottom: 78px; z-index: 6;
-  display: inline-flex; align-items: center; gap: 6px;
-  font-size: 12.5px; font-weight: 600;
-  padding: 7px 14px; border-radius: 999px;
-  color: var(--amber);
-  background: color-mix(in srgb, var(--card-2) 92%, transparent);
-  border: 1px solid rgba(240, 180, 95, .45);
-  box-shadow: var(--shadow-card);
-  -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
-  animation: rise .25s ease-out both;
-}
-.pause-btn:hover { background: var(--amber-light); }
-.pause-btn .ic { width: 14px; height: 14px; }
+  .chat-panel { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+  #chat { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
 }
 
 /* 星球速览：窄条入口卡，整卡可点进星球页 */
@@ -1096,6 +1080,12 @@ body[data-theme="dark"] .msg.me {
   background: var(--card-2); border: 1px dashed var(--line-strong);
   border-radius: 999px; padding: 4px 16px;
 }
+/* 可点击重发的系统提示：做成明确的按钮态，别让人以为是普通灰字 */
+.msg.sys.retryable {
+  color: var(--amber); border-color: rgba(240, 180, 95, .5);
+  border-style: solid; cursor: pointer;
+}
+.msg.sys.retryable:hover { background: color-mix(in srgb, var(--amber) 12%, var(--card-2) 88%); }
 
 /* AI 消息行（左）：管家立体头像 + 优雅卡片正文 */
 .msg.ai {
@@ -1293,6 +1283,40 @@ body[data-theme="dark"] .btn-send {
   box-shadow: 0 4px 14px rgba(52, 211, 153, .3);
 }
 .btn-send .ic { width: 17px; height: 17px; }
+
+/* 暂停按钮：回答进行中在发送键原位显示（同尺寸圆形），点它中止当前回答。
+   窄屏也照常显示——早先它被写在 @media (min-width: 1100px) 块里，手机上根本看不到 */
+.pause-btn {
+  width: 42px; height: 42px; padding: 0; border-radius: 50%; flex: none;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: var(--amber);
+  background: color-mix(in srgb, var(--amber) 14%, var(--card-2) 86%);
+  border: 1px solid rgba(240, 180, 95, .5);
+  box-shadow: 0 4px 12px rgba(240, 180, 95, .18);
+  transition: transform .15s ease, background .15s ease, border-color .15s ease;
+}
+.pause-btn:hover { background: color-mix(in srgb, var(--amber) 24%, var(--card-2) 76%); }
+.pause-btn:active { transform: scale(.94); }
+.pause-btn .ic { width: 16px; height: 16px; }
+/* 回答进行中：发送键让位给暂停键（两个按钮同尺寸、同位置，切换不跳动） */
+.inputbar[data-busy="1"] .btn-send { display: none; }
+
+/* 暂停后接着往下说的入口：和普通 chip 同尺寸，用琥珀色区分 */
+.chip-resume {
+  color: var(--amber);
+  border-color: rgba(240, 180, 95, .45);
+  background: color-mix(in srgb, var(--amber) 12%, var(--card-2) 88%);
+}
+.chip-resume:hover { color: var(--amber); border-color: var(--amber); }
+.chip-resume::before { content: "▸"; font-size: 10px; line-height: 1; }
+
+/* 断网提示条：弱网/离线时明确告知，而不是让点击看起来没反应 */
+.offline-bar {
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  padding: 8px 14px; font-size: 12.5px; font-weight: 600;
+  color: #07130d; background: var(--amber);
+}
+.offline-bar .ic { width: 15px; height: 15px; }
 
 /* --------------------------- 10 DAG / 方案卡 / 抽屉 */
 .dag {

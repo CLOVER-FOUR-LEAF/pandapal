@@ -330,6 +330,12 @@
      ============================================================ -->
 <section id="main-view" class="view hidden" aria-label="管家主界面">
 
+  <!-- 断网提示：弱网/离线时别让点击看起来像死机 -->
+  <div id="offline-bar" class="offline-bar hidden" role="status" aria-live="polite">
+    <svg class="ic" aria-hidden="true"><use href="#i-clock"/></svg>
+    <span>网络好像断了，恢复后会自动重试</span>
+  </div>
+
   <header id="topbar" class="topbar" role="banner">
     <span class="brand">
       <svg class="ic ic-brand" aria-hidden="true"><use href="#i-logo"/></svg>
@@ -439,10 +445,6 @@
 
       <div id="chips" class="chips" role="group" aria-label="快捷话题"></div>
 
-      <button id="pause-btn" class="pause-btn hidden" type="button" aria-label="暂停管家回答">
-        <svg class="ic" aria-hidden="true"><use href="#i-pause"/></svg><span>暂停</span>
-      </button>
-
       <div class="inputbar">
         <button id="secret-btn" class="icon-btn" type="button"
                 aria-label="悄悄话：家长视角看不到" aria-pressed="false">
@@ -455,7 +457,12 @@
         <label class="sr-only" for="msg-input">对管家说的话</label>
         <input id="msg-input" type="text" placeholder="跟熊猫管家说说今天…"
                autocomplete="off" enterkeyhint="send">
-        <button id="send-btn" class="btn btn-primary btn-send" type="button" aria-label="发送">
+        <!-- 回答进行中：发送键原位换成暂停键（和主流 agent 一致），停止后已生成的内容保留 -->
+        <button id="pause-btn" class="pause-btn hidden" type="button"
+                aria-label="暂停回答" title="暂停回答（Esc）">
+          <svg class="ic" aria-hidden="true"><use href="#i-pause"/></svg>
+        </button>
+        <button id="send-btn" class="btn btn-primary btn-send" type="button" aria-label="发送" title="发送（Enter）">
           <svg class="ic" aria-hidden="true"><use href="#i-send"/></svg>
         </button>
       </div>
