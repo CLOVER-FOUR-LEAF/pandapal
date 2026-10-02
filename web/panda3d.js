@@ -27,12 +27,18 @@ function pick3(passed) {
 const C = {
   white: 0xf2eee5,
   black: 0x242a2c,
-  black2: 0x353c3d,
+  black2: 0x303936,
   pink: 0xc99187,
-  bamboo: 0x72958b,
+  bamboo: 0x779e93,
   paper: 0xf5eddc,
-  book: 0x385c56,
+  book: 0x426a61,
   pen: 0xc49a60,
+};
+
+const FORM = {
+  headRadius: 1.68, headScale: [1.13, 0.92, 0.94], headCenterY: 0.15, headRestY: 4.3,
+  bodyRadius: 1.55, bodyScale: [0.98, 0.98, 0.86], bodyRestY: 2.06,
+  browY: 0.52, mouthY: -0.62,
 };
 
 function fabricTexture(t) {
@@ -113,12 +119,26 @@ function furTextures(t) {
 }
 
 function headGeometry(t) {
-  const geometry = new t.SphereGeometry(1.72, 48, 36);
+  const geometry = new t.SphereGeometry(FORM.headRadius, 64, 48);
   const p = geometry.attributes.position;
   for (let i = 0; i < p.count; i++) {
-    const y = p.getY(i) / 1.72;
-    const cheek = 1 + 0.11 * Math.exp(-Math.pow((y + 0.28) * 2.5, 2));
-    p.setXYZ(i, p.getX(i) * cheek, p.getY(i), p.getZ(i));
+    const y = p.getY(i) / FORM.headRadius;
+    const cheek = 1 + 0.13 * Math.exp(-Math.pow((y + 0.26) * 2.4, 2));
+    const x = p.getX(i) * cheek;
+    const worldX = x * FORM.headScale[0], worldY = p.getY(i) * FORM.headScale[1] + FORM.headCenterY;
+    const muzzle = p.getZ(i) > 0 ? muzzleDepth(worldX, worldY) * Math.min(1, p.getZ(i) / (FORM.headRadius * 0.75)) / FORM.headScale[2] : 0;
+    p.setXYZ(i, x, p.getY(i), p.getZ(i) + muzzle);
+  }
+  geometry.computeVertexNormals();
+  return geometry;
+}
+
+function bodyGeometry(t, grow = 1, thetaStart = 0, thetaLength = Math.PI) {
+  const geometry = new t.SphereGeometry(FORM.bodyRadius * grow, 40, 30, 0, Math.PI * 2, thetaStart, thetaLength);
+  const p = geometry.attributes.position;
+  for (let i = 0; i < p.count; i++) {
+    const y = p.getY(i) / FORM.bodyRadius;
+    p.setXYZ(i, p.getX(i) * (1 - y * 0.1), p.getY(i), p.getZ(i) * (1 - y * 0.04));
   }
   geometry.computeVertexNormals();
   return geometry;
@@ -131,18 +151,62 @@ function curveMesh(t, points, radius, material) {
   ), material);
 }
 
+function muzzleDepth(x, y) {
+  return 0.09 * Math.exp(-Math.pow(x / 0.6, 2) - Math.pow((y + 0.43) / 0.34, 2));
+}
+
 function faceDepth(x, y) {
-  const ny = (y - 0.2) / (1.72 * 0.93);
-  const cheek = 1 + 0.11 * Math.exp(-Math.pow((ny + 0.28) * 2.5, 2));
-  return 1.72 * 0.91 * Math.sqrt(Math.max(0, 1 - Math.pow(x / (1.72 * 1.06 * cheek), 2) - ny * ny));
+  const ny = (y - FORM.headCenterY) / (FORM.headRadius * FORM.headScale[1]);
+  const cheek = 1 + 0.13 * Math.exp(-Math.pow((ny + 0.26) * 2.4, 2));
+  return FORM.headRadius * FORM.headScale[2] * Math.sqrt(Math.max(0, 1 - Math.pow(x / (FORM.headRadius * FORM.headScale[0] * cheek), 2) - ny * ny)) + muzzleDepth(x, y);
+}
+
+function eyeTexture(t, side) {
+  const size = 128, data = new Uint8Array(size * size * 4);
+  const smooth = (a, b, value) => { const v = Math.max(0, Math.min(1, (value - a) / (b - a))); return v * v * (3 - 2 * v); };
+  for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+    const u = (x + 0.5) / size * 2 - 1, v = (y + 0.5) / size * 2 - 1;
+    const dx = u - side * 0.03, dy = v - 0.0, radius = Math.hypot(dx, dy);
+    const iris = 1 - smooth(0.965, 0.995, radius), pupil = 1 - smooth(0.62, 0.7, radius);
+    const warmth = (1 - smooth(0.3, 0.9, radius)) * smooth(0.55, 0.7, radius);
+    const highlight = (1 - smooth(0.6, 1, Math.hypot((dx + 0.28) / 0.2, (dy - 0.3) / 0.17))) * 0.96;
+    const secondary = (1 - smooth(0.4, 1, Math.hypot((dx - 0.3) / 0.085, (dy + 0.3) / 0.085))) * 0.5;
+    const base = [239, 236, 225], outer = [35, 43, 39], inner = [92, 70, 48], ink = [20, 29, 28];
+    for (let c = 0; c < 3; c++) {
+      const irisColor = outer[c] * (1 - warmth) + inner[c] * warmth;
+      let color = base[c] * (1 - iris) + irisColor * iris;
+      color = color * (1 - pupil) + ink[c] * pupil;
+      const catchlight = Math.max(highlight, secondary);
+      data[(y * size + x) * 4 + c] = color * (1 - catchlight) + [255, 252, 239][c] * catchlight;
+    }
+    data[(y * size + x) * 4 + 3] = 255;
+  }
+  const texture = new t.DataTexture(data, size, size, t.RGBAFormat);
+  texture.colorSpace = t.SRGBColorSpace;
+  texture.magFilter = t.LinearFilter;
+  texture.minFilter = t.LinearMipmapLinearFilter;
+  texture.generateMipmaps = true;
+  texture.needsUpdate = true;
+  return texture;
+}
+
+function eyeGeometry(t) {
+  const geometry = new t.RingGeometry(0, 1, 40, 10);
+  const p = geometry.attributes.position;
+  for (let i = 0; i < p.count; i++) {
+    const x = p.getX(i), y = p.getY(i);
+    p.setXYZ(i, x * 0.255, y * 0.225, 0.062 * Math.sqrt(Math.max(0, 1 - x * x - y * y)));
+  }
+  geometry.computeVertexNormals();
+  return geometry;
 }
 
 // Project facial markings onto the sculpt, keeping their edges flush from every angle.
-function facePatch(t, cx, cy, width, height, angle, lift = 0.044) {
+function facePatch(t, cx, cy, width, height, angle, lift = 0.028, taper = 0) {
   const g = new t.RingGeometry(0, 1, 48, 8);
   const p = g.attributes.position;
   for (let i = 0; i < p.count; i++) {
-    const u = p.getX(i), v = p.getY(i);
+    const v = p.getY(i), u = p.getX(i) * (1 - taper * v);
     const x = cx + u * width * Math.cos(angle) - v * height * Math.sin(angle);
     const y = cy + u * width * Math.sin(angle) + v * height * Math.cos(angle);
     p.setXYZ(i, x, y, faceDepth(x, y) + lift + 0.012 * (1 - u * u - v * v));
@@ -230,7 +294,7 @@ function addPile(t, mesh, material, count, length, seed = 17) {
 // ---------- 姿势通道的目标值（mood -> pose） ----------
 // arm*: 抬臂角度（正=向前抬）；headPitch: 正=低头；brow: 1=皱眉担心；mouth: 张嘴程度
 const POSE = {
-  idle: { armL: 0.3, armR: 0.12, headPitch: 0, headTilt: 0.035, brow: 0, mouth: 0, squash: 1 },
+  idle: { armL: 0.38, armR: 0.2, headPitch: -0.025, headTilt: -0.055, brow: 0, mouth: 0, squash: 1 },
   thinking: { armL: 0.4, armR: 1.38, headPitch: -0.06, headTilt: 0.12, brow: 0.12, mouth: 0, squash: 1 },
   working: { armL: 0.68, armR: 0.95, headPitch: 0.18, headTilt: -0.04, brow: 0.04, mouth: 0, squash: 1 },
   happy: { armL: 0.45, armR: 2.1, headPitch: -0.1, headTilt: -0.07, brow: -0.1, mouth: 0.38, squash: 1 },
@@ -258,6 +322,7 @@ export function createPanda(THREE, opts = {}) {
   const fabric = fabricTexture(t);
   const fur = furTextures(t);
   const blush = blushTexture(t);
+  const eyeMaps = [eyeTexture(t, 1), eyeTexture(t, -1)];
   const mat = (color, o = {}) => new t.MeshPhysicalMaterial({
     color, roughness: 0.98, metalness: 0, specularIntensity: 0.12,
     envMapIntensity: 0.22, sheen: 0.3, sheenRoughness: 0.95,
@@ -272,14 +337,13 @@ export function createPanda(THREE, opts = {}) {
     white: skin(C.white),
     black: skin(C.black, { sheen: 0.34 }),
     black2: skin(C.black2, { sheen: 0.3 }),
-    pink: mat(C.pink, { map: blush, bumpMap: null, sheen: 0, transparent: true, opacity: 0.38, depthWrite: false }),
+    pink: mat(C.pink, { map: blush, bumpMap: null, sheen: 0, transparent: true, opacity: 0.55, depthWrite: false }),
+    muzzle: mat(0xd8c9b2, { map: blush, bumpMap: null, sheen: 0, transparent: true, opacity: 0.5, depthWrite: false }),
     bamboo: mat(C.bamboo, { bumpScale: 0.035 }),
     paper: mat(C.paper, { sheen: 0, bumpScale: 0.009 }),
     book: mat(C.book, { bumpScale: 0.028 }),
     pen: mat(C.pen, { roughness: 0.7, sheen: 0, bumpScale: 0.01 }),
-    eye: mat(0x121c1d, { roughness: 0.23, sheen: 0, map: null, bumpMap: null, specularIntensity: 0.65, envMapIntensity: 0.6 }),
-    iris: mat(0x51463d, { roughness: 0.4, sheen: 0, map: null, bumpMap: null }),
-    nose: mat(0x253032, { roughness: 0.62, sheen: 0, map: null, bumpMap: null }),
+    nose: mat(0x253032, { roughness: 0.42, specularIntensity: 0.5, sheen: 0, map: null, bumpMap: null }),
     thread: mat(0xb9c9b9, { sheen: 0.2, bumpMap: null }),
   };
   const pileMat = surface => {
@@ -324,110 +388,115 @@ export function createPanda(THREE, opts = {}) {
   };
 
   // ---------- 腿脚 ----------
-  const legGeo = new t.CapsuleGeometry(0.43, 0.3, 8, 20);
-  const footGeo = new t.SphereGeometry(0.54, 24, 18);
-  const legL = mk(legGeo, M.black, -0.67, 0.6, 0.03);
-  const legR = mk(legGeo, M.black, 0.67, 0.6, 0.03);
-  const footL = scale(mk(footGeo, M.black, -0.7, 0.33, 0.28), 1, 0.64, 1.25);
-  const footR = scale(mk(footGeo, M.black, 0.7, 0.33, 0.28), 1, 0.64, 1.25);
+  const legGeo = new t.CapsuleGeometry(0.43, 0.24, 8, 20);
+  const footGeo = new t.SphereGeometry(0.51, 24, 18);
+  const legL = mk(legGeo, M.black, -0.64, 0.56, 0.02);
+  const legR = mk(legGeo, M.black, 0.64, 0.56, 0.06);
+  const footL = scale(mk(footGeo, M.black, -0.67, 0.31, 0.3), 1.06, 0.68, 1.25);
+  const footR = scale(mk(footGeo, M.black, 0.67, 0.31, 0.38), 1.06, 0.68, 1.25);
+  footL.rotation.y = -0.12;
+  footR.rotation.y = 0.12;
   rig.add(legL, legR, footL, footR);
 
   // ---------- 身体 ----------
-  const body = scale(mk(new t.SphereGeometry(1.72, 40, 30), M.white, 0, 2.35, 0), 0.96, 1.12, 0.83);
-  const tail = scale(mk(new t.SphereGeometry(0.33, 20, 16), M.white, 0, 1.82, -1.43), 1, 0.9, 0.8);
+  const body = scale(mk(bodyGeometry(t), M.white, 0, FORM.bodyRestY, 0), ...FORM.bodyScale);
+  const shoulderBand = scale(mk(bodyGeometry(t, 1.014, 0.52, 0.66), M.black, 0, FORM.bodyRestY, 0), ...FORM.bodyScale);
+  shoulderBand.material = M.black.clone();
+  shoulderBand.material.side = t.DoubleSide;
+  rig.add(shoulderBand);
+  const tail = scale(mk(new t.SphereGeometry(0.3, 20, 16), M.white, 0, 1.56, -1.32), 1, 0.9, 0.8);
   rig.add(body, tail);
 
   // ---------- 手臂（group 原点=肩，方便绕肩旋转）----------
-  const armGeo = new t.CapsuleGeometry(0.38, 0.76, 8, 24);
+  const armGeo = new t.CapsuleGeometry(0.39, 0.6, 8, 24);
   const pawGeo = new t.SphereGeometry(0.42, 24, 18);
   const armL = new t.Group();
-  armL.position.set(-1.43, 3.52, 0.04);
-  armL.add(mk(armGeo, M.black, 0, -0.64, 0), mk(pawGeo, M.black, 0, -1.25, 0.52));
+  armL.position.set(-1.3, 3.07, 0.08);
+  armL.add(mk(armGeo, M.black, 0, -0.49, 0), mk(pawGeo, M.black, 0, -1.0, 0.52));
   const armR = new t.Group();
-  armR.position.set(1.43, 3.52, 0.04);
-  armR.add(mk(armGeo, M.black, 0, -0.64, 0), mk(pawGeo, M.black, 0, -1.25, 0.08));
-  const pawPad = scale(mk(new t.SphereGeometry(0.2, 20, 14), M.black2, 0, -1.25, 0.425), 1, 0.83, 0.16);
+  armR.position.set(1.3, 3.07, 0.08);
+  armR.add(mk(armGeo, M.black, 0, -0.49, 0), mk(pawGeo, M.black, 0, -1.0, 0.12));
+  const pawPad = scale(mk(new t.SphereGeometry(0.18, 20, 14), M.black2, 0, -1.0, 0.475), 1, 0.83, 0.16);
   armR.add(pawPad);
   rig.add(armL, armR);
 
   // ---------- 头部（整体挂在 headGroup 上，低头/挠头一起动）----------
   const headGroup = new t.Group();
-  headGroup.position.set(0, 4.84, 0);
+  headGroup.position.set(0, FORM.headRestY, 0);
   rig.add(headGroup);
 
-  const head = scale(mk(headGeometry(t), M.white, 0, 0.2, 0), 1.06, 0.93, 0.91);
-  const earGeo = new t.SphereGeometry(0.56, 28, 22);
-  const earInGeo = new t.SphereGeometry(0.33, 24, 16);
-  const earL = scale(mk(earGeo, M.black, -1.33, 1.43, -0.17), 1, 1.05, 0.65);
-  const earR = scale(mk(earGeo, M.black, 1.33, 1.43, -0.17), 1, 1.05, 0.65);
-  const earInL = scale(mk(earInGeo, M.black2, 0, 0.015, 0.53), 1, 1, 0.2);
-  const earInR = scale(mk(earInGeo, M.black2, 0, 0.015, 0.53), 1, 1, 0.2);
+  const head = scale(mk(headGeometry(t), M.white, 0, FORM.headCenterY, 0), ...FORM.headScale);
+  const earGeo = new t.SphereGeometry(0.52, 28, 22);
+  const earInGeo = new t.SphereGeometry(0.25, 24, 16);
+  const earL = scale(mk(earGeo, M.black, -1.35, 1.26, -0.17), 1, 1.02, 0.7);
+  const earR = scale(mk(earGeo, M.black, 1.35, 1.26, -0.17), 1, 1.02, 0.7);
+  const earInL = scale(mk(earInGeo, M.black2, 0, 0.015, 0.5), 1, 1, 0.18);
+  const earInR = scale(mk(earInGeo, M.black2, 0, 0.015, 0.5), 1, 1, 0.18);
   earInL.castShadow = earInR.castShadow = false;
   earL.add(earInL);
   earR.add(earInR);
-  const patchL = mk(facePatch(t, -0.75, 0.25, 0.42, 0.55, -0.34), M.black);
-  const patchR = mk(facePatch(t, 0.75, 0.25, 0.42, 0.55, 0.34), M.black);
-  const muzzle = scale(mk(new t.SphereGeometry(0.65, 32, 24), M.white, 0, -0.39, 1.38), 1.08, 0.63, 0.29);
+  const patchL = mk(facePatch(t, -0.8, -0.05, 0.4, 0.5, -0.55, 0.028, 0.26), M.black);
+  const patchR = mk(facePatch(t, 0.8, -0.05, 0.4, 0.5, 0.55, 0.028, 0.26), M.black);
   const noseShape = new t.Shape();
   noseShape.moveTo(-0.18, 0.055);
   noseShape.quadraticCurveTo(0, 0.16, 0.18, 0.055);
   noseShape.quadraticCurveTo(0.19, -0.015, 0.035, -0.12);
   noseShape.quadraticCurveTo(0, -0.14, -0.035, -0.12);
   noseShape.quadraticCurveTo(-0.19, -0.015, -0.18, 0.055);
-  const nose = mk(new t.ExtrudeGeometry(noseShape, { depth: 0.045, bevelEnabled: true, bevelThickness: 0.035, bevelSize: 0.035, bevelSegments: 3, steps: 1, curveSegments: 16 }), M.nose, 0, -0.32, 1.59);
-  const cheekL = mk(facePatch(t, -1.12, -0.38, 0.3, 0.18, 0, 0.035), M.pink);
-  const cheekR = mk(facePatch(t, 1.12, -0.38, 0.3, 0.18, 0, 0.035), M.pink);
+  const nose = scale(mk(new t.ExtrudeGeometry(noseShape, { depth: 0.029, bevelEnabled: true, bevelThickness: 0.025, bevelSize: 0.025, bevelSegments: 3, steps: 1, curveSegments: 16 }), M.nose, 0, -0.33, faceDepth(0, -0.33) + 0.008), 0.8, 0.8, 0.8);
+  const muzzlePatch = mk(facePatch(t, 0, -0.5, 0.5, 0.36, 0, 0.022), M.muzzle);
+  muzzlePatch.castShadow = false;
+  const cheekL = mk(facePatch(t, -1.0, -0.66, 0.22, 0.13, 0.25, 0.03), M.pink);
+  const cheekR = mk(facePatch(t, 1.0, -0.66, 0.22, 0.13, -0.25, 0.03), M.pink);
   cheekL.castShadow = cheekR.castShadow = false;
 
   // 眼睛（group 用于眨眼：压扁 y）
-  const eyeWhiteGeo = new t.SphereGeometry(0.205, 28, 20);
-  const irisGeo = new t.SphereGeometry(0.174, 24, 18);
-  const pupilGeo = new t.SphereGeometry(0.133, 24, 16);
-  const sparkGeo = new t.SphereGeometry(0.032, 12, 10);
-  const sparkMat = new t.MeshBasicMaterial({ color: 0xfffaf0 });
+  const eyeGeo = eyeGeometry(t);
   const eyeL = new t.Group();
-  eyeL.position.set(-0.69, 0.3, faceDepth(-0.69, 0.3) + 0.056);
+  eyeL.position.set(-0.76, -0.01, faceDepth(-0.76, -0.01) + 0.05);
+  eyeL.rotation.set(0.02, -0.24, 0);
   const eyeR = new t.Group();
-  eyeR.position.set(0.69, 0.3, faceDepth(0.69, 0.3) + 0.056);
-  for (const [eye, side] of [[eyeL, 1], [eyeR, -1]]) {
-    eye.add(
-      scale(mk(eyeWhiteGeo, M.paper), 0.85, 1, 0.38),
-      scale(mk(irisGeo, M.iris, side * 0.019, 0.002, 0.069), 0.87, 1, 0.29),
-      scale(mk(pupilGeo, M.eye, side * 0.019, 0.006, 0.102), 0.91, 1, 0.28),
-      scale(mk(sparkGeo, sparkMat, -0.02, 0.065, 0.131), 1, 1, 0.38)
-    );
+  eyeR.position.set(0.76, -0.01, faceDepth(0.76, -0.01) + 0.05);
+  eyeR.rotation.set(0.02, 0.24, 0);
+  for (const [i, eye] of [eyeL, eyeR].entries()) {
+    const material = new t.MeshPhysicalMaterial({ color: 0xffffff, map: eyeMaps[i], roughness: 0.32, metalness: 0, specularIntensity: 0.4, envMapIntensity: 0.3 });
+    eye.add(mk(eyeGeo, material));
   }
 
   // 嘴：压扁的球，说话时 y 拉伸 = 开合
-  const mouth = scale(mk(new t.SphereGeometry(0.2, 24, 18), M.nose, 0, -0.59, 1.57), 0.9, 0.01, 0.22);
-  const smile = curveMesh(t, [[-0.25, -0.53, 1.574], [-0.15, -0.61, 1.599], [0, -0.58, 1.61], [0.15, -0.61, 1.599], [0.25, -0.53, 1.574]], 0.018, M.nose);
-  const philtrum = curveMesh(t, [[0, -0.43, 1.628], [0, -0.52, 1.629], [0, -0.58, 1.61]], 0.015, M.nose);
+  const mouth = scale(mk(new t.SphereGeometry(0.17, 24, 18), M.nose, 0, FORM.mouthY, faceDepth(0, FORM.mouthY) + 0.02), 0.9, 0.01, 0.18);
+  const arc = side => curveMesh(t, [[0, -0.585], [side * 0.05, -0.64], [side * 0.14, -0.645], [side * 0.22, -0.585]].map(([x, y]) => [x, y, faceDepth(x, y) + 0.018]), 0.0155, M.nose);
+  const smile = new t.Group();
+  smile.add(arc(-1), arc(1));
+  const philtrum = curveMesh(t, [[0, -0.43, faceDepth(0, -0.43) + 0.032], [0, -0.51, faceDepth(0, -0.51) + 0.022], [0, -0.585, faceDepth(0, -0.585) + 0.018]], 0.0125, M.nose);
 
   // 眉毛（担心时向内下压）
   const browL = new t.Group();
-  browL.position.set(-0.7, 0.86, 1.34);
-  browL.add(curveMesh(t, [[-0.18, 0, -0.035], [0, 0.045, 0.01], [0.16, 0, 0.035]], 0.027, M.black2));
+  browL.position.set(-0.72, FORM.browY, faceDepth(-0.72, FORM.browY) + 0.015);
+  browL.add(curveMesh(t, [[-0.13, 0, -0.035], [0, 0.026, 0.01], [0.12, 0, 0.035]], 0.019, M.black2));
   const browR = new t.Group();
-  browR.position.set(0.7, 0.86, 1.34);
-  browR.add(curveMesh(t, [[-0.16, 0, 0.035], [0, 0.045, 0.01], [0.18, 0, -0.035]], 0.027, M.black2));
+  browR.position.set(0.72, FORM.browY, faceDepth(0.72, FORM.browY) + 0.015);
+  browR.add(curveMesh(t, [[-0.12, 0, 0.035], [0, 0.026, 0.01], [0.13, 0, -0.035]], 0.019, M.black2));
 
-  headGroup.add(head, earL, earR, patchL, patchR, muzzle, nose, cheekL, cheekR, eyeL, eyeR, mouth, smile, philtrum, browL, browR);
+  headGroup.add(head, earL, earR, muzzlePatch, patchL, patchR, nose, cheekL, cheekR, eyeL, eyeR, mouth, smile, philtrum, browL, browR);
 
   // Folded sage neckerchief with an embroidered sprout.
   const scarf = new t.Group();
-  scarf.position.set(0, 3.51, 1.14);
+  scarf.position.set(0.13, 3.1, 1.08);
+  scarf.scale.set(0.82, 0.76, 0.86);
+  scarf.rotation.z = -0.13;
   const scarfShape = new t.Shape();
   scarfShape.moveTo(-0.86, 0.2);
   scarfShape.quadraticCurveTo(0, 0.06, 0.86, 0.2);
-  scarfShape.quadraticCurveTo(0.58, -0.18, 0.16, -0.7);
-  scarfShape.quadraticCurveTo(0.05, -0.8, -0.08, -0.69);
-  scarfShape.quadraticCurveTo(-0.62, -0.22, -0.86, 0.2);
-  const scarfCloth = mk(new t.ExtrudeGeometry(scarfShape, { depth: 0.05, bevelEnabled: true, bevelThickness: 0.04, bevelSize: 0.055, bevelSegments: 3, steps: 1, curveSegments: 18 }), M.bamboo);
+  scarfShape.quadraticCurveTo(0.55, -0.15, 0.3, -0.6);
+  scarfShape.quadraticCurveTo(0.21, -0.7, 0.06, -0.6);
+  scarfShape.quadraticCurveTo(-0.55, -0.2, -0.86, 0.2);
+  const scarfCloth = mk(new t.ExtrudeGeometry(scarfShape, { depth: 0.025, bevelEnabled: true, bevelThickness: 0.018, bevelSize: 0.025, bevelSegments: 3, steps: 1, curveSegments: 18 }), M.bamboo);
   const clothPositions = scarfCloth.geometry.attributes.position;
-  for (let i = 0; i < clothPositions.count; i++) clothPositions.setZ(i, clothPositions.getZ(i) - clothPositions.getY(i) * 0.55);
+  for (let i = 0; i < clothPositions.count; i++) clothPositions.setZ(i, clothPositions.getZ(i) - clothPositions.getY(i) * 0.55 - Math.pow(clothPositions.getX(i), 2) * 0.22);
   scarfCloth.geometry.computeVertexNormals();
   scarf.add(scarfCloth);
-  scarf.add(curveMesh(t, [[-0.7, 0.14, 0.14], [0, 0.02, 0.18], [0.7, 0.14, 0.14]], 0.042, M.bamboo));
+  scarf.add(curveMesh(t, [[-0.86, 0.2, -0.14], [-0.6, 0.1, 0.05], [0, 0.02, 0.13], [0.6, 0.1, 0.05], [0.86, 0.2, -0.14]], 0.032, M.bamboo));
   scarf.add(curveMesh(t, [[0.07, -0.55, 0.46], [0.09, -0.39, 0.38], [0.08, -0.25, 0.3]], 0.012, M.thread));
   const leafGeo = new t.SphereGeometry(0.09, 16, 12);
   const leafL = scale(mk(leafGeo, M.thread, 0.015, -0.33, 0.35), 0.55, 1, 0.16);
@@ -439,8 +508,9 @@ export function createPanda(THREE, opts = {}) {
 
   // ---------- 记事本（管家招牌）----------
   const padGroup = new t.Group();
-  padGroup.position.set(0.04, -1.17, 0.97);
-  padGroup.rotation.set(0.12, -0.08, -0.1);
+  padGroup.position.set(0.12, -0.96, 0.97);
+  padGroup.rotation.set(0.15, 0.08, -0.18);
+  padGroup.scale.setScalar(0.86);
   const coverShape = new t.Shape();
   const bw = 0.54, bh = 0.68, br = 0.075;
   coverShape.moveTo(-bw + br, -bh);
@@ -469,7 +539,7 @@ export function createPanda(THREE, opts = {}) {
   padGroup.add(backCover, bookMark, bookEmblem, emblemBottom, emblemSpine);
   // 笔（握在右手，写字时随手臂动）
   const penGroup = new t.Group();
-  penGroup.position.set(-0.12, -1.19, 0.38);
+  penGroup.position.set(-0.12, -0.94, 0.4);
   penGroup.rotation.set(0.3, 0, -0.3);
   penGroup.add(mk(new t.CylinderGeometry(0.045, 0.045, 0.83, 6), M.pen, 0, 0, 0));
   const tip = mk(new t.ConeGeometry(0.047, 0.16, 6), M.black2, 0, -0.49, 0);
@@ -479,7 +549,7 @@ export function createPanda(THREE, opts = {}) {
 
   padGroup.add(cover, pages, spine, pagePivot);
   armL.add(padGroup);
-  armL.add(scale(mk(new t.SphereGeometry(0.17, 20, 16), M.black, 0.47, -1.39, 1.07), 0.85, 1.12, 0.72));
+  armL.add(scale(mk(new t.SphereGeometry(0.2, 20, 16), M.black, 0.55, -1.13, 1.1), 1.05, 0.84, 0.62));
 
   addPile(t, head, lightPile, 5200, 0.024);
   addPile(t, body, lightPile, 3200, 0.026, 42);
@@ -501,7 +571,7 @@ export function createPanda(THREE, opts = {}) {
     blinkUntil: -1,
     waveUntil: -1,
     pageUntil: -1,
-    textures: [fabric, blush, fur.color, fur.normal],
+    textures: [fabric, blush, fur.color, fur.normal, ...eyeMaps],
     parts: {
       rig, body, tail, armL, armR, legL, legR, footL, footR,
       headGroup, head, earL, earR, eyeL, eyeR, mouth, smile, browL, browR, padGroup, pagePivot, penGroup,
@@ -559,7 +629,7 @@ export function updatePanda(group, dt) {
 
   // ---------- 呼吸 ----------
   const breath = Math.sin(t * 1.45) * 0.012;
-  P.body.scale.set((0.96 - breath * 0.3) * pose.squash, (1.12 + breath) * pose.squash, (0.83 - breath * 0.2) * pose.squash);
+  P.body.scale.set((FORM.bodyScale[0] - breath * 0.3) * pose.squash, (FORM.bodyScale[1] + breath) * pose.squash, (FORM.bodyScale[2] - breath * 0.2) * pose.squash);
   P.tail.rotation.y = Math.sin(t * 1.1) * 0.08;
 
   // ---------- 头部 ----------
@@ -574,7 +644,7 @@ export function updatePanda(group, dt) {
   } else if (ud.mood === "speaking") {
     headPitch += Math.sin(t * 4) * 0.016;
   }
-  P.headGroup.position.y = 4.84 + Math.sin(t * 1.45 + 0.6) * 0.025 - pose.headPitch * 0.16;
+  P.headGroup.position.y = FORM.headRestY + Math.sin(t * 1.45 + 0.6) * 0.025 - pose.headPitch * 0.16;
   P.headGroup.rotation.set(headPitch, ud.lookYaw + headYaw, headTilt);
   P.eyeL.scale.y = eyeScaleY;
   P.eyeR.scale.y = eyeScaleY;
@@ -583,22 +653,23 @@ export function updatePanda(group, dt) {
   const b = pose.brow;
   P.browL.rotation.z = -0.55 * b;
   P.browR.rotation.z = 0.55 * b;
-  P.browL.position.y = 0.86 - 0.1 * Math.max(0, b);
-  P.browR.position.y = 0.86 - 0.1 * Math.max(0, b);
+  P.browL.position.y = FORM.browY - 0.08 * Math.max(0, b);
+  P.browR.position.y = FORM.browY - 0.08 * Math.max(0, b);
+  P.browL.visible = P.browR.visible = Math.abs(b) > 0.085;
 
   // ---------- 嘴 ----------
   let mouthOpen = pose.mouth;
   if (ud.mood === "speaking") mouthOpen = 0.08 + Math.abs(Math.sin(t * 9)) * 0.42;
   P.mouth.visible = mouthOpen > 0.025;
   P.mouth.scale.set(0.9, Math.max(0.01, mouthOpen), 0.22);
-  P.mouth.position.y = -0.59 - mouthOpen * 0.045;
+  P.mouth.position.y = FORM.mouthY - mouthOpen * 0.035;
   P.smile.scale.y = 1 - Math.max(0, pose.brow) * 0.16;
 
   // ---------- 手臂 ----------
   let armLx = -pose.armL;
   let armRx = -pose.armR;
-  let armLz = 0.1 + Math.sin(t * 1.2) * 0.015;
-  let armRz = -0.12 - Math.sin(t * 1.2 + 0.4) * 0.018;
+  let armLz = 0.18 + Math.sin(t * 1.2) * 0.015;
+  let armRz = 0.16 + Math.sin(t * 1.2 + 0.4) * 0.018;
   if (ud.mood === "thinking") {
     // 挠头：抬起 + 前后小幅摩擦
     armRx += Math.sin(t * 2.4) * 0.035;
@@ -615,7 +686,7 @@ export function updatePanda(group, dt) {
     const p = 1 - (ud.waveUntil - t) / 1.6;
     const env = Math.pow(Math.sin(p * Math.PI), 0.65);
     armRx += (-2.25 - armRx) * env;
-    armRz -= (0.26 + Math.sin(t * 10) * 0.24) * env;
+    armRz += (-0.48 - armRz - Math.sin(t * 10) * 0.22) * env;
   }
   P.armL.rotation.set(armLx, 0, armLz);
   P.armR.rotation.set(armRx, 0, armRz);
@@ -631,7 +702,7 @@ export function updatePanda(group, dt) {
   P.rig.rotation.z = Math.sin(t * 1.1) * 0.005;
 
   // ---------- 记事本 ----------
-  P.padGroup.rotation.x = 0.12 + Math.max(0, pose.armL - 0.3) * 0.3;
+  P.padGroup.rotation.x = 0.15 + Math.max(0, pose.armL - 0.38) * 0.3;
   P.penGroup.visible = ud.mood === "working" || ud.mood === "thinking";
 
   // 翻页：thinking / working 时偶尔翻一页

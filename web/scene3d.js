@@ -558,8 +558,8 @@ function build(container, hiddenCanvas, OrbitControls, CSS2D, pandaMod, post) {
       const pScene = new THREE.Scene();
       if (envTex) pScene.environment = envTex;
       pScene.add(new THREE.HemisphereLight(0xf5f4ee, 0x68747b, 0.6));
-      const pk = new THREE.DirectionalLight(0xfff3e2, 1.65);
-      pk.position.set(-3.5, 7, 8);
+      const pk = new THREE.DirectionalLight(0xfff3e2, 1.8);
+      pk.position.set(-5.5, 7.5, 6);
       pk.target.position.set(0, 3.2, 0);
       pk.castShadow = true;
       pk.shadow.mapSize.set(1024, 1024);
@@ -583,7 +583,7 @@ function build(container, hiddenCanvas, OrbitControls, CSS2D, pandaMod, post) {
       pkRim.position.set(3, 6, -4);
       pScene.add(pkRim);
       const group = pandaMod.createPanda(THREE, { scale: 1 });
-      group.rotation.y = 0.16;
+      group.rotation.y = 0.23;
       pScene.add(group);
       const box = new THREE.Box3().setFromObject(group);
       const size = box.getSize(new THREE.Vector3());
