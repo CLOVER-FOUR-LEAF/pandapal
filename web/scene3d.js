@@ -51,9 +51,9 @@ const PLAN_COLOR = { pending: 0x5f7d78, running: AMBER, done: BAMBOO, error: 0xf
 
 const R_PLANET = 9.4;        // 星球半径
 const RING_R = 4.15;         // 领域轨道环半径
-const PATCH_EDGE = 4.5;      // 领域星团在切平面上的活动半径
+const PATCH_EDGE = 5.7;      // 领域星团在切平面上的活动半径
 const SHELL_H0 = 1.05;       // 记忆星最小浮起高度（贴着球面外侧）
-const SHELL_STEP = 1.1;      // 每层递增的浮起高度
+const SHELL_STEP = 1.45;      // 每层递增的浮起高度
 const FOV = 42;
 const RECENT_DAYS = 540;
 const IDLE_RESUME_MS = 20000;
@@ -139,7 +139,7 @@ const CSS = `
 .s3d-pill{display:flex;align-items:center;gap:6px;max-width:200px;padding:3px 9px 3px 7px;border-radius:999px;background:var(--s3d-label-bg,rgba(7,20,22,.74));border:1px solid var(--s3d-label-border,rgba(232,241,236,.14));color:var(--s3d-ink,#e8f1ec);white-space:nowrap;text-shadow:0 1px 2px rgba(0,0,0,.45);letter-spacing:.02em}
 .s3d-txt{overflow:hidden;text-overflow:ellipsis}
 .s3d-dot{width:7px;height:7px;border-radius:50%;background:var(--c,#8fa7a0);box-shadow:0 0 6px var(--c,#8fa7a0);flex:none}
-.s3d-tail{width:1px;height:13px;background:linear-gradient(to bottom,var(--s3d-label-border,rgba(232,241,236,.28)),transparent);position:relative}
+.s3d-tail{width:1px;height:10px;background:linear-gradient(to bottom,var(--s3d-label-border,rgba(232,241,236,.28)),transparent);position:relative}
 .s3d-tail::after{content:"";position:absolute;left:50%;bottom:-1px;width:5px;height:5px;margin-left:-2.5px;border-radius:50%;background:var(--c,#8fa7a0);box-shadow:0 0 8px var(--c,#8fa7a0)}
 .s3d-label.is-private .s3d-pill{border-style:dashed;border-color:var(--s3d-private,rgba(180,205,198,.55))}
 .s3d-label.is-dropped .s3d-pill{color:var(--s3d-ink-dim,rgba(232,241,236,.6))}
@@ -148,8 +148,8 @@ const CSS = `
 .s3d-label.is-hover .s3d-pill{border-color:rgba(232,241,236,.45)}
 /* 星球自己的名字：浮在球体上方 */
 .s3d-self{display:flex;flex-direction:column;align-items:center;gap:1px;animation:s3d-in .5s ease-out both;font-family:var(--s3d-font,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif);pointer-events:none}
-.s3d-self-name{font-size:15px;font-weight:700;color:var(--s3d-ink-strong,#fff6ea);letter-spacing:.06em;text-shadow:0 0 14px rgba(243,198,92,.55),0 1px 2px rgba(0,0,0,.6)}
-.s3d-self-sub{font-size:10px;letter-spacing:.24em;padding-left:.24em;color:var(--s3d-ink-dim,rgba(232,241,236,.7))}
+.s3d-self-name{font-size:15px;font-weight:700;color:var(--s3d-ink-strong,#fff6ea);letter-spacing:.06em;padding:1px 10px;border-radius:999px;background:var(--s3d-self-bg,rgba(6,18,20,.42));text-shadow:0 0 14px rgba(243,198,92,.5),0 1px 2px rgba(0,0,0,.6)}
+.s3d-self-sub{font-size:10px;letter-spacing:.24em;padding-left:.24em;margin-top:2px;color:var(--s3d-ink-dim,rgba(232,241,236,.78))}
 /* 领域次行星标签 */
 .s3d-planet{display:flex;flex-direction:column;align-items:center;gap:1px;font-family:var(--s3d-font,"PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans SC",system-ui,sans-serif);transition:opacity .35s;animation:s3d-in .4s ease-out both}
 .s3d-planet-ch{font-size:23px;font-weight:700;line-height:1;color:var(--c);text-shadow:0 0 16px var(--c),0 1px 2px rgba(0,0,0,.5)}
@@ -176,7 +176,7 @@ const CSS = `
 body[data-theme="light"] .s3d-root{background:#e3ede4;--s3d-ink:#22332b;--s3d-ink-dim:rgba(34,51,43,.66);--s3d-ink-strong:#141f18;--s3d-label-bg:rgba(255,255,255,.86);--s3d-label-border:rgba(24,44,36,.16);--s3d-private:rgba(120,85,140,.55);--s3d-tip-bg:rgba(255,255,255,.95);--s3d-vignette:rgba(255,255,255,.30)}
 body[data-theme="light"] .s3d-pill{text-shadow:none}
 body[data-theme="light"] .s3d-label.is-hl .s3d-pill{color:#7a4a12;border-color:#e0a04a}
-body[data-theme="light"] .s3d-self-name{color:#243a2e;text-shadow:0 0 14px rgba(201,139,48,.5)}
+body[data-theme="light"] .s3d-self-name{color:#22332b;background:rgba(255,255,255,.72);text-shadow:none}
 body[data-theme="light"] .s3d-planet-ch{text-shadow:0 0 12px var(--c),0 1px 0 rgba(255,255,255,.5)}
 body[data-theme="light"] .s3d-sat{color:#22332b}
 body[data-theme="light"] .s3d-sat-n,body[data-theme="light"] .s3d-sat-t{background:rgba(255,255,255,.84);color:#3c5546}
@@ -310,17 +310,21 @@ function domainOf(key) {
   return DOMAINS[key] || OTHER_DOMAIN;
 }
 
-/** 球面五锚点：斐波那契螺旋（两两角距 ≥ 60°，不会挤成一团），整体旋转让首个朝 +Z 正对开场相机 */
+/** 球面五锚点：都放在朝向默认相机的前半球，但高低/左右错开——
+ *  开场一眼能看全五科，又不会像等距五边形那样挤成一条竖线。 */
+const ANCHOR_DIRS = [
+  [0.00, 0.72, 0.69],   // 德 顶部
+  [-0.80, 0.30, 0.52],  // 智 左上
+  [0.78, 0.42, 0.46],   // 体 右上
+  [0.72, -0.55, 0.42],  // 美 右下
+  [-0.18, -0.72, 0.67], // 劳 下方
+];
+
 function computeDomainDirs() {
   const out = new Map();
-  const n = DOMAIN_KEYS.length;
-  const rot = Math.PI * 0.5;
   DOMAIN_KEYS.forEach((k, i) => {
-    const t = (i + 0.5) / n;
-    const y = 1 - 2 * t;
-    const rr = Math.sqrt(Math.max(0, 1 - y * y));
-    const th = i * 2.39996323 + rot;
-    out.set(k, new THREE.Vector3(Math.cos(th) * rr, y, Math.sin(th) * rr).normalize());
+    const v = ANCHOR_DIRS[i % ANCHOR_DIRS.length];
+    out.set(k, new THREE.Vector3(v[0], v[1], v[2]).normalize());
   });
   return out;
 }
@@ -805,7 +809,7 @@ function build(container, hiddenCanvas, OrbitControls, CSS2D, pandaMod, post) {
     el.appendChild(nm);
     el.appendChild(cnt);
     const lab = new CSS2D.CSS2DObject(el);
-    lab.position.set(0, 3.1, 0);
+    lab.position.set(0, 3.6, 0);
     lab.center.set(0.5, 1);
     g.add(lab);
 
@@ -1431,7 +1435,7 @@ function layoutDomain(list, frame) {
   if (!n) return;
   list.sort(byWeightDesc);                       // 大权重在前 → 靠内、靠上
   const GOLD = 2.39996323;
-  const step = clamp((PATCH_EDGE * 0.5) / Math.sqrt(n + 1), 0.62, 2.2);
+  const step = clamp((PATCH_EDGE * 0.55) / Math.sqrt(n + 1), 0.7, 2.8);
   for (let i = 0; i < n; i++) {
     const ns = list[i];
     const rr = step * Math.sqrt(i) * 1.12;
@@ -1897,26 +1901,37 @@ function surfacePoint(p, out) {
   return out.copy(p).multiplyScalar((R_PLANET * 1.01) / len);
 }
 
-// 标签：只显示重要 / 悬停 / 高亮 / 聚焦 / 新生节点
+// 标签：重要节点优先，其次悬停/高亮/聚焦/新生；最后做一次屏幕碰撞，叠在一起就藏掉
 function updateLabels(tms) {
+  const placed = R.labelPlaced;
+  placed.length = 0;
+  // 1) 强制显示的（交互焦点）：先占位，永远不会被挤掉
+  for (const ns of R.order) {
+    if (ns.id === R.selfId) continue;
+    const must = (R.hover === ns) || (R.focusId === ns.id) || (ns.pulseUntil > tms) ||
+      (ns.spawnedAt && tms - ns.spawnedAt < 6000);
+    if (!must || !ns.group.visible || ns.vis < 0.3) continue;
+    if (!labelPlace(ns, placed)) continue;
+  }
+  // 2) 按权重补位：候选已经按权重排序，超出预算或与已占位重叠的都藏掉
   const cand = R.labelCand;
   cand.length = 0;
   for (const ns of R.order) {
-    if (ns.id !== R.selfId && ns.visTarget > 0 && ns.dimTarget > 0.5 && ns.appear > 0.6 && ns.group.visible) cand.push(ns);
+    if (ns.id === R.selfId || !ns.group.visible) continue;
+    if (ns.visTarget <= 0 || ns.dimTarget <= 0.5 || ns.appear <= 0.6 || ns.vis < 0.3) continue;
+    if ((R.hover === ns) || (R.focusId === ns.id) || (ns.pulseUntil > tms)) continue; // 已占位
+    cand.push(ns);
   }
   cand.sort(byWeightDesc);
-  const budget = R.labelBudget;
-  for (let i = 0; i < R.order.length; i++) R.order[i].wantLabel = false;
-  for (let i = 0; i < cand.length && i < budget; i++) cand[i].wantLabel = true;
+  let used = placed.length;
+  for (const ns of cand) {
+    if (used >= R.labelBudget) break;
+    if (labelPlace(ns, placed)) used++;
+  }
+  // 3) 统一的显隐与样式
   for (const ns of R.order) {
-    if (ns.id === R.selfId) {
-      if (ns.label.visible) ns.label.visible = false;
-      continue;
-    }
-    const hl = ns.pulseUntil > tms;
-    const hov = R.hover === ns;
-    const want = (ns.wantLabel || hl || hov || R.focusId === ns.id || (ns.spawnedAt && tms - ns.spawnedAt < 6000)) &&
-      ns.group.visible && ns.vis > 0.3;
+    if (ns.id === R.selfId) { if (ns.label.visible) ns.label.visible = false; continue; }
+    const want = placed.indexOf(ns) >= 0;
     if (ns.label.visible !== want) ns.label.visible = want;
     if (!want) continue;
     const n = ns.data;
@@ -1924,13 +1939,29 @@ function updateLabels(tms) {
       (n.private ? " is-private" : "") +
       (n.status === "dropped" ? " is-dropped" : "") +
       (n.status === "done" ? " is-done" : "") +
-      (hl ? " is-hl" : "") +
-      (hov ? " is-hover" : "");
+      ((ns.pulseUntil > tms) ? " is-hl" : "") +
+      ((R.hover === ns) ? " is-hover" : "");
     if (cls !== ns.labelCls) {
       ns.labelCls = cls;
       ns.el.className = cls;
     }
   }
+}
+
+/** 把节点标签放到屏幕上：被星球挡住 / 与已放好的标签重叠 就不放。返回是否放下。 */
+function labelPlace(ns, placed) {
+  if (occludedByPlanet(ns.wp)) return false;
+  R.v3.copy(ns.wp).project(R.camera);
+  if (R.v3.z > 1) return false;
+  const x = (R.v3.x * 0.5 + 0.5) * R.w;
+  const y = (-R.v3.y * 0.5 + 0.5) * R.h;
+  const halfW = 62 + Math.min(60, ns.r * 12);   // 胶囊大致半宽
+  const top = y - 22 - ns.r * 6, bottom = y;     // 胶囊挂在节点正上方
+  for (const p of placed) {
+    if (Math.abs(x - p.x) < halfW + p.halfW && bottom > p.top && top < p.bottom) return false;
+  }
+  placed.push({ x, halfW, top, bottom });
+  return true;
 }
 
 function reapNodes() {
@@ -1983,9 +2014,25 @@ function pickNode(ndcX, ndcY) {
     if (R.v3.z > 1) continue;
     const dx = ((R.v3.x - ndcX) * R.w) / 2, dy = ((R.v3.y - ndcY) * R.h) / 2;
     const d2 = dx * dx + dy * dy;
-    if (d2 < bestD) { bestD = d2; best = m; }
+    if (d2 < bestD && !occludedByPlanet(m.parent.position)) { bestD = d2; best = m; }
   }
   return best ? R.nodes.get(best.userData.nid) || null : null;
+}
+
+/** 节点是否被星球本体挡住（相机→节点 的线段是否穿过球体）。CSS2D 标签不受深度测试
+ *  约束，不判一下就会出现"星球背面的标签浮在星球前面"。 */
+function occludedByPlanet(p) {
+  const e = R.camera.position;
+  R.v4.copy(p).sub(e);
+  const len = R.v4.length();
+  if (len < 1e-4) return false;
+  R.v4.multiplyScalar(1 / len);
+  const b = 2 * e.dot(R.v4);
+  const c = e.dot(e) - R_PLANET * R_PLANET;
+  const disc = b * b - 4 * c;
+  if (disc <= 0) return false;
+  const t = (-b - Math.sqrt(disc)) / 2;
+  return t > 0.001 && t < len - 0.001;
 }
 
 function inPanda(x, y) {
@@ -2423,7 +2470,7 @@ function updateSelfLabel() {
     el.appendChild(sub);
     const lab = new R.CSS2D.CSS2DObject(el);
     lab.center.set(0.5, 1);
-    lab.position.set(0, R_PLANET * 1.16, 0);
+    lab.position.set(0, R_PLANET * 1.44, 0);
     R.world.add(lab);
     R.selfLabel = { el, name, sub, lab };
   }
@@ -2742,6 +2789,7 @@ function regAdditive(mat) {
 // 预分配的簇统计缓冲（避免每帧分配）
 function ensureScratch() {
   if (!R) return;
+  if (!R.labelPlaced) R.labelPlaced = [];
   if (!R.clusterSums) {
     R.clusterSums = DOMAIN_KEYS.map(() => new THREE.Vector3());
     R.clusterCounts = new Array(DOMAIN_KEYS.length).fill(0);
