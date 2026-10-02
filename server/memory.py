@@ -102,14 +102,23 @@ class MemoryStore:
                 parts.append(f"【{name}】{meta['body']}")
         return "\n\n".join(parts)
 
+    @staticmethod
+    def _bigrams(text: str) -> set[str]:
+        runs = re.findall(r"[\u4e00-\u9fff]+", text)
+        return {r[i : i + 2] for r in runs for i in range(len(r) - 1)} | {
+            w.lower() for w in re.findall(r"[A-Za-z0-9]+", text)
+        }
+
     def retrieve(self, query: str, limit: int = 3) -> str:
         """按关键词重叠检索相关主题（含非 active）+ 最近一篇 daily。"""
         index = self.read_index()
+        q_grams = self._bigrams(query)
         scored = []
         for name, info in index.get("topics", {}).items():
-            hay = name + " " + " ".join(info.get("related", []))
-            score = sum(1 for w in re.findall(r"[\u4e00-\u9fff]{2,}|[A-Za-z0-9]+", query) if w and w in hay)
-            score += sum(2 for w in info.get("related", []) + [name] if w and w in query)
+            words = [name] + list(info.get("related", []))
+            hay = " ".join(words)
+            score = len(q_grams & self._bigrams(hay))
+            score += 3 * sum(1 for w in words if w and w in query)
             if score:
                 scored.append((score, name, info))
         scored.sort(key=lambda x: -x[0])
@@ -147,7 +156,10 @@ class MemoryStore:
         daily_dir = self.dir / "daily"
         if daily_dir.is_dir():
             for f in sorted(daily_dir.glob("*.md"), reverse=True):
-                daily.append({"date": f.stem, "content": f.read_text(encoding="utf-8").strip()})
+                content = f.read_text(encoding="utf-8").strip()
+                if content.startswith("#"):
+                    content = content.split("\n", 1)[-1].strip()
+                daily.append({"date": f.stem, "content": content})
         try:
             memory_md = self.dir.joinpath("MEMORY.md").read_text(encoding="utf-8").strip()
         except OSError:
@@ -221,5 +233,5 @@ async def extract_and_store(store: MemoryStore, user_msg: str, assistant_msg: st
             max_tokens=600,
         )
         await store.write_extraction(data)
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[memory] 沉淀失败（不影响对话）: {e}")

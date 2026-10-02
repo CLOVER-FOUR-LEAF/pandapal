@@ -1,0 +1,86 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 560" font-family="-apple-system, 'PingFang SC', sans-serif">
+  <defs>
+    <style>
+      .box { rx: 10; stroke-width: 1.5; }
+      .lbl { font-size: 14px; fill: #3a3128; font-weight: 600; }
+      .sub { font-size: 11px; fill: #8a7a63; }
+      .arr { stroke: #b0977a; stroke-width: 1.6; fill: none; marker-end: url(#ah); }
+      .dash { stroke-dasharray: 5 4; }
+    </style>
+    <marker id="ah" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 z" fill="#b0977a"/>
+    </marker>
+  </defs>
+  <rect width="900" height="560" fill="#fdf6ec"/>
+
+  <!-- 浏览器层 -->
+  <rect x="30" y="30" width="840" height="150" rx="14" fill="#ffffff" stroke="#e8dcc8" class="box"/>
+  <text x="50" y="55" class="lbl">浏览器单页（原生 ES Modules，零构建）</text>
+  <rect x="50" y="70" width="120" height="46" rx="9" fill="#fff3dd" stroke="#e8dcc8"/>
+  <text x="110" y="97" text-anchor="middle" class="sub" font-size="12">登录选档</text>
+  <rect x="185" y="70" width="120" height="46" rx="9" fill="#fff3dd" stroke="#e8dcc8"/>
+  <text x="245" y="90" text-anchor="middle" class="sub" font-size="12">熊猫 SVG 形象</text>
+  <text x="245" y="106" text-anchor="middle" class="sub" font-size="10">眨眼/浮动/表情</text>
+  <rect x="320" y="70" width="140" height="46" rx="9" fill="#fff3dd" stroke="#e8dcc8"/>
+  <text x="390" y="90" text-anchor="middle" class="sub" font-size="12">对话 + chips</text>
+  <text x="390" y="106" text-anchor="middle" class="sub" font-size="10">SSE 流式渲染</text>
+  <rect x="475" y="70" width="120" height="46" rx="9" fill="#fff3dd" stroke="#e8dcc8"/>
+  <text x="535" y="97" text-anchor="middle" class="sub" font-size="12">任务树</text>
+  <rect x="610" y="70" width="120" height="46" rx="9" fill="#fff3dd" stroke="#e8dcc8"/>
+  <text x="670" y="97" text-anchor="middle" class="sub" font-size="12">记忆本</text>
+  <text x="50" y="145" class="sub">POST /api/session · GET /api/greeting · POST /api/chat (SSE) · GET /api/memory</text>
+
+  <!-- 服务端层 -->
+  <rect x="30" y="215" width="560" height="300" rx="14" fill="#ffffff" stroke="#e8dcc8" class="box"/>
+  <text x="50" y="240" class="lbl">PandaButler Server（FastAPI + asyncio）</text>
+  <rect x="50" y="255" width="120" height="52" rx="9" fill="#e9f3ea" stroke="#cfe0d2"/>
+  <text x="110" y="276" text-anchor="middle" class="sub" font-size="12">session</text>
+  <text x="110" y="292" text-anchor="middle" class="sub" font-size="10">名字→档案目录</text>
+  <rect x="50" y="320" width="120" height="52" rx="9" fill="#e9f3ea" stroke="#cfe0d2"/>
+  <text x="110" y="341" text-anchor="middle" class="sub" font-size="12">router</text>
+  <text x="110" y="357" text-anchor="middle" class="sub" font-size="10">LLM 意图分类</text>
+  <rect x="200" y="255" width="140" height="52" rx="9" fill="#fff0e0" stroke="#f0dcb8"/>
+  <text x="270" y="276" text-anchor="middle" class="sub" font-size="12">planner</text>
+  <text x="270" y="292" text-anchor="middle" class="sub" font-size="10">LLM → JSON DAG</text>
+  <rect x="200" y="320" width="140" height="52" rx="9" fill="#fff0e0" stroke="#f0dcb8"/>
+  <text x="270" y="341" text-anchor="middle" class="sub" font-size="12">executor</text>
+  <text x="270" y="357" text-anchor="middle" class="sub" font-size="10">依赖并行 → SSE</text>
+  <rect x="200" y="385" width="140" height="52" rx="9" fill="#fff0e0" stroke="#f0dcb8"/>
+  <text x="270" y="406" text-anchor="middle" class="sub" font-size="12">synth</text>
+  <text x="270" y="422" text-anchor="middle" class="sub" font-size="10">汇总 → 结构化卡片</text>
+  <rect x="360" y="255" width="210" height="52" rx="9" fill="#e8eefb" stroke="#cfd9ee"/>
+  <text x="465" y="276" text-anchor="middle" class="sub" font-size="12">memory</text>
+  <text x="465" y="292" text-anchor="middle" class="sub" font-size="10">活跃块注入 + 轮后 LLM 抽取落盘</text>
+  <rect x="360" y="320" width="210" height="52" rx="9" fill="#e8eefb" stroke="#cfd9ee"/>
+  <text x="465" y="341" text-anchor="middle" class="sub" font-size="12">单写锁 + tmp→rename 原子写</text>
+  <text x="465" y="357" text-anchor="middle" class="sub" font-size="10">会话隔离：data/{child}/</text>
+  <rect x="360" y="385" width="210" height="52" rx="9" fill="#f3e9f6" stroke="#e0d2e6"/>
+  <text x="465" y="406" text-anchor="middle" class="sub" font-size="12">llm 客户端</text>
+  <text x="465" y="422" text-anchor="middle" class="sub" font-size="10">OpenAI 兼容 / Anthropic 双协议·主备Key</text>
+  <rect x="50" y="385" width="120" height="52" rx="9" fill="#fdeef0" stroke="#edd3d6"/>
+  <text x="110" y="406" text-anchor="middle" class="sub" font-size="12">tools</text>
+  <text x="110" y="422" text-anchor="middle" class="sub" font-size="10">赛事库/天气/搜索</text>
+  <text x="50" y="470" class="sub">保底链：DAG 失败 → 单 LLM 直出卡片；节点失败 → 标记后继续；搜索无 Key → 模型知识补位</text>
+
+  <!-- 存储层 -->
+  <rect x="620" y="215" width="250" height="140" rx="14" fill="#ffffff" stroke="#e8dcc8" class="box"/>
+  <text x="640" y="240" class="lbl">文件系统存储（无数据库）</text>
+  <text x="640" y="265" class="sub" font-size="12">data/{child}/MEMORY.md</text>
+  <text x="640" y="285" class="sub" font-size="12">topics/*.md · daily/*.md</text>
+  <text x="640" y="305" class="sub" font-size="12">index.json · reminders.json</text>
+  <text x="640" y="330" class="sub" font-size="12">data/race_db.json（赛事知识库）</text>
+
+  <!-- 外部服务 -->
+  <rect x="620" y="385" width="250" height="130" rx="14" fill="#ffffff" stroke="#e8dcc8" class="box"/>
+  <text x="640" y="410" class="lbl">外部服务</text>
+  <text x="640" y="435" class="sub" font-size="12">LLM API（env 配置，服务端持有 Key）</text>
+  <text x="640" y="458" class="sub" font-size="12">wttr.in 天气（免费无 Key）</text>
+  <text x="640" y="481" class="sub" font-size="12">可选 Tavily 兼容搜索</text>
+
+  <!-- 箭头 -->
+  <path class="arr" d="M450 180 L450 215" />
+  <path class="arr" d="M590 320 L620 300" />
+  <path class="arr dash" d="M590 440 L620 445" />
+  <path class="arr" d="M170 340 L200 340" />
+  <path class="arr" d="M270 372 L270 385" />
+</svg>

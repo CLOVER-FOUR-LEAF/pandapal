@@ -17,6 +17,7 @@ def _validate(plan: dict) -> dict:
     nodes = plan.get("nodes")
     if not isinstance(nodes, list) or not nodes:
         raise PlanError("plan.nodes 为空")
+    # 第一遍：规范化节点并收集全部 id（依赖可以指向任意节点，不限于先声明的）
     ids: set[str] = set()
     for i, n in enumerate(nodes):
         if not isinstance(n, dict):
@@ -32,10 +33,11 @@ def _validate(plan: dict) -> dict:
         n["tool"] = tool
         if not isinstance(n.get("args"), dict):
             n["args"] = {}
-        deps = n.get("depends_on") or []
-        if not isinstance(deps, list):
-            raise PlanError("depends_on 必须是数组")
-        n["depends_on"] = [d for d in deps if d in ids and d != n["id"]]
+        if not isinstance(n.get("depends_on"), list):
+            n["depends_on"] = []
+    # 第二遍：剔除未知依赖与自依赖
+    for n in nodes:
+        n["depends_on"] = [d for d in n["depends_on"] if d in ids and d != n["id"]]
     # 拓扑排序检测环 + 剔除未知依赖
     pending = {n["id"]: set(d for d in n["depends_on"] if d in ids) for n in nodes}
     ordered = []

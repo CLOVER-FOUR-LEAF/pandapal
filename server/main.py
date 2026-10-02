@@ -64,7 +64,7 @@ async def api_greeting(name: str):
         text = await llm.complete(
             [{"role": "user", "content": prompts.GREETING.format(
                 name=sess.name,
-                now=datetime.now().strftime("%Y-%m-%d %H:%M（%A）"),
+                now=datetime.now().strftime("%Y-%m-%d %H:%M 星期") + "一二三四五六日"[datetime.now().weekday()],
                 memory_block=block or "（还没有记忆，这是第一次见面）",
             )}],
             max_tokens=200,

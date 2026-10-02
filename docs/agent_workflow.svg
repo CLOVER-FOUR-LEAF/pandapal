@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 520" font-family="-apple-system, 'PingFang SC', sans-serif">
+  <defs>
+    <style>
+      .lbl { font-size: 13px; fill: #3a3128; font-weight: 600; }
+      .sub { font-size: 11px; fill: #8a7a63; }
+      .arr { stroke: #b0977a; stroke-width: 1.8; fill: none; marker-end: url(#ah); }
+      .dash { stroke-dasharray: 5 4; }
+    </style>
+    <marker id="ah" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 z" fill="#b0977a"/>
+    </marker>
+  </defs>
+  <rect width="900" height="520" fill="#fdf6ec"/>
+
+  <!-- 入口 -->
+  <rect x="50" y="40" width="180" height="56" rx="12" fill="#ffffff" stroke="#e8dcc8" stroke-width="1.5"/>
+  <text x="140" y="64" text-anchor="middle" class="lbl">孩子消息</text>
+  <text x="140" y="82" text-anchor="middle" class="sub">POST /api/chat</text>
+
+  <!-- 记忆注入 -->
+  <rect x="300" y="30" width="260" height="76" rx="12" fill="#e8eefb" stroke="#cfd9ee" stroke-width="1.5"/>
+  <text x="430" y="54" text-anchor="middle" class="lbl">轮前记忆注入</text>
+  <text x="430" y="72" text-anchor="middle" class="sub">人设 + 活跃关注点块（active 全量）</text>
+  <text x="430" y="90" text-anchor="middle" class="sub">+ 主题检索 + 历史尾部</text>
+
+  <!-- 分类 -->
+  <polygon points="140,150 230,190 140,230 50,190" fill="#fff3dd" stroke="#e8dcc8" stroke-width="1.5"/>
+  <text x="140" y="186" text-anchor="middle" class="lbl">router</text>
+  <text x="140" y="203" text-anchor="middle" class="sub">plan / chat</text>
+
+  <!-- chat 路径 -->
+  <rect x="40" y="290" width="200" height="60" rx="12" fill="#ffffff" stroke="#e8dcc8" stroke-width="1.5"/>
+  <text x="140" y="315" text-anchor="middle" class="lbl">闲聊通道</text>
+  <text x="140" y="333" text-anchor="middle" class="sub">LLM 流式回复 → token SSE</text>
+
+  <!-- plan 路径 -->
+  <rect x="320" y="150" width="230" height="60" rx="12" fill="#fff0e0" stroke="#f0dcb8" stroke-width="1.5"/>
+  <text x="435" y="174" text-anchor="middle" class="lbl">planner：LLM → JSON DAG</text>
+  <text x="435" y="192" text-anchor="middle" class="sub">校验：去环/未知依赖/重试一次</text>
+
+  <rect x="320" y="250" width="230" height="70" rx="12" fill="#fff0e0" stroke="#f0dcb8" stroke-width="1.5"/>
+  <text x="435" y="274" text-anchor="middle" class="lbl">executor：按依赖并行</text>
+  <text x="435" y="292" text-anchor="middle" class="sub">race_lookup / weather / web_search / llm</text>
+  <text x="435" y="308" text-anchor="middle" class="sub">节点状态 → SSE 实时推任务树</text>
+
+  <rect x="320" y="360" width="230" height="60" rx="12" fill="#fff0e0" stroke="#f0dcb8" stroke-width="1.5"/>
+  <text x="435" y="384" text-anchor="middle" class="lbl">synth：汇总 → 结构化卡片</text>
+  <text x="435" y="402" text-anchor="middle" class="sub">记忆注入个性化（如感冒→带药提醒）</text>
+
+  <!-- 保底 -->
+  <rect x="620" y="250" width="230" height="70" rx="12" fill="#fdeef0" stroke="#edd3d6" stroke-width="1.5"/>
+  <text x="735" y="274" text-anchor="middle" class="lbl">保底：DAG 失败</text>
+  <text x="735" y="292" text-anchor="middle" class="sub">→ 单 LLM 直出卡片</text>
+  <text x="735" y="308" text-anchor="middle" class="sub">只跳过程展示，绝不跳生成</text>
+
+  <!-- 沉淀 -->
+  <rect x="300" y="455" width="260" height="52" rx="12" fill="#e9f3ea" stroke="#cfe0d2" stroke-width="1.5"/>
+  <text x="430" y="477" text-anchor="middle" class="lbl">轮后：LLM 抽取 → 记忆落盘</text>
+  <text x="430" y="495" text-anchor="middle" class="sub">topics upsert / daily 追加 / 原子写</text>
+
+  <!-- 箭头 -->
+  <path class="arr" d="M140 96 L140 150"/>
+  <path class="arr" d="M230 68 L300 68"/>
+  <path class="arr dash" d="M430 106 C 430 128, 250 160, 228 180"/>
+  <path class="arr" d="M95 230 C 70 255, 90 275, 120 290"/>
+  <path class="arr" d="M230 190 L320 180"/>
+  <path class="arr" d="M435 210 L435 250"/>
+  <path class="arr" d="M435 320 L435 360"/>
+  <path class="arr dash" d="M550 185 C 640 195, 735 200, 735 250"/>
+  <path class="arr" d="M140 350 C 140 420, 260 460, 300 480"/>
+  <path class="arr" d="M435 420 L435 455"/>
+</svg>
