@@ -110,6 +110,20 @@ def make_xlsx() -> bytes:
     return buf.getvalue()
 
 
+def make_pptx() -> bytes:
+    from pptx import Presentation
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[5])
+    slide.shapes.title.text = "我的机器人展示"
+    box = slide.shapes.add_textbox(0, 0, 200, 100)
+    box.text_frame.text = "第一页讲结构和传感器"
+    second = prs.slides.add_slide(prs.slide_layouts[5])
+    second.shapes.title.text = "比赛成绩"
+    buf = io.BytesIO()
+    prs.save(buf)
+    return buf.getvalue()
+
+
 # ------------------------------------------------------------------ 用例
 
 def test_kind_and_name() -> None:
@@ -400,6 +414,7 @@ def test_chat_with_attachment() -> None:
 
     async def fake_json(messages, **kw):
         captured.setdefault("calls", []).append(messages)
+        captured.setdefault("by_caller", {}).setdefault(kw.get("caller"), []).append(messages)
         if kw.get("caller") == "router":
             return {"intent": "chat", "mood": "normal", "affair_id": None, "reason": "t"}
         return {}
@@ -434,6 +449,11 @@ def test_chat_with_attachment() -> None:
             record("chat_history_has_files",
                    any(m.get("files") for m in (await client.get(
                        f"/api/history?name={NAME}")).json().get("history", [])))
+            # 记忆沉淀也要带上"这轮发来过什么"（纯图/纯文件的一轮否则什么都沉淀不出）
+            settle = captured.get("by_caller", {}).get("extract_graph", [])
+            record("chat_settle_sees_attachment",
+                   any("题目.txt" in str(m) for msgs in settle for m in msgs),
+                   f"extract_graph calls={len(settle)}")
 
             # 图片：走多模态 content 数组（视觉模型真能看到图）
             up2 = await client.post(f"/api/files?name={NAME}",
@@ -634,6 +654,77 @@ def test_vision_off_mode() -> None:
         config.LLM_VISION = old
 
 
+def test_extract_pptx() -> None:
+    """PPT 收得下就必须读得出：以前上传成功却一个字都读不出来，孩子会以为读过了。"""
+    try:
+        import pptx  # noqa: F401
+    except ImportError:
+        item = fresh_store("child_ppt").save(b"PK-fake", "展示.pptx", "")
+        record("extract_pptx_no_lib_is_honest", "python-pptx" in str(item.get("note") or ""),
+               str(item.get("note"))[:50])
+        return
+    store = fresh_store("child_ppt")
+    item = store.save(make_pptx(), "展示.pptx",
+                      "application/vnd.openxmlformats-officedocument.presentationml.presentation")
+    record("extract_pptx_text",
+           "我的机器人展示" in item["text"] and "传感器" in item["text"], item["text"][:40])
+    record("extract_pptx_pages", item.get("slides") == 2, str(item.get("slides")))
+    record("extract_pptx_public", store.public(item)["chars"] > 0)
+
+
+def test_serve_mime_whitelist() -> None:
+    """下发原文件只认白名单 MIME：不把客户端声明的 content_type 原样回吐。"""
+    record("serve_mime_image", files.serve_mime({"ext": "png", "mime": "image/png"}) == "image/png")
+    record("serve_mime_pdf", files.serve_mime({"ext": "pdf", "mime": "application/pdf"})
+           == "application/pdf")
+    record("serve_mime_html_is_neutralized",
+           files.serve_mime({"ext": "html", "mime": "text/html"}) == "application/octet-stream")
+    record("serve_mime_stated_pdf_ok",
+           files.serve_mime({"ext": "bin", "mime": "application/pdf"}) == "application/pdf")
+    record("serve_mime_garbage", files.serve_mime({"ext": "", "mime": ""})
+           == "application/octet-stream")
+
+
+def test_attach_memory_note() -> None:
+    """记忆沉淀也要知道"孩子发来过什么"，但必须严格限量、带围栏。"""
+    from server import main as srv
+    store = fresh_store("child_memnote")
+    item = store.save(("讲义内容" * 800).encode(), "讲义.txt", "text/plain")
+    note = srv._attach_memory_note(store, [item])
+    record("memory_note_names_file", "讲义.txt" in note, note[:40])
+    record("memory_note_bounded", len(note) <= 1400, f"len={len(note)}")
+    record("memory_note_fenced", "<attach_digest>" in note and "</attach_digest>" in note)
+    record("memory_note_empty_without_files", srv._attach_memory_note(store, []) == "")
+
+
+def test_synth_gets_attach_ctx() -> None:
+    """卡片/规划链路只吃文本：不带附件摘要就会漏掉孩子图里给的信息。"""
+    from server import synth
+    from server.memory import MemoryStore
+    d = SANDBOX / "child_synth"
+    d.mkdir(parents=True, exist_ok=True)
+    store = MemoryStore(d)
+    captured: dict = {}
+    saved = llm.complete_json
+
+    async def fake(messages, **kw):
+        captured["user"] = messages[-1]["content"]
+        return {"title": "方案", "sections": [{"heading": "要点", "items": ["先做数学"]}]}
+
+    llm.complete_json = fake
+    try:
+        card = asyncio.run(synth.synthesize(store, "按课表安排", {},
+                                           "\n\n【附件】课表.png：已读出 120 字"))
+        record("synth_card_ok", card["title"] == "方案")
+        record("synth_attach_ctx_in_prompt", "课表.png" in captured.get("user", ""),
+               captured.get("user", "")[-60:])
+        card2 = asyncio.run(synth.direct_card(store, "按课表安排", "\n\n【附件】课表.png"))
+        record("direct_card_attach_ctx", card2["title"] == "方案"
+               and "课表.png" in captured.get("user", ""))
+    finally:
+        llm.complete_json = saved
+
+
 def test_api_body_limits() -> None:
     """上传不能被 256KB 的 JSON 闸门误杀；非上传接口的闸门仍要留着。"""
     async def body(client, token):
@@ -801,6 +892,10 @@ def main() -> int:
         test_multimodal_messages()
         test_openai_wire_format()
         test_vision_rejection_helpers()
+        test_extract_pptx()
+        test_serve_mime_whitelist()
+        test_attach_memory_note()
+        test_synth_gets_attach_ctx()
         test_image_png_photo_falls_back_to_jpeg()
         test_probe_and_unreadable_image()
         test_pdf_scan_rendered_as_images()

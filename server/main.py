@@ -569,6 +569,24 @@ def _attach_digest(store, items: list[dict] | None) -> str:
     return out
 
 
+def _attach_memory_note(store, items: list[dict] | None) -> str:
+    """给记忆抽取器的一小段附件说明（带头文件名 + 严格限量的正文围栏）。
+
+    没有它，纯图/纯文件的一轮几乎沉淀不出东西：那句话只有"（看看这个附件）"，
+    过后孩子问"上次那份讲义"时图谱里没有任何线索。限量 400/800 字，
+    免得一份长 PDF 把抽取器的 prompt 撑爆（沉淀本来是轻量调用）。
+    """
+    if not items:
+        return ""
+    _prepare_attachments(store, items)
+    lines = [f"- {files.prompt_note(i)}" for i in items]
+    out = "\n\n【TA 这一轮发来的附件】\n" + "\n".join(lines)
+    body = files.file_context(items, max_chars=400, total_chars=800, tag="attach_digest")
+    if body:
+        out += "\n" + body
+    return out
+
+
 def _add_note(item: dict, text: str) -> None:
     """把说明追加到附件 note 上（去重，同一句话不会攒三遍）。"""
     old = str(item.get("note") or "").strip()
@@ -1096,18 +1114,21 @@ def _make_checklist_from_card(card: dict) -> list[str]:
     return items[:12]
 
 
-async def _settle_memory(sess, user_msg: str, reply: str, is_secret: bool = False) -> dict | None:
+async def _settle_memory(sess, user_msg: str, reply: str, is_secret: bool = False,
+                         attach_note: str = "") -> dict | None:
     """回复发完之后再做：抽取图谱节点/边 + 事务沉淀，并返回 memory 事件载荷。
 
     返回的载荷里可能带 "affair_event"（事务阶段推进后的看板更新），由调用方
     单独作为 affair 事件下发，不进 memory 事件本体。is_secret 时绝不碰事务档案：
     私密原话一旦写进 affairs.json 的 log 就泄露了。
+    attach_note 是本轮附件摘要（悄悄话轮必为空）：让"孩子发来过什么"也进记忆。
     """
     g, a, _ = _stores(sess)
     try:
         # 悄悄话轮的 affair 字段被服务端强制清空，事务简报进了 prompt 也没用——不读
         brief = "" if is_secret else await asyncio.to_thread(_affairs_brief, a)
-        gdata = await memory.extract_and_store(sess.store, user_msg, reply,
+        gdata = await memory.extract_and_store(sess.store, user_msg + ("" if is_secret else attach_note),
+                                               reply,
                                                graph_store=g, is_secret=is_secret,
                                                affairs_brief=brief)
     except Exception as e:  # noqa: BLE001 沉淀失败不能影响对话
@@ -1260,10 +1281,13 @@ async def _chat_stream(sess, raw_message: str, ctx: dict, resume: ResumeReq | No
                 card = await _card_with_fallback(
                     sess.store, message, results=results, title=plan["title"],
                     pairs=[(n["title"], results.get(n["id"], "")) for n in plan["nodes"]
-                           if statuses.get(n["id"]) != "error"])
+                           if statuses.get(n["id"]) != "error"],
+                    attach_ctx=_attach_digest(_file_store(sess), attachments))
             else:
                 await emit({"type": "phase", "phase": "synthesizing"})
-                card = await _card_with_fallback(sess.store, message, use_synth=False)
+                card = await _card_with_fallback(
+                    sess.store, message, use_synth=False,
+                    attach_ctx=_attach_digest(_file_store(sess), attachments))
             reply_text = synth.card_to_text(card)
 
             # ③ 实际去执行：加提醒 / 生成清单 / 请家长确认。
@@ -1335,7 +1359,9 @@ async def _chat_stream(sess, raw_message: str, ctx: dict, resume: ResumeReq | No
             print(f"[history] 落盘失败：{e}")
     ctx.update({"reply_text": reply_text, "is_secret": is_secret,
                 "message": message, "raw_message": raw_message,
-                "intent": last_turn.get("intent", "chat")})
+                "intent": last_turn.get("intent", "chat"),
+                # 附件摘要随 ctx 带出锁外：记忆沉淀也在锁外跑，别在这里再读一次磁盘
+                "attach_note": "" if is_secret else _attach_memory_note(_file_store(sess), attachments)})
 
 
 async def _chat_settle(sess, ctx: dict):
@@ -1353,7 +1379,8 @@ async def _chat_settle(sess, ctx: dict):
 
     if reply_text:
         gdata = await _settle_memory(sess, raw_message if is_secret else message,
-                                     reply_text, is_secret)
+                                     reply_text, is_secret,
+                                     attach_note=ctx.get("attach_note") or "")
         if gdata:
             aff_ev = gdata.pop("affair_event", None)  # 事务阶段推进 → 看板实时刷新
             if aff_ev:
@@ -1503,7 +1530,8 @@ _DIRECT_BUDGET = 25.0  # 直出：实测 ~5s
 
 
 async def _card_with_fallback(store, message: str, *, results: dict | None = None,
-                              title: str = "", pairs=(), use_synth: bool = True) -> dict:
+                              title: str = "", pairs=(), use_synth: bool = True,
+                              attach_ctx: str = "") -> dict:
     """出卡片的三档降级：汇总 → 单次直出 → 纯本地摊结果。
 
     为什么要有第三档：synth 实测平均 35s、最慢 52.6s，已经贴着单次调用超时
@@ -1519,7 +1547,7 @@ async def _card_with_fallback(store, message: str, *, results: dict | None = Non
     if use_synth:
         try:
             return await asyncio.wait_for(
-                synth.synthesize(store, message, results or {}), _SYNTH_BUDGET)
+                synth.synthesize(store, message, results or {}, attach_ctx), _SYNTH_BUDGET)
         except Exception as e:  # noqa: BLE001 含 TimeoutError；CancelledError 不在此列，照常上抛
             print(f"[card] 汇总失败，降级：{e!r}")
         if results:
@@ -1527,7 +1555,7 @@ async def _card_with_fallback(store, message: str, *, results: dict | None = Non
             # 刚查到的车次/时间对不上的内容。直接摊真结果，降级不降真。
             return synth.assemble_from_results(title, list(pairs))
     try:
-        return await asyncio.wait_for(synth.direct_card(store, message), _DIRECT_BUDGET)
+        return await asyncio.wait_for(synth.direct_card(store, message, attach_ctx), _DIRECT_BUDGET)
     except Exception as e:  # noqa: BLE001
         print(f"[card] 直出也失败，用本地兜底：{e!r}")
     return synth.assemble_from_results(title, list(pairs))
@@ -1777,7 +1805,7 @@ async def api_files_content(request: Request, fid: str, name: str = ""):
         # 展示名消毒后再进响应头（防引号/换行注入）
         safe = re.sub(r'[^\w一-鿿.（）()\- ]', "_", str(item.get("name") or "file"))[:80]
         headers["Content-Disposition"] = f"attachment; filename*=UTF-8''{quote(safe)}"
-    return FileResponse(path, media_type=item.get("mime") or "application/octet-stream",
+    return FileResponse(path, media_type=files.serve_mime(item),
                         headers=headers)
 
 

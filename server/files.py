@@ -299,6 +299,44 @@ def _extract_image(data: bytes) -> tuple[str, dict]:
     return f"图片：{w}×{h} {fmt}", {"width": w, "height": h, "vision_ok": True, "note": note}
 
 
+def _extract_pptx(data: bytes) -> tuple[str, dict]:
+    """PPT：逐页取文本框、表格与备注（python-pptx 是可选依赖，没装就如实说明）。
+
+    以前 .pptx 收得下却读不了一个字，孩子会以为管家看过了——"看起来支持"
+    比明确拒绝更糟。工具页/备注里的正文往往就是孩子要讲的内容。
+    """
+    try:
+        from pptx import Presentation
+    except ImportError:
+        return "", {"note": "服务器缺少 PPT 解析库（python-pptx），暂时读不了 .pptx；"
+                            "可以把关键页截图发给我，我按图片来读"}
+    prs = Presentation(io.BytesIO(data))
+    slides = list(prs.slides)
+    limit = 30
+    parts: list[str] = []
+    for i, slide in enumerate(slides[:limit], 1):
+        texts: list[str] = []
+        for shape in slide.shapes:
+            frame = getattr(shape, "text_frame", None)
+            if frame is not None:
+                text = (frame.text or "").strip()
+                if text:
+                    texts.append(text)
+            if getattr(shape, "has_table", False):
+                rows = [[cell.text for cell in row.cells] for row in shape.table.rows]
+                body = _table_to_text(rows, limit=50)
+                if body:
+                    texts.append(body)
+        if getattr(slide, "has_notes_slide", False):
+            snippet = (slide.notes_slide.notes_text_frame.text or "").strip()
+            if snippet:
+                texts.append(f"（备注）{snippet}")
+        if texts:
+            parts.append(f"—— 第 {i} 页 ——\n" + "\n".join(texts))
+    note = f"PPT 共 {len(slides)} 页，只读取了前 {limit} 页" if len(slides) > limit else ""
+    return "\n\n".join(parts), {"slides": len(slides), "note": note}
+
+
 def extract(data: bytes, filename: str, kind: str) -> tuple[str, dict, str]:
     """抽取正文。返回 (text, meta, note)；任何解析失败都降级为说明文字，不抛错。
 
@@ -315,9 +353,9 @@ def extract(data: bytes, filename: str, kind: str) -> tuple[str, dict, str]:
         elif kind == "xlsx":
             text, meta = _extract_xlsx(data)
         elif kind == "pptx":
-            return "", {}, "PPT 暂不支持解析正文；可以把关键页截图发给我"
+            text, meta = _extract_pptx(data)
         elif kind == "legacy_office":
-            return "", {}, f"这是旧版 Office 格式（.{split_ext(filename)}），请另存为 .docx/.xlsx 后再发"
+            return "", {}, f"这是旧版 Office 格式（.{split_ext(filename)}），请另存为 .docx/.xlsx/.pptx 后再发"
         else:
             text, meta = _read_text_bytes(data), {}
     except Exception as e:  # noqa: BLE001 解析异常一律降级
@@ -379,6 +417,22 @@ _EXT_MIME = {
     "txt": "text/plain", "md": "text/markdown", "csv": "text/csv", "json": "application/json",
 }
 _PROVIDER_OK = {"image/png", "image/jpeg", "image/webp"}
+
+# 下发原文件时允许回吐的 MIME：客户端声称的 content_type 不能原样信
+# （把 .txt 说成 text/html 就能在浏览器里被当页面渲染；nosniff 挡不住显式声明的类型）
+_SAFE_SERVE_MIME = {
+    "image/png", "image/jpeg", "image/webp", "image/gif", "image/bmp",
+    "application/pdf", "text/plain", "text/csv", "text/markdown", "application/json",
+}
+
+
+def serve_mime(item: dict) -> str:
+    """下发用的 MIME 只认白名单：扩展名对应的规范类型优先，其次才是客户端声明。"""
+    canonical = _EXT_MIME.get(str(item.get("ext") or "").lower())
+    if canonical in _SAFE_SERVE_MIME:
+        return canonical
+    stated = str(item.get("mime") or "").lower().split(";")[0].strip()
+    return stated if stated in _SAFE_SERVE_MIME else "application/octet-stream"
 
 
 def vision_payload(data: bytes, mime: str = "", max_edge: int | None = None) -> tuple[bytes, str]:
@@ -546,7 +600,7 @@ class FileStore:
             "created": _now_iso(),
             "text": text,
         }
-        for key in ("width", "height", "pages", "sheets", "vision_ok"):
+        for key in ("width", "height", "pages", "sheets", "slides", "vision_ok"):
             if meta.get(key) is not None:
                 item[key] = meta[key]
         if note:
