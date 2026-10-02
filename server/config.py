@@ -5,7 +5,6 @@ import os
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-DATA_DIR = ROOT / "data"
 WEB_DIR = ROOT / "web"
 
 
@@ -25,11 +24,16 @@ def _load_dotenv() -> None:
 
 _load_dotenv()
 
+# 数据目录可被环境变量覆盖（测试/沙箱跑在副本上，不污染演示档案）
+DATA_DIR = Path(os.getenv("PANDA_DATA_DIR") or ROOT / "data")
+
 LLM_PROTOCOL = os.getenv("LLM_PROTOCOL", "openai").lower()  # openai | anthropic
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.deepseek.com/v1").rstrip("/")
 LLM_API_KEY = os.getenv("LLM_API_KEY", "")
 LLM_API_KEY2 = os.getenv("LLM_API_KEY2", "")
 LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-chat")
+# 推理型模型（deepseek-flash/v4-pro 等）可用的推理档位：low|high|max；留空则不传参
+LLM_REASONING_EFFORT = os.getenv("LLM_REASONING_EFFORT", "")
 
 SEARCH_API_KEY = os.getenv("SEARCH_API_KEY", "")
 SEARCH_BASE_URL = os.getenv("SEARCH_BASE_URL", "").rstrip("/")

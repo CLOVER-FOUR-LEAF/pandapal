@@ -1,0 +1,347 @@
+{
+  "version": 1,
+  "affairs": [
+    {
+      "id": "xikesong",
+      "title": "西安西客松参赛",
+      "kind": "travel",
+      "stage": "executing",
+      "due": "2026-10-18",
+      "owner_next": "parent",
+      "summary": "车票方案已发妈妈确认，参赛清单 9 项备好，背包里要放上还在吃的感冒药",
+      "linked_nodes": [
+        "xikesong",
+        "cold",
+        "medicine",
+        "new_pc",
+        "mom",
+        "robot_class"
+      ],
+      "progress": {
+        "mode": "days",
+        "value": 16
+      },
+      "checklist_id": "xikesong_pack",
+      "actions": [
+        {
+          "kind": "reminder",
+          "text": "出发前一天收拾参赛行李（清单见 xikesong_pack）",
+          "at": "2026-10-17"
+        },
+        {
+          "kind": "checklist",
+          "text": "生成参赛携带清单 9 项",
+          "at": "2026-10-02"
+        },
+        {
+          "kind": "parent_confirm",
+          "text": "请妈妈确认 10/17 威海→西安的车票方案",
+          "at": "2026-10-02"
+        },
+        {
+          "kind": "ics",
+          "text": "导出比赛日日程（10-18 08:30 签到）",
+          "at": "2026-10-02"
+        }
+      ],
+      "log": [
+        {
+          "ts": "2026-09-28T20:40:00",
+          "actor": "child",
+          "text": "说报名了西客松青少年科创大赛，10 月 18 日在西安，报的是创意编程赛道"
+        },
+        {
+          "ts": "2026-10-01T19:05:00",
+          "actor": "child",
+          "text": "国庆节把参赛这事定下来了，兴奋得有点睡不着，又担心第一次离开威海去那么远"
+        },
+        {
+          "ts": "2026-10-01T19:20:00",
+          "actor": "butler",
+          "text": "查到赛事信息：西安高新国际会议中心，08:30-09:30 签到，09:30 开幕式，家长可在休息区等候"
+        },
+        {
+          "ts": "2026-10-02T09:12:00",
+          "actor": "butler",
+          "text": "生成了参赛方案：查了威海→西安 4 个出行方案，备好携带清单，把车票的事发到家长收件箱等妈妈确认"
+        },
+        {
+          "ts": "2026-10-02T16:20:12",
+          "actor": "child",
+          "text": "出发前有点紧张，怕电脑坏、讲不清作品"
+        },
+        {
+          "ts": "2026-10-02T16:23:51",
+          "actor": "child",
+          "text": "赛前有点紧张，手指敲桌子"
+        },
+        {
+          "ts": "2026-10-02T16:27:44",
+          "actor": "child",
+          "text": "赛前紧张，怕讲磕巴和路上状况"
+        }
+      ],
+      "created": "2026-09-28",
+      "updated": "2026-10-02"
+    },
+    {
+      "id": "newpc_plan",
+      "title": "换电脑计划",
+      "kind": "goal",
+      "stage": "executing",
+      "due": null,
+      "owner_next": "child",
+      "summary": "旧笔记本硬盘只剩约 3GB，攒钱目标 300 元已完成 186 元（62%），周末去看机型",
+      "linked_nodes": [
+        "new_pc",
+        "save_money",
+        "pocket_money",
+        "coding",
+        "xikesong"
+      ],
+      "progress": {
+        "mode": "percent",
+        "value": 62
+      },
+      "checklist_id": null,
+      "actions": [
+        {
+          "kind": "parent_confirm",
+          "text": "问妈妈旧的笔记本电脑怎么处理（卖掉还是留作备用机）",
+          "at": "2026-10-05"
+        },
+        {
+          "kind": "reminder",
+          "text": "10/06 一起去线下店看机型，重点看硬盘和内存，先不买",
+          "at": "2026-10-06"
+        },
+        {
+          "kind": "reminder",
+          "text": "每周日把零花钱投进存钱罐并报一次进度",
+          "at": "2026-10-11"
+        }
+      ],
+      "log": [
+        {
+          "ts": "2026-09-30T20:10:00",
+          "actor": "child",
+          "text": "电脑又卡住了，硬盘只剩约 3GB，他说“它是不是快要退休了”"
+        },
+        {
+          "ts": "2026-09-30T20:15:00",
+          "actor": "child",
+          "text": "说要把零花钱攒下来，为换电脑出一份力"
+        },
+        {
+          "ts": "2026-10-02T09:30:00",
+          "actor": "butler",
+          "text": "和他一起定了目标：自己攒 300 元。目前 186 元，进度 62%，速度大约是每周 20 元"
+        },
+        {
+          "ts": "2026-10-02T09:34:00",
+          "actor": "butler",
+          "text": "提醒他：比赛要带的是这台旧电脑，10/17 出发前先把编程软件和作品文件整理备份好"
+        }
+      ],
+      "created": "2026-09-30",
+      "updated": "2026-10-02"
+    },
+    {
+      "id": "cold_recover",
+      "title": "感冒康复",
+      "kind": "health",
+      "stage": "followup",
+      "due": "2026-10-10",
+      "owner_next": "parent",
+      "summary": "咳嗽明显减少，10/02 吃完最后一顿药，10/03-10/09 继续观察干咳和睡觉出汗",
+      "linked_nodes": [
+        "cold",
+        "medicine",
+        "carrot",
+        "xikesong"
+      ],
+      "progress": {
+        "mode": "days",
+        "value": 8
+      },
+      "checklist_id": null,
+      "actions": [
+        {
+          "kind": "reminder",
+          "text": "每天早晚各一次：今天咳了几次、有没有痰、睡得怎么样",
+          "at": "2026-10-03"
+        },
+        {
+          "kind": "reminder",
+          "text": "10/09 复看社区医生，确认能不能停药、能不能去西安",
+          "at": "2026-10-09"
+        },
+        {
+          "kind": "reminder",
+          "text": "出门比赛前把药和保温杯放进背包",
+          "at": "2026-10-16"
+        }
+      ],
+      "log": [
+        {
+          "ts": "2026-09-25T21:00:00",
+          "actor": "parent",
+          "text": "晚上开始打喷嚏、流鼻涕，有点低烧，先物理降温，一晚上量了三次体温"
+        },
+        {
+          "ts": "2026-09-26T10:20:00",
+          "actor": "parent",
+          "text": "去社区医院看过，医生开了 7 天的药，叮嘱多喝水、早晚注意保暖"
+        },
+        {
+          "ts": "2026-10-01T19:40:00",
+          "actor": "butler",
+          "text": "国庆这天咳嗽还有，但比前几天少了；他还是惦记着周六的机器人课"
+        },
+        {
+          "ts": "2026-10-02T09:45:00",
+          "actor": "butler",
+          "text": "药只剩最后一顿。安排 10/03 起转为观察：重点看干咳和夜里出汗，10/09 复看医生再定能不能去西安"
+        }
+      ],
+      "created": "2026-09-25",
+      "updated": "2026-10-02"
+    },
+    {
+      "id": "piano_again",
+      "title": "钢琴要不要再学",
+      "kind": "interest",
+      "stage": "discovered",
+      "due": null,
+      "owner_next": "child",
+      "summary": "钢琴停了两年，最近说想学手风琴，但担心自己又是三分钟热度，先不报班",
+      "linked_nodes": [
+        "piano",
+        "accordion",
+        "three_minute",
+        "mom"
+      ],
+      "progress": {
+        "mode": "none",
+        "value": null
+      },
+      "checklist_id": null,
+      "actions": [
+        {
+          "kind": "reminder",
+          "text": "西客松比完（10/18）之后，再一起聊聊手风琴的事",
+          "at": "2026-10-20"
+        },
+        {
+          "kind": "reminder",
+          "text": "周末去琴行试着背一下手风琴，别急着交钱报班",
+          "at": "2026-10-25"
+        }
+      ],
+      "log": [
+        {
+          "ts": "2026-09-20T17:30:00",
+          "actor": "child",
+          "text": "路过琴行听到琴声，停下来听了一会儿，说“其实钢琴的声音挺好听的”"
+        },
+        {
+          "ts": "2026-09-20T20:15:00",
+          "actor": "child",
+          "text": "刷到一个手风琴演奏视频，说“这个好耶，我想学这个”"
+        },
+        {
+          "ts": "2026-10-01T20:05:00",
+          "actor": "child",
+          "text": "又问起手风琴要多少钱、会不会又要坐很久，“想学，但怕自己又半路跑掉”"
+        }
+      ],
+      "created": "2026-09-20",
+      "updated": "2026-10-01"
+    },
+    {
+      "id": "西客松比赛我要准备啥",
+      "title": "西客松比赛我要准备啥",
+      "kind": "event",
+      "stage": "done",
+      "due": null,
+      "owner_next": "butler",
+      "summary": "管家正在筹备",
+      "linked_nodes": [
+        "xiaodou",
+        "xikesong",
+        "robot_cert"
+      ],
+      "progress": {
+        "mode": "none",
+        "value": 0
+      },
+      "checklist_id": null,
+      "actions": [
+        {
+          "kind": "parent_confirm",
+          "title": "西客松比赛我要准备啥：需要家长帮忙确认的事",
+          "detail": "管家已把行程与清单准备好，请家长确认交通与报名相关事项。"
+        }
+      ],
+      "log": [
+        {
+          "ts": "2026-10-02T16:17:22",
+          "actor": "butler",
+          "text": "新建事务：西客松比赛我要准备啥"
+        },
+        {
+          "ts": "2026-10-02T16:17:41",
+          "actor": "butler",
+          "text": "执行了 parent_confirm"
+        },
+        {
+          "ts": "2026-10-02T16:23:39",
+          "actor": "child",
+          "text": "管家已给出备赛清单"
+        }
+      ],
+      "created": "2026-10-02",
+      "updated": "2026-10-02"
+    },
+    {
+      "id": "西客松比赛我要准备啥_2",
+      "title": "西客松比赛我要准备啥",
+      "kind": "event",
+      "stage": "planning",
+      "due": null,
+      "owner_next": "butler",
+      "summary": "管家正在筹备",
+      "linked_nodes": [
+        "xiaodou",
+        "xikesong",
+        "finger_fidget"
+      ],
+      "progress": {
+        "mode": "none",
+        "value": 0
+      },
+      "checklist_id": null,
+      "actions": [
+        {
+          "kind": "parent_confirm",
+          "title": "西客松比赛我要准备啥：需要家长帮忙确认的事",
+          "detail": "管家已把行程与清单准备好，请家长确认交通与报名相关事项。"
+        }
+      ],
+      "log": [
+        {
+          "ts": "2026-10-02T16:26:20",
+          "actor": "butler",
+          "text": "新建事务：西客松比赛我要准备啥"
+        },
+        {
+          "ts": "2026-10-02T16:27:13",
+          "actor": "butler",
+          "text": "执行了 parent_confirm"
+        }
+      ],
+      "created": "2026-10-02",
+      "updated": "2026-10-02"
+    }
+  ]
+}

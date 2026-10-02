@@ -1,0 +1,1064 @@
+{
+  "version": 1,
+  "nodes": [
+    {
+      "id": "xiaodou",
+      "label": "小豆",
+      "domain": "ethics",
+      "type": "person",
+      "status": "active",
+      "first_seen": "2024-03-01",
+      "last_seen": "2026-10-02",
+      "weight": 46,
+      "private": false,
+      "facts": [
+        {
+          "date": "2024-03-01",
+          "text": "二年级下学期，妈妈开始给他记成长档案，说“这孩子好奇心太重，什么都想问一句为什么”"
+        },
+        {
+          "date": "2025-09-01",
+          "text": "升上三年级，开始每周 20 元零花钱，自己拿小本子记进出"
+        },
+        {
+          "date": "2026-10-01",
+          "text": "国庆节报名西客松后有点睡不着，说“好耶，但第一次离开威海去那么远，也有点怕”"
+        },
+        {
+          "date": "2026-10-02",
+          "text": "感冒还没好利索，一边咳嗽一边研究比赛规则，紧张时手指在桌边敲"
+        }
+      ]
+    },
+    {
+      "id": "mom",
+      "label": "妈妈",
+      "domain": "ethics",
+      "type": "person",
+      "status": "active",
+      "first_seen": "2024-03-01",
+      "last_seen": "2026-10-01",
+      "weight": 32,
+      "private": false,
+      "facts": [
+        {
+          "date": "2024-03-01",
+          "text": "在威海陪读，兴趣班几乎每次都陪着去，兜里总装着纸巾和保温杯"
+        },
+        {
+          "date": "2026-09-18",
+          "text": "晚饭把胡萝卜切成小丁拌进肉馅里，说“看不见就不算吃胡萝卜”"
+        },
+        {
+          "date": "2026-10-01",
+          "text": "决定陪小豆去西安比赛，当晚就开始查从威海过去怎么走"
+        }
+      ]
+    },
+    {
+      "id": "dad",
+      "label": "爸爸",
+      "domain": "ethics",
+      "type": "person",
+      "status": "active",
+      "first_seen": "2024-03-01",
+      "last_seen": "2026-10-02",
+      "weight": 19,
+      "private": false,
+      "facts": [
+        {
+          "date": "2024-03-01",
+          "text": "在外地工作，周五晚上回家、周日晚上走，视频电话固定在每晚八点"
+        },
+        {
+          "date": "2026-08-16",
+          "text": "专门请了一天假，带小豆去诸城看恐龙化石"
+        },
+        {
+          "date": "2026-10-02",
+          "text": "电话里说“比赛别紧张，把你会的那点全使出来就行”，还偷偷答应帮他保密礼物的事"
+        }
+      ]
+    },
+    {
+      "id": "teacher_wang",
+      "label": "机器人课王老师",
+      "domain": "ethics",
+      "type": "person",
+      "status": "active",
+      "first_seen": "2024-09-07",
+      "last_seen": "2026-10-02",
+      "weight": 11,
+      "private": false,
+      "facts": [
+        {
+          "date": "2024-09-07",
+          "text": "第一次课就记住了小豆，说他“问的问题比谁都多，但问得都在点子上”"
+        },
+        {
+          "date": "2026-09-27",
+          "text": "课后跟妈妈说，小豆这次报西客松创意编程赛道挺合适，作品要能讲清楚"
+        },
+        {
+          "date": "2026-10-02",
+          "text": "在家长群里发提醒：学生证、笔记本电脑、充电器，创意编程赛道可以自带零件包"
+        }
+      ]
+    },
+    {
+      "id": "good_yeah",
+      "label": "口头语“好耶”",
+      "domain": "ethics",
+      "type": "trait",
+      "status": "active",
+      "first_seen": "2024-05-12",
+      "last_seen": "2026-10-01",
+      "weight": 13,
+      "private": false,
+      "facts": [
+        {
+          "date": "2024-05-12",
+          "text": "第一次被记下来：听说周末要去海边，连喊了三声“好耶”"
+        },
+        {
+          "date": "2026-06-01",
+          "text": "儿童节拿到恐龙模型，还是那句“好耶”，只是这次喊得比小时候短"
+        },
+        {
+          "date": "2026-10-01",
+          "text": "报名成功那天说了句“好耶”，声音比平时小一点——心里其实还是紧张的"
+        }
+      ]
+    },
+    {
+      "id": "three_minute",
+      "label": "三分钟热度",
+      "domain": "ethics",
+      "type": "trait",
+      "status": "active",
+      "first_seen": "2024-06-20",
+      "last_seen": "2026-09-20",
+      "weight": 6,
+      "private": false,
+      "facts": [
+        {
+          "date": "2024-06-20",
+          "text": "妈妈数过：这半年想学的东西有钢琴、围棋、轮滑，最长的坚持了三个月"
+        },
+        {
+          "date": "2026-09-20",
+          "text": "自己也认这个毛病，说“这次想学手风琴，我保证不半路跑掉”"
+        }
+      ]
+    },
+    {
+      "id": "secret_gift",
+      "label": "悄悄话·给妈妈的生日礼物",
+      "domain": "ethics",
+      "type": "goal",
+      "status": "active",
+      "first_seen": "2026-09-24",
+      "last_seen": "2026-10-01",
+      "weight": 3,
+      "private": true,
+      "facts": [
+        {
+          "date": "2026-09-24",
+          "text": "小声跟管家说想给妈妈准备生日礼物，但“不能让妈妈知道，她知道了就不算惊喜了”"
+        },
+        {
+          "date": "2026-09-28",
+          "text": "想好了：把自己画的恐龙漫画装订成一本，再夹一封手写的信，“这样不用动攒电脑的钱”"
+        },
+        {
+          "date": "2026-10-01",
+          "text": "把计划写在小纸条上塞进书包夹层，只告诉了爸爸，让爸爸保密"
+        }
+      ]
+    },
+    {
+      "id": "xikesong",
+      "label": "西客松大赛",
+      "domain": "intellect",
+      "type": "event",
+      "status": "active",
+      "first_seen": "2026-09-28",
+      "last_seen": "2026-10-02",
+      "weight": 19,
+      "private": false,
+      "facts": [
+        {
+          "date": "2026-09-28",
+          "text": "报名 2026-10-18 在西安举办的西客松青少年科创大赛，报的是创意编程赛道"
+        },
+        {
+          "date": "2026-10-01",
+          "text": "比赛细节定下来：西安高新国际会议中心，08:30-09:30 签到，09:30 开幕式，家长可在休息区等候"
+        },
+        {
+          "date": "2026-10-02",
+          "text": "第一次出远门比赛，又期待又紧张，“怕现场电脑坏了，也怕自己讲不清楚作品”"
+        },
+        {
+          "date": "2026-10-02",
+          "text": "第一次去外地参赛，赛前最担心现场电脑坏掉、作品讲不清楚"
+        },
+        {
+          "date": "2026-10-02",
+          "text": "10月18日早上8:30到西安高新国际会议中心签到、9:30开幕式，第一次出远门参加比赛"
+        },
+        {
+          "date": "2026-10-02",
+          "text": "10月18日在西安高新国际会议中心比赛，08:30-09:30签到；计划17日提前一天到西安适应，出发前给旧电脑大扫除空出8GB，作品备份三份并录演示视频。"
+        },
+        {
+          "date": "2026-10-02",
+          "text": "赛前最担心的是比赛当天讲得磕巴和出发路上，管家提醒“最坏也就是电脑卡一下”"
+        }
+      ]
+    },
+    {
+      "id": "creative_coding",
+      "label": "创意编程赛道",
+      "domain": "intellect",
+      "type": "interest",
+      "status": "active",
+      "first_seen": "2026-10-01",
+      "last_seen": "2026-10-02",
+      "weight": 6,
+      "private": false,
+      "facts": [
+        {
+          "date": "2026-10-01",
+          "text": "报的就是这个赛道：可以自带零件包，作品要现场讲解，评委看的是创意不是难度"
+        },
+        {
+          "date": "2026-10-02",
+          "text": "作品想法是“会认路的恐龙小车”——把巡线小车的经验和恐龙爱好拼在一起"
+        }
+      ]
+    },
+    {
+      "id": "robot_class",
+      "label": "机器人课",
+      "domain": "intellect",
+      "type": "interest",
+      "status": "active",
+      "first_seen": "2024-09-07",
+      "last_seen": "2026-10-02",
+      "weight": 27,
+      "private": false,
+      "facts": [
+        {
+          "date": "2024-09-07",
+          "text": "周六上午 9:30 开始上机器人课，从此没缺过课"
+        },
+        {
+          "date": "2026-09-26",
+          "text": "巡线小车终于能转过弯，被王老师夸了一句，回家路上一路都在笑"
+        },
+        {
+          "date": "2026-10-02",
+          "text": "感冒还没好，还是追着妈妈问“周六到底能不能去上课”"
+        }
+      ]
+    },
+    {
+      "id": "line_car",
+      "label": "巡线小车",
+      "domain": "intellect",
+      "type": "interest",
+      "status": "active",
+      "first_seen": "2026-09-05",
+      "last_seen": "2026-10-02",
+      "weight": 10,
+      "private": false,
+      "facts": [
+        {
+          "date": "2026-09-05",
+          "text": "开始做巡线小车，转弯参数怎么调都不对，车老是冲出赛道"
+        },
+        {
+          "date": "2026-09-26",
+          "text": "转弯终于稳了，说“下周想把速度再调快一点”"
+        },
+        {
+          "date": "2026-10-02",
+          "text": "给小车起了名字叫“小三角”，说它和自己是一对"
+        }
+      ]
+    },
+    {
+      "id": "coding",
+      "label": "编程",
+      "domain": "intellect",
+      "type": "interest",
+      "status": "active",
+      "first_seen": "2025-03-15",
+      "last_seen": "2026-10-02",
+      "weight": 17,
+      "private": false,
+      "facts": [
+        {
+          "date": "2025-03-15",
+          "text": "三年级下学期开始学编程，第一个作品是会跳来跳去的小恐龙"
+        },
+        {
+          "date": "2026-09-30",
+          "text": "编程软件打开要等两分钟，卡到想砸键盘（忍住了），嘴上说“它是不是快要退休了”"
+        },
+        {
+          "date": "2026-10-02",
+          "text": "说比赛要讲一个恐龙故事，草稿已经画在纸上了"
+        }
+      ]
+    },
+    {
+      "id": "dinosaur",
+      "label": "恐龙",
+      "domain": "intellect",
+      "type": "interest",
+      "status": "active",
+      "first_seen": "2024-03-10",
+      "last_seen": "2026-09-20",
+      "weight": 23,
+      "private": false,
+      "facts": [
+        {
+          "date": "2024-03-10",
+          "text": "看完一本恐龙图鉴就一发不可收拾，能背出十几种恐龙的名字"
+        },
+        {
+          "date": "2026-08-16",
+          "text": "在诸城看到真的恐龙化石，回来说“原来骨头真的有这么大”"
+        },
+        {
+          "date": "2026-09-20",
+          "text": "美术本上画的恐龙，比上面写的字还多"
+        }
+      ]
+    },
+    {
+      "id": "robot_cert",
+      "label": "机器人等级考试",
+      "domain": "intellect",
+      "type": "goal",
+      "status": "active",
+      "first_seen": "2026-09-20",
+      "last_seen": "2026-10-02",
+      "weight": 5,
+      "private": false,
+      "facts": [
+        {
+          "date": "2026-09-20",
+          "text": "王老师说 11-08 有全国青少年机器人等级考试（威海考点），建议他报二级"
+        },
+        {
+          "date": "2026-10-02",
+          "text": "说要等西客松比完再决定，“一次只能紧张一件事”"
+        }
+      ]
+    },
+    {
+      "id": "first_program",
+      "label": "第一个编程小游戏",
+      "domain": "intellect",
+      "type": "event",
+      "status": "done",
+      "first_seen": "2025-03-15",
+      "last_seen": "2025-04-20",
+      "weight": 5,
+      "private": false,
+      "facts": [
+        {
+          "date": "2025-03-15",
+          "text": "第一节课做出“会走路的恐龙”，反复给妈妈演示了七遍"
+        },
+        {
+          "date": "2025-04-20",
+          "text": "自己加了计分和音效，取名《恐龙赛跑》，这是他第一个完整的作品"
+        }
+      ]
+    },
+    {
+      "id": "weiqi",
+      "label": "围棋",
+      "domain": "intellect",
+      "type": "interest",
+      "status": "dropped",
+      "first_seen": "2025-03-08",
+      "last_seen": "2025-06-14",
+      "weight": 4,
+      "private": false,
+      "facts": [
+        {
+          "date": "2025-03-08",
+          "text": "三年级下学期报了围棋班，一开始很喜欢棋子落在棋盘上的声音"
+        },
+        {
+          "date": "2025-06-14",
+          "text": "学了三个月不去了，理由是“想赢要坐好久，我坐不住”"
+        }
+      ]
+    },
+    {
+      "id": "dinomuseum",
+      "label": "诸城恐龙博物馆之行",
+      "domain": "intellect",
+      "type": "event",
+      "status": "done",
+      "first_seen": "2026-08-16",
+      "last_seen": "2026-08-17",
+      "weight": 5,
+      "private": false,
+      "facts": [
+        {
+          "date": "2026-08-16",
+          "text": "和爸爸一起去了诸城恐龙国家地质公园，站在巨型山东龙的骨架下面看了很久"
+        },
+        {
+          "date": "2026-08-17",
+          "text": "回家路上一直在画恐龙，门票根夹在漫画本第一页留着"
+        }
+      ]
+    },
+    {
+      "id": "cold",
+      "label": "感冒",
+      "domain": "health",
+      "type": "health",
+      "status": "active",
+      "first_seen": "2026-09-25",
+      "last_seen": "2026-10-02",
+      "weight": 14,
+      "private": false,
+      "facts": [
+        {
+          "date": "2026-09-25",
+          "text": "开始打喷嚏、流鼻涕，晚上有点低烧，妈妈先物理降温"
+        },
+        {
+          "date": "2026-09-26",
+          "text": "去社区医院看过，医生开了 7 天的药，叮嘱多喝水、早晚注意保暖"
+        },
+        {
+          "date": "2026-10-01",
+          "text": "咳嗽比前几天少了但没断根，还惦记着周六的机器人课"
+        },
+        {
+          "date": "2026-10-02",
+          "text": "药只剩最后一顿，妈妈说去西安的背包里必须放上药和保温杯"
+        },
+        {
+          "date": "2026-10-02",
+          "text": "感冒还没好利索，去西安要带医生开的药、保温杯和口罩，多喝温水，咳嗽了马上告诉妈妈；因身体原因不选过夜卧铺。"
+        }
+      ]
+    },
+    {
+      "id": "medicine",
+      "label": "吃药",
+      "domain": "health",
+      "type": "health",
+      "status": "active",
+      "first_seen": "2026-09-26",
+      "last_seen": "2026-10-02",
+      "weight": 11,
+      "private": false,
+      "facts": [
+        {
+          "date": "2026-09-26",
+          "text": "开始吃药，一天两次，自己在平板上定了闹钟，不用人催"
+        },
+        {
+          "date": "2026-10-02",
+          "text": "最后一顿的量，皱着眉说“有点苦，吃完这盒能不能奖励一张恐龙贴纸”"
+        },
+        {
+          "date": "2026-10-02",
+          "text": "去西安要带上还在吃的咳嗽药，装个小药包：药、体温计、口罩"
+        }
+      ]
+    },
+    {
+      "id": "carrot",
+      "label": "胡萝卜",
+      "domain": "health",
+      "type": "trait",
+      "status": "active",
+      "first_seen": "2024-04-05",
+      "last_seen": "2026-10-02",
+      "weight": 9,
+      "private": false,
+      "facts": [
+        {
+          "date": "2024-04-05",
+          "text": "第一次明确宣布“我不吃胡萝卜”，理由是“它有一股土味”"
+        },
+        {
+          "date": "2026-09-18",
+          "text": "妈妈把胡萝卜切碎拌进肉馅，他吃了两碗饭，事后才发现真相"
+        },
+        {
+          "date": "2026-10-02",
+          "text": "备赛饮食清单里明确比赛当天午餐避开胡萝卜，选土豆、青菜、西兰花和肉，少吃辣和油炸。"
+        }
+      ]
+    },
+    {
+      "id": "jump_rope",
+      "label": "跳绳",
+      "domain": "health",
+      "type": "interest",
+      "status": "active",
+      "first_seen": "2025-04-10",
+      "last_seen": "2026-09-15",
+      "weight": 7,
+      "private": false,
+      "facts": [
+        {
+          "date": "2025-04-10",
+          "text": "体育课测跳绳，一分钟 110 个，回家在小区里又练了半小时"
+        },
+        {
+          "date": "2026-09-15",
+          "text": "现在能连跳 160 个不绊绳，最爱试“双摇”，十次里能成三四次"
+        }
+      ]
+    },
+    {
+      "id": "rope_contest",
+      "label": "学校跳绳比赛",
+      "domain": "health",
+      "type": "event",
+      "status": "done",
+      "first_seen": "2025-05-20",
+      "last_seen": "2025-05-20",
+      "weight": 4,
+      "private": false,
+      "facts": [
+        {
+          "date": "2025-05-20",
+          "text": "学校跳绳比赛，班级拿了团体第三名，他跳的是第二棒"
+        },
+        {
+          "date": "2025-05-20",
+          "text": "回家把奖状贴在自己床头，贴歪了也不让妈妈动"
+        }
+      ]
+    },
+    {
+      "id": "finger_fidget",
+      "label": "紧张时摆弄手指",
+      "domain": "health",
+      "type": "trait",
+      "status": "active",
+      "first_seen": "2024-10-11",
+      "last_seen": "2026-10-02",
+      "weight": 9,
+      "private": false,
+      "facts": [
+        {
+          "date": "2024-10-11",
+          "text": "第一次上台讲故事，全程捏着衣角，从那以后一紧张就摆弄手指"
+        },
+        {
+          "date": "2026-10-01",
+          "text": "说到要去西安比赛，手指又开始在桌沿上一下一下地敲"
+        },
+        {
+          "date": "2026-10-02",
+          "text": "出发去西安比赛前说“我有点紧张”，紧张时手指又在敲桌子"
+        },
+        {
+          "date": "2026-10-02",
+          "text": "西客松出发前说“我有点紧张”，紧张时又在敲桌子、摆弄手指。"
+        },
+        {
+          "date": "2026-10-02",
+          "text": "西客松出发前主动说出“我有点紧张”，紧张时手又会敲桌子"
+        }
+      ]
+    },
+    {
+      "id": "piano",
+      "label": "钢琴",
+      "domain": "aesthetics",
+      "type": "interest",
+      "status": "dropped",
+      "first_seen": "2024-03-01",
+      "last_seen": "2026-09-20",
+      "weight": 7,
+      "private": false,
+      "facts": [
+        {
+          "date": "2024-03-01",
+          "text": "二年级时学钢琴，一开始每天能坐住练 20 分钟"
+        },
+        {
+          "date": "2024-06-20",
+          "text": "学了三个月不练了，自己说“坐不住”，妈妈有点惋惜"
+        },
+        {
+          "date": "2026-09-20",
+          "text": "路过琴行听到琴声会停下来听一会儿，说“其实钢琴的声音挺好听的”"
+        }
+      ]
+    },
+    {
+      "id": "accordion",
+      "label": "手风琴",
+      "domain": "aesthetics",
+      "type": "interest",
+      "status": "active",
+      "first_seen": "2026-09-20",
+      "last_seen": "2026-10-01",
+      "weight": 2,
+      "private": false,
+      "facts": [
+        {
+          "date": "2026-09-20",
+          "text": "刷到一个手风琴演奏的视频，说“这个好耶，我想学这个”"
+        },
+        {
+          "date": "2026-10-01",
+          "text": "真问起来了：“要多少钱？会不会又要坐很久？”——想学，但怕自己又是三分钟热度"
+        }
+      ]
+    },
+    {
+      "id": "comic",
+      "label": "画漫画",
+      "domain": "aesthetics",
+      "type": "interest",
+      "status": "active",
+      "first_seen": "2024-06-01",
+      "last_seen": "2026-09-27",
+      "weight": 19,
+      "private": false,
+      "facts": [
+        {
+          "date": "2024-06-01",
+          "text": "儿童节收到一盒彩笔，开始画四格漫画，主角是一只叫“队长”的恐龙"
+        },
+        {
+          "date": "2026-05-20",
+          "text": "画了一本《恐龙队长的学校日记》，同学排队借着看"
+        },
+        {
+          "date": "2026-09-27",
+          "text": "说比赛的作品说明想用手画的分镜来讲，“不想写一大段字”"
+        }
+      ]
+    },
+    {
+      "id": "secret_comic",
+      "label": "悄悄话·课上偷画的恐龙漫画",
+      "domain": "aesthetics",
+      "type": "interest",
+      "status": "active",
+      "first_seen": "2026-09-22",
+      "last_seen": "2026-09-29",
+      "weight": 2,
+      "private": true,
+      "facts": [
+        {
+          "date": "2026-09-22",
+          "text": "承认自己在数学本背面偷偷画漫画，画的是“上课打瞌睡的恐龙队长”"
+        },
+        {
+          "date": "2026-09-29",
+          "text": "把那张画藏在书包最里层，说“被老师发现会被没收，可是真的很好笑”"
+        }
+      ]
+    },
+    {
+      "id": "new_pc",
+      "label": "换电脑",
+      "domain": "labor",
+      "type": "goal",
+      "status": "active",
+      "first_seen": "2026-09-30",
+      "last_seen": "2026-10-02",
+      "weight": 15,
+      "private": false,
+      "facts": [
+        {
+          "date": "2026-09-30",
+          "text": "电脑又卡住了，硬盘只剩约 3GB，他有点郁闷，说“它是不是快要退休了”"
+        },
+        {
+          "date": "2026-10-02",
+          "text": "想换一台能顺畅跑编程软件的新电脑，查过价格，说“知道不便宜，我自己出一部分”"
+        },
+        {
+          "date": "2026-10-02",
+          "text": "出发前先清笔记本空间、装好软件，保证作品能顺利跑起来"
+        }
+      ]
+    },
+    {
+      "id": "save_money",
+      "label": "攒钱",
+      "domain": "labor",
+      "type": "goal",
+      "status": "active",
+      "first_seen": "2026-09-30",
+      "last_seen": "2026-10-02",
+      "weight": 12,
+      "private": false,
+      "facts": [
+        {
+          "date": "2026-09-30",
+          "text": "说要把零花钱攒起来，为换电脑出一份力，忍住没买零食和卡片"
+        },
+        {
+          "date": "2026-10-01",
+          "text": "数了数存钱罐，一共约 180 元，抱着罐子晃了半天很有成就感"
+        },
+        {
+          "date": "2026-10-02",
+          "text": "攒到 186 元，自己定的目标是 300 元，算下来完成了 62%，“还差一个多月”"
+        }
+      ]
+    },
+    {
+      "id": "pocket_money",
+      "label": "零花钱",
+      "domain": "labor",
+      "type": "trait",
+      "status": "active",
+      "first_seen": "2025-09-01",
+      "last_seen": "2026-10-02",
+      "weight": 8,
+      "private": false,
+      "facts": [
+        {
+          "date": "2025-09-01",
+          "text": "升上三年级后每周 20 元零花钱，自己用小本子记进出，花超了会红着脸承认"
+        },
+        {
+          "date": "2026-10-02",
+          "text": "这一周一分没花，全投进存钱罐，说“攒钱比买卡片有意思”"
+        }
+      ]
+    },
+    {
+      "id": "chore",
+      "label": "帮妈妈摆碗筷",
+      "domain": "labor",
+      "type": "trait",
+      "status": "active",
+      "first_seen": "2025-01-10",
+      "last_seen": "2026-10-01",
+      "weight": 5,
+      "private": false,
+      "facts": [
+        {
+          "date": "2025-01-10",
+          "text": "寒假开始每天饭前摆碗筷，理由很实在：“妈妈陪我上课太累了”"
+        },
+        {
+          "date": "2026-10-01",
+          "text": "国庆家里来客人，他摆了六副碗筷，摆完自己说了句“好耶”"
+        }
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "source": "save_money",
+      "target": "new_pc",
+      "rel": "为了",
+      "since": "2026-09-30",
+      "weight": 3
+    },
+    {
+      "source": "robot_class",
+      "target": "xikesong",
+      "rel": "一起",
+      "since": "2026-09-28",
+      "weight": 2
+    },
+    {
+      "source": "piano",
+      "target": "accordion",
+      "rel": "联想到",
+      "since": "2026-09-20",
+      "weight": 2
+    },
+    {
+      "source": "creative_coding",
+      "target": "xikesong",
+      "rel": "属于",
+      "since": "2026-10-01",
+      "weight": 2
+    },
+    {
+      "source": "line_car",
+      "target": "robot_class",
+      "rel": "属于",
+      "since": "2026-09-05",
+      "weight": 4
+    },
+    {
+      "source": "coding",
+      "target": "robot_class",
+      "rel": "一起",
+      "since": "2025-03-15",
+      "weight": 3
+    },
+    {
+      "source": "teacher_wang",
+      "target": "robot_class",
+      "rel": "一起",
+      "since": "2024-09-07",
+      "weight": 5
+    },
+    {
+      "source": "xikesong",
+      "target": "teacher_wang",
+      "rel": "来自",
+      "since": "2026-09-28",
+      "weight": 2
+    },
+    {
+      "source": "new_pc",
+      "target": "coding",
+      "rel": "来自",
+      "since": "2026-09-30",
+      "weight": 3
+    },
+    {
+      "source": "cold",
+      "target": "medicine",
+      "rel": "联想到",
+      "since": "2026-09-26",
+      "weight": 4
+    },
+    {
+      "source": "mom",
+      "target": "carrot",
+      "rel": "联想到",
+      "since": "2026-09-18",
+      "weight": 3
+    },
+    {
+      "source": "mom",
+      "target": "xikesong",
+      "rel": "一起",
+      "since": "2026-10-01",
+      "weight": 2
+    },
+    {
+      "source": "dad",
+      "target": "dinomuseum",
+      "rel": "一起",
+      "since": "2026-08-16",
+      "weight": 2
+    },
+    {
+      "source": "dinosaur",
+      "target": "comic",
+      "rel": "一起",
+      "since": "2026-05-20",
+      "weight": 3
+    },
+    {
+      "source": "comic",
+      "target": "secret_comic",
+      "rel": "联想到",
+      "since": "2026-09-22",
+      "weight": 2
+    },
+    {
+      "source": "xiaodou",
+      "target": "finger_fidget",
+      "rel": "联想到",
+      "since": "2024-10-11",
+      "weight": 3
+    },
+    {
+      "source": "good_yeah",
+      "target": "xiaodou",
+      "rel": "来自",
+      "since": "2024-05-12",
+      "weight": 4
+    },
+    {
+      "source": "save_money",
+      "target": "pocket_money",
+      "rel": "来自",
+      "since": "2026-09-30",
+      "weight": 3
+    },
+    {
+      "source": "pocket_money",
+      "target": "mom",
+      "rel": "来自",
+      "since": "2025-09-01",
+      "weight": 5
+    },
+    {
+      "source": "three_minute",
+      "target": "piano",
+      "rel": "导致",
+      "since": "2024-06-20",
+      "weight": 2
+    },
+    {
+      "source": "three_minute",
+      "target": "weiqi",
+      "rel": "导致",
+      "since": "2025-06-14",
+      "weight": 2
+    },
+    {
+      "source": "accordion",
+      "target": "three_minute",
+      "rel": "联想到",
+      "since": "2026-09-20",
+      "weight": 2
+    },
+    {
+      "source": "xikesong",
+      "target": "new_pc",
+      "rel": "联想到",
+      "since": "2026-10-02",
+      "weight": 2
+    },
+    {
+      "source": "robot_cert",
+      "target": "robot_class",
+      "rel": "联想到",
+      "since": "2026-09-20",
+      "weight": 2
+    },
+    {
+      "source": "jump_rope",
+      "target": "rope_contest",
+      "rel": "联想到",
+      "since": "2025-05-20",
+      "weight": 2
+    },
+    {
+      "source": "cold",
+      "target": "robot_class",
+      "rel": "联想到",
+      "since": "2026-10-01",
+      "weight": 2
+    },
+    {
+      "source": "xikesong",
+      "target": "cold",
+      "rel": "联想到",
+      "since": "2026-10-01",
+      "weight": 3
+    },
+    {
+      "source": "xiaodou",
+      "target": "dinosaur",
+      "rel": "联想到",
+      "since": "2024-03-10",
+      "weight": 4
+    },
+    {
+      "source": "xiaodou",
+      "target": "comic",
+      "rel": "联想到",
+      "since": "2024-06-01",
+      "weight": 3
+    },
+    {
+      "source": "secret_gift",
+      "target": "mom",
+      "rel": "联想到",
+      "since": "2026-09-24",
+      "weight": 2
+    },
+    {
+      "source": "secret_gift",
+      "target": "comic",
+      "rel": "联想到",
+      "since": "2026-09-28",
+      "weight": 2
+    },
+    {
+      "source": "secret_comic",
+      "target": "dinosaur",
+      "rel": "联想到",
+      "since": "2026-09-22",
+      "weight": 2
+    },
+    {
+      "source": "chore",
+      "target": "mom",
+      "rel": "联想到",
+      "since": "2025-01-10",
+      "weight": 3
+    },
+    {
+      "source": "three_minute",
+      "target": "xiaodou",
+      "rel": "联想到",
+      "since": "2024-06-20",
+      "weight": 3
+    },
+    {
+      "source": "coding",
+      "target": "xikesong",
+      "rel": "联想到",
+      "since": "2026-10-01",
+      "weight": 3
+    },
+    {
+      "source": "medicine",
+      "target": "xikesong",
+      "rel": "联想到",
+      "since": "2026-10-02",
+      "weight": 2
+    },
+    {
+      "source": "first_program",
+      "target": "coding",
+      "rel": "属于",
+      "since": "2025-04-20",
+      "weight": 2
+    },
+    {
+      "source": "xikesong",
+      "target": "finger_fidget",
+      "rel": "导致",
+      "since": "2026-10-02",
+      "weight": 1
+    },
+    {
+      "source": "xikesong",
+      "target": "dinosaur",
+      "rel": "联想到",
+      "since": "2026-10-02",
+      "weight": 1
+    },
+    {
+      "source": "xikesong",
+      "target": "medicine",
+      "rel": "联想到",
+      "since": "2026-10-02",
+      "weight": 1
+    },
+    {
+      "source": "xikesong",
+      "target": "carrot",
+      "rel": "联想到",
+      "since": "2026-10-02",
+      "weight": 1
+    },
+    {
+      "source": "xikesong",
+      "target": "finger_fidget",
+      "rel": "联想到",
+      "since": "2026-10-02",
+      "weight": 1
+    }
+  ]
+}

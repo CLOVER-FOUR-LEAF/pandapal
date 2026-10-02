@@ -1,0 +1,1 @@
+ISC License - lucide-static v0.460.0 (https://lucide.dev). Icons embedded in web/icons.js.

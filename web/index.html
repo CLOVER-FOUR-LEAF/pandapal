@@ -2,66 +2,576 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>PandaButler 熊猫管家</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark light">
+<meta name="theme-color" content="#0a0f0d">
+<title>PandaButler · 熊猫管家</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='20' cy='16' r='9' fill='%232e2c28'/%3E%3Ccircle cx='44' cy='16' r='9' fill='%232e2c28'/%3E%3Cellipse cx='32' cy='36' rx='24' ry='22' fill='%23f7f9f4'/%3E%3Cellipse cx='23' cy='33' rx='6' ry='7' fill='%232e2c28'/%3E%3Cellipse cx='41' cy='33' rx='6' ry='7' fill='%232e2c28'/%3E%3Ccircle cx='24' cy='32' r='2.2' fill='%23f7f9f4'/%3E%3Ccircle cx='40' cy='32' r='2.2' fill='%23f7f9f4'/%3E%3Cellipse cx='32' cy='43' rx='4' ry='3' fill='%232e2c28'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="/static/style.css">
 </head>
-<body>
+<body data-view="child" data-role="child">
+<noscript><p class="noscript">这个界面需要 JavaScript 才能和熊猫管家对话。</p></noscript>
 
-<!-- 登录选档 -->
+<!-- ============================================================
+     图标系统：stroke 风格 SVG sprite（禁止 emoji 当图标）
+     ============================================================ -->
+<svg class="icon-sprite" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
+  <symbol id="i-logo" viewBox="0 0 24 24" fill="none">
+    <circle cx="6.6" cy="5.4" r="2.4" fill="currentColor" stroke="none"/>
+    <circle cx="17.4" cy="5.4" r="2.4" fill="currentColor" stroke="none"/>
+    <circle cx="6.6" cy="5.4" r="1" fill="none" stroke="#fff" stroke-opacity=".35" stroke-width="1"/>
+    <circle cx="17.4" cy="5.4" r="1" fill="none" stroke="#fff" stroke-opacity=".35" stroke-width="1"/>
+    <ellipse cx="12" cy="13" rx="8" ry="7.2" fill="currentColor" stroke="none"/>
+    <ellipse cx="8.6" cy="11.8" rx="1.9" ry="2.3" transform="rotate(-16 8.6 11.8)" fill="#0d1411"/>
+    <ellipse cx="15.4" cy="11.8" rx="1.9" ry="2.3" transform="rotate(16 15.4 11.8)" fill="#0d1411"/>
+    <circle cx="9" cy="11.5" r=".72" fill="#fff"/>
+    <circle cx="15" cy="11.5" r=".72" fill="#fff"/>
+    <ellipse cx="12" cy="14.6" rx="1.15" ry=".82" fill="#0d1411"/>
+    <path d="M10.4 16.4q1.6 1.2 3.2 0" stroke="#0d1411" stroke-width="1.1" fill="none" stroke-linecap="round"/>
+  </symbol>
+  <symbol id="i-planet" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="12" cy="12" r="6.2"/>
+    <path d="M3.6 9.4c-1.5 2.4-1 5.7 1.8 7.4 2.9 1.7 8.2.9 12.6-2.4S22.7 7 20 5.3c-1.8-1.2-4.5-.9-6.9.7"/>
+  </symbol>
+  <symbol id="i-users" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="9" cy="8" r="3.2"/><path d="M3.5 19c.6-3 2.8-4.6 5.5-4.6s4.9 1.6 5.5 4.6"/>
+    <path d="M15.5 5.2a3.2 3.2 0 0 1 0 5.9M17.5 14.7c1.8.6 3 1.9 3.4 3.8"/>
+  </symbol>
+  <symbol id="i-growth" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M3.5 17.5l5-5 3.4 3.4 7.2-7.4"/><path d="M15 8.5h4.6v4.6"/>
+  </symbol>
+  <symbol id="i-log" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M7 3.5h8.5l3 3v14H7z"/><path d="M15.5 3.5v3h3M9.8 10.5h5M9.8 13.8h5M9.8 17h3.4"/>
+  </symbol>
+  <symbol id="i-book" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M5 5.5A2 2 0 0 1 7 3.5h12v14H7a2 2 0 0 0-2 2z"/><path d="M5 19.5A2 2 0 0 1 7 17.5h12M9.5 7.5h6"/>
+  </symbol>
+  <symbol id="i-chat" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M4 6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v7a2.5 2.5 0 0 1-2.5 2.5H9l-4.2 3.4a.5.5 0 0 1-.8-.4z"/>
+    <path d="M8.5 9h7M8.5 12h4.5"/>
+  </symbol>
+  <symbol id="i-send" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M20.5 3.5L3.6 10.1c-.6.2-.6 1.1 0 1.4l6.3 2.3c.3.1.5.3.6.6l2.3 6.3c.3.6 1.1.6 1.4 0l6.4-16.9c.2-.5-.3-1-.6-.3z" transform="translate(0,0)"/>
+    <path d="M20.5 3.5L10.3 13.7"/>
+  </symbol>
+  <symbol id="i-mic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21M8.5 21h7"/>
+  </symbol>
+  <symbol id="i-lock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="5" y="10.5" width="14" height="9.5" rx="2.5"/><path d="M8 10.5V8a4 4 0 0 1 8 0v2.5"/><circle cx="12" cy="15" r="1.6" fill="currentColor" stroke="none"/>
+  </symbol>
+  <symbol id="i-clip" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="5.5" y="4.5" width="13" height="16" rx="2"/><path d="M9 4.5a3 3 0 0 1 6 0M9 10h6M9 13.6h6M9 17.2h3.6"/>
+  </symbol>
+  <symbol id="i-board" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="4" y="4" width="5.2" height="10" rx="1.4"/><rect x="14.8" y="4" width="5.2" height="6" rx="1.4"/>
+    <rect x="4" y="16.4" width="5.2" height="3.6" rx="1.4"/><rect x="14.8" y="12.4" width="5.2" height="7.6" rx="1.4"/>
+  </symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3.2 2.2"/>
+  </symbol>
+  <symbol id="i-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M4.5 12.5l5 5 10-11"/>
+  </symbol>
+  <symbol id="i-x" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round">
+    <path d="M6 6l12 12M18 6L6 18"/>
+  </symbol>
+  <symbol id="i-spark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12 3.5l1.9 4.6 4.6 1.9-4.6 1.9L12 16.5l-1.9-4.6-4.6-1.9 4.6-1.9z"/>
+    <path d="M18.5 15.5l.9 2.1 2.1.9-2.1.9-.9 2.1-.9-2.1-2.1-.9 2.1-.9z"/>
+  </symbol>
+  <symbol id="i-back" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M15 5l-7 7 7 7"/>
+  </symbol>
+  <symbol id="i-play" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M7.5 5.2v13.6a.6.6 0 0 0 .9.5l11-6.8a.6.6 0 0 0 0-1L8.4 4.7a.6.6 0 0 0-.9.5z"/>
+  </symbol>
+  <symbol id="i-cal" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="4" y="5.5" width="16" height="15" rx="2.5"/><path d="M4 10h16M8.5 3.5v4M15.5 3.5v4"/>
+    <path d="M8 14h2.4M13.6 14H16M8 17.4h2.4"/>
+  </symbol>
+  <symbol id="i-inbox" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M4 13.5l2-8A2 2 0 0 1 7.9 4h8.2a2 2 0 0 1 1.9 1.5l2 8V17a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 4 17z"/>
+    <path d="M4 13.5h4.6a3.4 3.4 0 0 0 6.8 0H20"/>
+  </symbol>
+  <symbol id="i-relay" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M4 8.5h11.5l-3-3M20 15.5H8.5l3 3"/>
+  </symbol>
+  <symbol id="i-out" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M14 4H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h7M10.5 12H21M17.5 8.5L21 12l-3.5 3.5"/>
+  </symbol>
+  <symbol id="i-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M2.5 12S6 5.8 12 5.8 21.5 12 21.5 12 18 18.2 12 18.2 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/>
+  </symbol>
+  <symbol id="i-bolt" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M13.5 3.5L5 13.5h5.5l-1 7 8.5-10H12.5z"/>
+  </symbol>
+  <symbol id="i-heart" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12 20s-7.5-4.6-9.3-9.4A5.3 5.3 0 0 1 12 6.2a5.3 5.3 0 0 1 9.3 4.4C19.5 15.4 12 20 12 20z"/>
+  </symbol>
+</svg>
+
+<!-- ============================================================
+     登录 / 选档
+     ============================================================ -->
 <section id="login-view" class="view">
-  <div class="login-card">
-    <div id="login-panda" class="panda-holder"></div>
-    <h1>熊猫管家</h1>
-    <p class="slogan">从小用到大，最懂你的那个人</p>
-    <input id="login-name" type="text" maxlength="24" placeholder="告诉我你的名字" autocomplete="off">
-    <button id="login-btn">开始陪伴</button>
-    <p class="hint" id="login-hint"></p>
+  <div class="login-bg" aria-hidden="true">
+    <span class="bamboo-sil b1"></span><span class="bamboo-sil b2"></span>
+    <span class="bamboo-sil b3"></span><span class="bamboo-sil b4"></span>
+    <span class="firefly f1"></span><span class="firefly f2"></span><span class="firefly f3"></span>
+    <span class="firefly f4"></span><span class="firefly f5"></span>
+  </div>
+  <div id="login-card" class="login-card" role="form" aria-labelledby="login-title">
+    <div id="login-panda" class="panda-holder" aria-hidden="true"></div>
+    <h1 id="login-title" class="login-title">熊猫管家</h1>
+    <p class="login-slogan">从小用到大，最懂你的那个人</p>
+
+    <label class="sr-only" for="login-name">用户名</label>
+    <input id="login-name" class="text-input" type="text" maxlength="24"
+           placeholder="用户名" autocomplete="username" enterkeyhint="next"
+           aria-describedby="login-hint">
+
+    <label class="sr-only" for="login-pass">密码</label>
+    <input id="login-pass" class="text-input" type="password" maxlength="64"
+           placeholder="密码" autocomplete="current-password" enterkeyhint="go">
+
+    <button id="login-btn" class="btn btn-primary btn-block" type="button">登录 · 开始陪伴</button>
+    <button id="demo-btn" class="btn btn-ghost btn-block" type="button">一键演示（小豆账号）</button>
+
+    <p class="login-accounts">演示账号 · 孩子 <b>小豆/panda123</b> · 家长 <b>豆豆妈/mama123</b> · 评委 <b>admin/admin123</b><br>输入新用户名会自动注册为「孩子」并新建空白档案</p>
+    <p id="login-hint" class="hint" role="status" aria-live="polite"></p>
   </div>
 </section>
 
-<!-- 主界面 -->
-<section id="main-view" class="view hidden">
-  <header class="topbar">
-    <span class="brand">🐼 熊猫管家</span>
-    <span id="child-name" class="child-name"></span>
-    <button id="memory-btn" title="记忆本">📖</button>
+<!-- ============================================================
+     主视图：宽屏三栏 / 窄屏单栏 + 底部 Tab
+     ============================================================ -->
+<section id="main-view" class="view hidden" aria-label="管家主界面">
+
+  <header id="topbar" class="topbar" role="banner">
+    <span class="brand">
+      <svg class="ic ic-brand" aria-hidden="true"><use href="#i-logo"/></svg>
+      <span class="brand-name">熊猫管家</span>
+    </span>
+    <span id="child-name" class="child-name">@ —</span>
+    <span id="mode-badge" class="mode-badge hidden" aria-live="polite"></span>
+
+    <button id="role-toggle" class="btn role-toggle" type="button" data-role="child"
+            aria-label="切换孩子视角 / 家长视角" aria-pressed="false">
+      <svg class="ic" aria-hidden="true"><use href="#i-users"/></svg><span>孩子视角</span>
+    </button>
+
+    <span class="topbar-spacer"></span>
+
+    <nav class="topbar-nav" aria-label="主导航">
+      <button id="nav-graph" class="nav-btn" type="button" data-go="graph" data-nav="graph" aria-label="打开记忆星球">
+        <svg class="ic" aria-hidden="true"><use href="#i-planet"/></svg><span>星球</span>
+      </button>
+      <button id="nav-parent" class="nav-btn" type="button" data-go="parent" data-nav="parent" aria-label="打开家长视图">
+        <svg class="ic" aria-hidden="true"><use href="#i-users"/></svg><span>家长</span>
+      </button>
+      <button id="nav-growth" class="nav-btn" type="button" data-go="growth" data-nav="growth" aria-label="打开成长雷达">
+        <svg class="ic" aria-hidden="true"><use href="#i-growth"/></svg><span>成长</span>
+      </button>
+      <button id="nav-memory" class="nav-btn" type="button" data-go="memory" data-nav="memory" aria-label="打开记忆本">
+        <svg class="ic" aria-hidden="true"><use href="#i-book"/></svg><span>记忆</span>
+      </button>
+      <button id="nav-logs" class="nav-btn" type="button" data-go="logs" data-nav="logs" aria-label="打开调用记录">
+        <svg class="ic" aria-hidden="true"><use href="#i-log"/></svg><span>记录</span>
+      </button>
+      <button id="nav-logout" class="nav-btn" type="button" data-act="logout" aria-label="退出登录">
+        <svg class="ic" aria-hidden="true"><use href="#i-out"/></svg><span>退出</span>
+      </button>
+    </nav>
   </header>
 
-  <div class="panda-stage">
-    <div id="main-panda" class="panda-holder"></div>
-    <div id="panda-bubble" class="panda-bubble hidden"></div>
+  <!-- ------------------------------ 左栏 ------------------------------ -->
+  <aside id="left-col" class="col" aria-label="管家看板">
+
+    <section id="briefing-card" class="panel" aria-labelledby="briefing-head">
+      <div class="panel-head">
+        <h2 id="briefing-head"><svg class="ic" aria-hidden="true"><use href="#i-clip"/></svg> 管家晨报</h2>
+        <span class="panel-sub">每天 7:00 巡检</span>
+      </div>
+      <div class="panel-body scroll">
+        <div class="skeleton skeleton-lines" role="status" aria-label="晨报加载中"></div>
+        <div class="briefing-text"></div>
+      </div>
+    </section>
+
+    <section id="affair-board" class="panel" aria-labelledby="affair-head">
+      <div class="panel-head">
+        <h2 id="affair-head"><svg class="ic" aria-hidden="true"><use href="#i-board"/></svg> 事务看板</h2>
+        <span class="panel-sub" aria-live="polite">— 件在办</span>
+      </div>
+      <div id="due-strip" class="hidden" aria-label="临近截止"></div>
+      <div class="panel-body scroll">
+        <p class="empty-hint">管家正在整理事务…</p>
+      </div>
+    </section>
+
+    <section id="graph-mini" class="panel" aria-labelledby="mini-head">
+      <div class="panel-head">
+        <h2 id="mini-head"><svg class="ic" aria-hidden="true"><use href="#i-planet"/></svg> 记忆星球</h2>
+        <span class="panel-sub">点开看全景</span>
+      </div>
+      <div class="graph-mini-canvas"></div>
+    </section>
+  </aside>
+
+  <!-- ------------------------------ 中栏 ------------------------------ -->
+  <div id="center-col" class="col" aria-label="3D 竹屋场景">
+    <div id="scene-canvas" role="img" aria-label="3D 记忆星球场景"></div>
+
+    <div id="scene-fallback" class="hidden" aria-label="2D 降级图谱">
+      <div class="panda-holder fallback-panda" aria-hidden="true"></div>
+      <p class="fallback-note">2D 降级模式 · 数据与交互不变</p>
+    </div>
+
+    <div class="scene-hud" aria-hidden="true">
+      <span class="scene-tag">
+        <svg class="ic" aria-hidden="true"><use href="#i-planet"/></svg>
+        记忆星球 · 德 智 体 美 劳
+      </span>
+      <span class="scene-hint">拖拽旋转 · 滚轮缩放 · 点击星点看详情</span>
+    </div>
+
+    <div id="panda-bubble" class="hidden" role="status" aria-live="polite"></div>
   </div>
 
-  <div id="chat" class="chat"></div>
+  <!-- ------------------------------ 右栏 ------------------------------ -->
+  <div id="right-col" class="col" aria-label="与管家对话">
+    <section class="panel chat-panel" aria-labelledby="chat-head">
+      <div class="panel-head">
+        <h2 id="chat-head"><svg class="ic" aria-hidden="true"><use href="#i-chat"/></svg> 和管家说</h2>
+        <span id="chat-sub" class="panel-sub" aria-live="polite">回复即生成</span>
+      </div>
 
-  <div id="chips" class="chips"></div>
+      <div id="chat" class="chat scroll" role="log" aria-live="polite" aria-label="对话流">
+        <p class="empty-hint">说一句「西客松我要准备啥」试试。</p>
+      </div>
 
-  <div class="inputbar">
-    <button id="mic-btn" title="语音输入" class="hidden">🎤</button>
-    <input id="msg-input" type="text" placeholder="和熊猫管家聊聊…" autocomplete="off">
-    <button id="send-btn">发送</button>
+      <div id="chips" class="chips" role="group" aria-label="快捷话题"></div>
+
+      <div class="inputbar">
+        <button id="secret-btn" class="icon-btn" type="button"
+                aria-label="悄悄话：家长视角看不到" aria-pressed="false">
+          <svg class="ic" aria-hidden="true"><use href="#i-lock"/></svg>
+        </button>
+        <button id="mic-btn" class="icon-btn hidden" type="button"
+                aria-label="语音输入" aria-pressed="false">
+          <svg class="ic" aria-hidden="true"><use href="#i-mic"/></svg>
+        </button>
+        <label class="sr-only" for="msg-input">对管家说的话</label>
+        <input id="msg-input" type="text" placeholder="跟熊猫管家说说今天…"
+               autocomplete="off" enterkeyhint="send">
+        <button id="send-btn" class="btn btn-primary btn-send" type="button" aria-label="发送">
+          <svg class="ic" aria-hidden="true"><use href="#i-send"/></svg>
+        </button>
+      </div>
+    </section>
   </div>
 </section>
 
-<!-- 记忆本 -->
-<section id="memory-view" class="view hidden">
+<!-- ============================================================
+     图谱视图：记忆星球（同一个 3D 画布移进来全屏看）
+     ============================================================ -->
+<section id="graph-view" class="view hidden" aria-label="记忆星球">
   <header class="topbar">
-    <button id="memory-back">← 返回</button>
-    <span class="brand">📖 记忆本</span>
-    <span></span>
+    <nav class="subview-nav" aria-label="页面导航">
+      <button class="nav-btn" type="button" data-go="main">
+        <svg class="ic" aria-hidden="true"><use href="#i-back"/></svg><span>管家</span>
+      </button>
+      <button class="nav-btn" type="button" data-go="parent" data-nav="parent">
+        <svg class="ic" aria-hidden="true"><use href="#i-users"/></svg><span>家长</span>
+      </button>
+      <button class="nav-btn" type="button" data-go="growth" data-nav="growth">
+        <svg class="ic" aria-hidden="true"><use href="#i-growth"/></svg><span>成长</span>
+      </button>
+      <button class="nav-btn" type="button" data-go="memory" data-nav="memory">
+        <svg class="ic" aria-hidden="true"><use href="#i-book"/></svg><span>记忆</span>
+      </button>
+      <button class="nav-btn" type="button" data-go="logs" data-nav="logs">
+        <svg class="ic" aria-hidden="true"><use href="#i-log"/></svg><span>记录</span>
+      </button>
+      <button class="nav-btn" type="button" data-act="logout" aria-label="退出登录">
+        <svg class="ic" aria-hidden="true"><use href="#i-out"/></svg><span>退出</span>
+      </button>
+    </nav>
+    <span class="topbar-spacer"></span>
+    <span class="brand">
+      <svg class="ic" aria-hidden="true"><use href="#i-planet"/></svg>
+      <span class="brand-name">记忆星球</span>
+    </span>
+    <span class="topbar-date">德 智 体 美 劳</span>
   </header>
-  <div class="memory-body">
-    <h3>长期记忆</h3>
-    <div id="memory-md" class="memory-md"></div>
-    <h3>主题</h3>
-    <div id="memory-topics"></div>
-    <h3>时间线</h3>
-    <div id="memory-daily"></div>
-    <h3>API 调用记录（真实生成可核验）</h3>
-    <div id="llm-logs"></div>
+
+  <div class="graph-stage">
+    <div id="graph-canvas" aria-label="成长图谱画布"></div>
+    <div id="graph-canvas-2d" class="hidden" aria-hidden="true"></div>
+
+    <aside id="node-drawer" class="node-drawer hidden" aria-label="节点详情">
+      <div class="drawer-grip" aria-hidden="true"></div>
+      <div class="drawer-body scroll"></div>
+    </aside>
+  </div>
+
+  <div class="graph-tools">
+    <div id="graph-timeline">
+      <span class="tl-label">2024</span>
+      <input class="tl-range" type="range" min="0" max="100" value="100" step="1"
+             aria-label="按首次出现时间筛选节点">
+      <span class="tl-label">2026</span>
+      <button class="tl-play" type="button" aria-label="播放记忆生长">
+        <svg class="ic" aria-hidden="true"><use href="#i-play"/></svg>
+      </button>
+    </div>
+
+    <div id="graph-filters" role="group" aria-label="按领域筛选"></div>
+
+    <div id="graph-legend" aria-label="图例">
+      <span class="lg"><span class="ring" aria-hidden="true"></span>已完成</span>
+      <span class="lg"><span class="ghost" aria-hidden="true"></span>已放下</span>
+      <span class="lg"><span class="dot dot-ethics"></span>德</span>
+      <span class="lg"><span class="dot dot-intellect"></span>智</span>
+      <span class="lg"><span class="dot dot-health"></span>体</span>
+      <span class="lg"><span class="dot dot-aesthetics"></span>美</span>
+      <span class="lg"><span class="dot dot-labor"></span>劳</span>
+    </div>
   </div>
 </section>
+
+<!-- ============================================================
+     家长视图
+     ============================================================ -->
+<section id="parent-view" class="view hidden" aria-label="家长视图">
+  <header class="topbar">
+    <nav class="subview-nav" aria-label="页面导航">
+      <button class="nav-btn" type="button" data-go="main">
+        <svg class="ic" aria-hidden="true"><use href="#i-back"/></svg><span>管家</span>
+      </button>
+      <button class="nav-btn" type="button" data-go="graph" data-nav="graph">
+        <svg class="ic" aria-hidden="true"><use href="#i-planet"/></svg><span>星球</span>
+      </button>
+      <button class="nav-btn" type="button" data-go="growth" data-nav="growth">
+        <svg class="ic" aria-hidden="true"><use href="#i-growth"/></svg><span>成长</span>
+      </button>
+      <button class="nav-btn" type="button" data-go="memory" data-nav="memory">
+        <svg class="ic" aria-hidden="true"><use href="#i-book"/></svg><span>记忆</span>
+      </button>
+      <button class="nav-btn" type="button" data-go="logs" data-nav="logs">
+        <svg class="ic" aria-hidden="true"><use href="#i-log"/></svg><span>记录</span>
+      </button>
+      <button class="nav-btn" type="button" data-act="logout" aria-label="退出登录">
+        <svg class="ic" aria-hidden="true"><use href="#i-out"/></svg><span>退出</span>
+      </button>
+    </nav>
+    <span class="topbar-spacer"></span>
+    <span class="brand">
+      <svg class="ic" aria-hidden="true"><use href="#i-users"/></svg>
+      <span class="brand-name">家长视角</span>
+    </span>
+    <span class="topbar-date">白天配色 · 隐藏悄悄话</span>
+  </header>
+
+  <div class="parent-grid">
+    <section class="panel" aria-labelledby="inbox-head">
+      <div class="panel-head">
+        <h2 id="inbox-head"><svg class="ic" aria-hidden="true"><use href="#i-inbox"/></svg> 待确认</h2>
+        <span class="panel-sub">管家需要家长点头</span>
+      </div>
+      <div id="parent-inbox" class="scroll">
+        <p class="empty-hint">没有待确认的事。</p>
+      </div>
+      <p id="secret-note" class="hidden" aria-live="polite"></p>
+    </section>
+
+    <section class="panel" aria-labelledby="relay-head">
+      <div class="panel-head">
+        <h2 id="relay-head"><svg class="ic" aria-hidden="true"><use href="#i-relay"/></svg> 传话筒</h2>
+        <span class="panel-sub">老师 / 孩子 ↔ 家长</span>
+      </div>
+
+      <div class="relay-inputbox">
+        <div class="seg" role="group" aria-label="传话方向">
+          <button class="seg-btn active" type="button" data-direction="teacher2parent">老师的话 → 翻给全家</button>
+          <button class="seg-btn" type="button" data-direction="child2teacher">孩子的话 → 得体发给老师</button>
+        </div>
+        <label class="sr-only" for="relay-input">要转达的话</label>
+        <textarea id="relay-input" class="text-input" rows="3"
+                  placeholder="把原话粘进来，管家翻成对方听得懂的说法…"></textarea>
+        <button id="relay-btn" class="btn btn-primary" type="button">翻译转达</button>
+      </div>
+
+      <div id="relay-out">
+        <div id="relay-t2p" class="relay-col" aria-label="转达结果一">
+          <div class="relay-head">给家长</div>
+          <p class="relay-body"></p>
+        </div>
+        <div id="relay-c2t" class="relay-col" aria-label="转达结果二">
+          <div class="relay-head">给孩子</div>
+          <p class="relay-body"></p>
+        </div>
+      </div>
+    </section>
+  </div>
+</section>
+
+<!-- ============================================================
+     成长视图
+     ============================================================ -->
+<section id="growth-view" class="view hidden" aria-label="成长视图">
+  <header class="topbar">
+    <nav class="subview-nav" aria-label="页面导航">
+      <button class="nav-btn" type="button" data-go="main">
+        <svg class="ic" aria-hidden="true"><use href="#i-back"/></svg><span>管家</span>
+      </button>
+      <button class="nav-btn" type="button" data-go="graph" data-nav="graph">
+        <svg class="ic" aria-hidden="true"><use href="#i-planet"/></svg><span>星球</span>
+      </button>
+      <button class="nav-btn" type="button" data-go="parent" data-nav="parent">
+        <svg class="ic" aria-hidden="true"><use href="#i-users"/></svg><span>家长</span>
+      </button>
+      <button class="nav-btn" type="button" data-go="memory" data-nav="memory">
+        <svg class="ic" aria-hidden="true"><use href="#i-book"/></svg><span>记忆</span>
+      </button>
+      <button class="nav-btn" type="button" data-go="logs" data-nav="logs">
+        <svg class="ic" aria-hidden="true"><use href="#i-log"/></svg><span>记录</span>
+      </button>
+      <button class="nav-btn" type="button" data-act="logout" aria-label="退出登录">
+        <svg class="ic" aria-hidden="true"><use href="#i-out"/></svg><span>退出</span>
+      </button>
+    </nav>
+    <span class="topbar-spacer"></span>
+    <span class="brand">
+      <svg class="ic" aria-hidden="true"><use href="#i-growth"/></svg>
+      <span class="brand-name">成长雷达</span>
+    </span>
+    <span class="topbar-date">德 智 体 美 劳</span>
+  </header>
+
+  <div class="growth-grid">
+    <section class="panel" aria-labelledby="radar-head">
+      <div class="panel-head">
+        <h2 id="radar-head"><svg class="ic" aria-hidden="true"><use href="#i-growth"/></svg> 五领域雷达</h2>
+        <span class="panel-sub">按记忆节点分布</span>
+      </div>
+      <div id="growth-radar" role="img" aria-label="五领域成长雷达图"></div>
+      <p id="growth-comment" class="growth-comment hidden"></p>
+    </section>
+
+    <section class="panel" aria-labelledby="ev-head">
+      <div class="panel-head">
+        <h2 id="ev-head"><svg class="ic" aria-hidden="true"><use href="#i-log"/></svg> 证据链</h2>
+        <span class="panel-sub">每条都指向一次真实对话</span>
+      </div>
+      <div id="growth-evidence" class="scroll">
+        <p class="empty-hint">还没有可回放的证据。</p>
+      </div>
+    </section>
+
+    <button id="dream-btn" class="btn btn-primary dream-btn" type="button">
+      <svg class="ic" aria-hidden="true"><use href="#i-spark"/></svg> 说说我的梦想
+    </button>
+  </div>
+</section>
+
+<!-- ============================================================
+     调用记录
+     ============================================================ -->
+<section id="logs-view" class="view hidden" aria-label="API 调用记录">
+  <header class="topbar">
+    <nav class="subview-nav" aria-label="页面导航">
+      <button id="logs-back" class="nav-btn" type="button">
+        <svg class="ic" aria-hidden="true"><use href="#i-back"/></svg><span>返回</span>
+      </button>
+      <button class="nav-btn" type="button" data-go="graph" data-nav="graph">
+        <svg class="ic" aria-hidden="true"><use href="#i-planet"/></svg><span>星球</span>
+      </button>
+      <button class="nav-btn" type="button" data-go="memory" data-nav="memory">
+        <svg class="ic" aria-hidden="true"><use href="#i-book"/></svg><span>记忆</span>
+      </button>
+      <button class="nav-btn" type="button" data-go="growth" data-nav="growth">
+        <svg class="ic" aria-hidden="true"><use href="#i-growth"/></svg><span>成长</span>
+      </button>
+      <button class="nav-btn" type="button" data-act="logout" aria-label="退出登录">
+        <svg class="ic" aria-hidden="true"><use href="#i-out"/></svg><span>退出</span>
+      </button>
+    </nav>
+    <span class="topbar-spacer"></span>
+    <span class="brand">
+      <svg class="ic" aria-hidden="true"><use href="#i-log"/></svg>
+      <span class="brand-name">调用记录</span>
+    </span>
+    <span class="topbar-date">真实生成可核验</span>
+  </header>
+
+  <div class="logs-wrap scroll">
+    <div id="llm-logs" role="table" aria-label="LLM 调用记录">
+      <div class="logs-head" role="row">
+        <span role="columnheader">时间</span>
+        <span role="columnheader">调用方</span>
+        <span role="columnheader">模型</span>
+        <span role="columnheader">耗时</span>
+        <span role="columnheader">结果</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================
+     记忆本
+     ============================================================ -->
+<section id="memory-view" class="view hidden" aria-label="记忆本">
+  <header class="topbar">
+    <nav class="subview-nav" aria-label="页面导航">
+      <button id="memory-back" class="nav-btn" type="button">
+        <svg class="ic" aria-hidden="true"><use href="#i-back"/></svg><span>返回</span>
+      </button>
+      <button class="nav-btn" type="button" data-go="graph" data-nav="graph">
+        <svg class="ic" aria-hidden="true"><use href="#i-planet"/></svg><span>星球</span>
+      </button>
+      <button class="nav-btn" type="button" data-go="growth" data-nav="growth">
+        <svg class="ic" aria-hidden="true"><use href="#i-growth"/></svg><span>成长</span>
+      </button>
+      <button class="nav-btn" type="button" data-go="logs" data-nav="logs">
+        <svg class="ic" aria-hidden="true"><use href="#i-log"/></svg><span>记录</span>
+      </button>
+      <button class="nav-btn" type="button" data-act="logout" aria-label="退出登录">
+        <svg class="ic" aria-hidden="true"><use href="#i-out"/></svg><span>退出</span>
+      </button>
+    </nav>
+    <span class="topbar-spacer"></span>
+    <span class="brand">
+      <svg class="ic" aria-hidden="true"><use href="#i-book"/></svg>
+      <span class="brand-name">记忆本</span>
+    </span>
+    <span class="topbar-date">长期记忆 · 主题 · 时间线</span>
+  </header>
+
+  <div class="memory-body scroll">
+    <section class="panel" aria-labelledby="mem-md-head">
+      <h3 id="mem-md-head">长期记忆 MEMORY.md</h3>
+      <div id="memory-md" class="memory-md"></div>
+    </section>
+
+    <section class="panel" aria-labelledby="mem-topics-head">
+      <h3 id="mem-topics-head">主题记忆</h3>
+      <div id="memory-topics">
+        <p class="empty-hint">还没有主题记忆。</p>
+      </div>
+    </section>
+
+    <section class="panel" aria-labelledby="mem-daily-head">
+      <h3 id="mem-daily-head">沉淀时间线</h3>
+      <div id="memory-daily">
+        <p class="empty-hint">还没有沉淀记录。</p>
+      </div>
+    </section>
+  </div>
+</section>
+
+<div id="toast-root" aria-live="polite"></div>
 
 <script type="module" src="/static/app.js"></script>
 </body>

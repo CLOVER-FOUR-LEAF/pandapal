@@ -4,32 +4,57 @@
   "topics": {
     "钢琴": {
       "status": "dropped",
-      "related": ["兴趣班", "乐器", "小提琴", "三分钟热度"],
+      "related": [
+        "兴趣班",
+        "乐器",
+        "小提琴",
+        "三分钟热度"
+      ],
       "file": "topics/钢琴.md"
     },
     "换电脑": {
       "status": "active",
-      "related": ["攒钱", "硬盘", "零花钱"],
+      "related": [
+        "攒钱",
+        "硬盘",
+        "零花钱"
+      ],
       "file": "topics/换电脑.md"
     },
     "西客松大赛": {
       "status": "active",
-      "related": ["西安", "比赛", "机器人课", "出远门"],
+      "related": [
+        "西安",
+        "比赛",
+        "机器人课",
+        "出远门"
+      ],
       "file": "topics/西客松.md"
     },
     "感冒": {
       "status": "active",
-      "related": ["健康", "吃药", "咳嗽"],
+      "related": [
+        "健康",
+        "吃药",
+        "咳嗽"
+      ],
       "file": "topics/感冒.md"
     },
     "机器人课": {
       "status": "active",
-      "related": ["周六", "兴趣班", "西客松大赛"],
+      "related": [
+        "周六",
+        "兴趣班",
+        "西客松大赛"
+      ],
       "file": "topics/机器人课.md"
     },
     "攒钱": {
       "status": "active",
-      "related": ["换电脑", "零花钱"],
+      "related": [
+        "换电脑",
+        "零花钱"
+      ],
       "file": "topics/攒钱.md"
     }
   }

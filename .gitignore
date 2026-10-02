@@ -9,5 +9,7 @@ dist/
 .pytest_cache/
 data/child_*/
 data/logs/
+data/users.json
+data/tokens.json
 daily_tmp/
 !data/child_xiaodou/

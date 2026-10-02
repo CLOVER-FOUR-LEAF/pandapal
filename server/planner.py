@@ -6,7 +6,7 @@ from datetime import date
 from . import llm, prompts
 from .memory import MemoryStore
 
-VALID_TOOLS = {"race_lookup", "weather", "web_search", "llm"}
+VALID_TOOLS = {"race_lookup", "transport_lookup", "weather", "web_search", "llm"}
 
 
 class PlanError(RuntimeError):
@@ -54,8 +54,13 @@ def _validate(plan: dict) -> dict:
     return plan
 
 
-async def make_plan(store: MemoryStore, message: str) -> dict:
+async def make_plan(store: MemoryStore, message: str, affairs_snapshot: dict | None = None) -> dict:
     """生成 DAG 计划；失败抛 PlanError 由调用方走保底。"""
+    brief = "（暂无）"
+    if affairs_snapshot:
+        rows = affairs_snapshot.get("board") or []
+        if rows:
+            brief = "\n".join(f"- {r['title']}（{r.get('stage')}）" for r in rows[:5])
     try:
         plan = await llm.complete_json(
             [
@@ -64,10 +69,11 @@ async def make_plan(store: MemoryStore, message: str) -> dict:
                     name=store.child_name,
                     today=date.today().isoformat(),
                     memory_block=store.active_block() or "（暂无记忆）",
+                    affairs_brief=brief,
                     message=message,
                 )},
             ],
-            max_tokens=1500,
+            max_tokens=3000,
             caller="planner",
         )
         return _validate(plan)

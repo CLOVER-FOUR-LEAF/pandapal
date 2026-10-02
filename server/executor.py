@@ -30,6 +30,12 @@ async def _run_node(store: MemoryStore, event: str, node: dict, results: dict) -
     tool, args = node["tool"], node.get("args", {})
     if tool == "race_lookup":
         return await asyncio.to_thread(tools.race_lookup, str(args.get("query", event)))
+    if tool == "transport_lookup":
+        return await asyncio.to_thread(
+            tools.transport_lookup,
+            str(args.get("from_city", "")),
+            str(args.get("to_city", "")),
+        )
     if tool == "weather":
         return await tools.weather(str(args.get("city", "")))
     if tool == "web_search":

@@ -79,9 +79,14 @@ async def _openai_request(client: httpx.AsyncClient, key: str, body: dict) -> ht
     )
 
 
-async def _anthropic_request(client: httpx.AsyncClient, key: str, body: dict) -> httpx.Response:
+def _anthropic_url() -> str:
+    """BASE_URL 以 /v1 结尾时不再重复拼（B1：流式与非流式共用同一规则）。"""
     base = config.LLM_BASE_URL
-    url = f"{base}/v1/messages" if not base.endswith("/v1") else f"{base}/messages"
+    return f"{base}/messages" if base.endswith("/v1") else f"{base}/v1/messages"
+
+
+async def _anthropic_request(client: httpx.AsyncClient, key: str, body: dict) -> httpx.Response:
+    url = _anthropic_url()
     return await client.post(
         url,
         headers={
@@ -103,7 +108,12 @@ async def complete(
     """非流式补全，返回文本。主备 Key 各尝试一次。"""
     t0 = time.monotonic()
     last_err: Exception | None = None
-    for key in _keys():
+    try:
+        keys = _keys()
+    except LLMError as e:
+        log_call(caller, False, 0, str(e))  # 没配 Key 的失败也留痕，logs 页能看到原因
+        raise
+    for key in keys:
         try:
             async with httpx.AsyncClient(timeout=config.LLM_TIMEOUT) as client:
                 if config.LLM_PROTOCOL == "anthropic":
@@ -120,15 +130,26 @@ async def complete(
                     out = "".join(b.get("text", "") for b in data.get("content", []))
                     log_call(caller, True, (time.monotonic() - t0) * 1000)
                     return out
-                resp = await _openai_request(client, key, {
+                body = {
                     "model": config.LLM_MODEL,
                     "messages": messages,
                     "max_tokens": max_tokens,
                     "temperature": temperature,
                     "stream": False,
-                })
-                resp.raise_for_status()
-                out = resp.json()["choices"][0]["message"]["content"] or ""
+                }
+                if config.LLM_REASONING_EFFORT:
+                    body["reasoning_effort"] = config.LLM_REASONING_EFFORT
+                out = ""
+                for budget in (max_tokens, min(max_tokens * 3, 8192)):
+                    # 推理模型可能把预算全花在 reasoning_content 上（finish_reason=length
+                    # 且 content 为空）——放大预算补一次
+                    body["max_tokens"] = budget
+                    resp = await _openai_request(client, key, body)
+                    resp.raise_for_status()
+                    choice = resp.json()["choices"][0]
+                    out = choice["message"]["content"] or ""
+                    if out.strip() or choice.get("finish_reason") != "length":
+                        break
                 log_call(caller, True, (time.monotonic() - t0) * 1000)
                 return out
         except Exception as e:  # noqa: BLE001 主备切换需要捕获一切
@@ -144,69 +165,103 @@ async def stream(
     temperature: float = 0.7,
     caller: str = "unknown",
 ) -> AsyncIterator[str]:
-    """流式补全，逐段产出文本。协议细节对外屏蔽。"""
+    """流式补全，逐段产出文本。协议细节对外屏蔽。
+
+    主备 Key 各尝试一次：只在还没产出任何 token 前才允许换 Key，
+    已吐出部分内容后失败则直接抛错（重发会造成回复重复）。
+    """
     t0 = time.monotonic()
-    key = _keys()[0]
-    async with httpx.AsyncClient(timeout=config.LLM_TIMEOUT) as client:
-        if config.LLM_PROTOCOL == "anthropic":
-            system, rest = _split_system(messages)
-            req = client.stream(
-                "POST",
-                f"{config.LLM_BASE_URL}/v1/messages",
-                headers={
-                    "x-api-key": key,
-                    "anthropic-version": "2023-06-01",
-                    "content-type": "application/json",
-                },
-                json={
-                    "model": config.LLM_MODEL,
-                    "max_tokens": max_tokens,
-                    "temperature": temperature,
-                    "system": system,
-                    "messages": rest,
-                    "stream": True,
-                },
-            )
-        else:
-            req = client.stream(
-                "POST",
-                f"{config.LLM_BASE_URL}/chat/completions",
-                headers={"Authorization": f"Bearer {key}"},
-                json={
-                    "model": config.LLM_MODEL,
-                    "messages": messages,
-                    "max_tokens": max_tokens,
-                    "temperature": temperature,
-                    "stream": True,
-                },
-            )
-        async with req as resp:
-            resp.raise_for_status()
+    last_err: Exception | None = None
+    try:
+        keys = _keys()
+    except LLMError as e:
+        log_call(caller, False, 0, str(e))
+        raise
+    for key in keys:
+        budget = max_tokens
+        while True:
             got = False
-            async for line in resp.aiter_lines():
-                if not line.startswith("data:"):
+            finish = None
+            try:
+                async with httpx.AsyncClient(timeout=config.LLM_TIMEOUT) as client:
+                    if config.LLM_PROTOCOL == "anthropic":
+                        system, rest = _split_system(messages)
+                        req = client.stream(
+                            "POST",
+                            _anthropic_url(),
+                            headers={
+                                "x-api-key": key,
+                                "anthropic-version": "2023-06-01",
+                                "content-type": "application/json",
+                            },
+                            json={
+                                "model": config.LLM_MODEL,
+                                "max_tokens": budget,
+                                "temperature": temperature,
+                                "system": system,
+                                "messages": rest,
+                                "stream": True,
+                            },
+                        )
+                    else:
+                        body = {
+                            "model": config.LLM_MODEL,
+                            "messages": messages,
+                            "max_tokens": budget,
+                            "temperature": temperature,
+                            "stream": True,
+                        }
+                        if config.LLM_REASONING_EFFORT:
+                            body["reasoning_effort"] = config.LLM_REASONING_EFFORT
+                        req = client.stream(
+                            "POST",
+                            f"{config.LLM_BASE_URL}/chat/completions",
+                            headers={"Authorization": f"Bearer {key}"},
+                            json=body,
+                        )
+                    async with req as resp:
+                        resp.raise_for_status()
+                        async for line in resp.aiter_lines():
+                            if not line.startswith("data:"):
+                                continue
+                            payload = line[5:].strip()
+                            if not payload or payload == "[DONE]":
+                                continue
+                            try:
+                                chunk = json.loads(payload)
+                            except json.JSONDecodeError:
+                                continue
+                            if config.LLM_PROTOCOL == "anthropic":
+                                if chunk.get("type") == "content_block_delta":
+                                    text = chunk.get("delta", {}).get("text", "")
+                                    if text:
+                                        got = True
+                                        yield text
+                            else:
+                                for choice in chunk.get("choices", []):
+                                    if choice.get("finish_reason"):
+                                        finish = choice["finish_reason"]
+                                    text = choice.get("delta", {}).get("content") or ""
+                                    if text:
+                                        got = True
+                                        yield text
+                log_call(caller, got, (time.monotonic() - t0) * 1000,
+                         "" if got else "流式响应为空")
+                if got:
+                    return
+                last_err = LLMError("流式响应为空")
+                if finish == "length" and budget < 8192:
+                    # 推理模型把预算全花在 reasoning_content 上了——没吐任何 token，可安全重试
+                    budget = min(budget * 3, 8192)
                     continue
-                payload = line[5:].strip()
-                if not payload or payload == "[DONE]":
-                    continue
-                try:
-                    chunk = json.loads(payload)
-                except json.JSONDecodeError:
-                    continue
-                if config.LLM_PROTOCOL == "anthropic":
-                    if chunk.get("type") == "content_block_delta":
-                        text = chunk.get("delta", {}).get("text", "")
-                        if text:
-                            got = True
-                            yield text
-                else:
-                    for choice in chunk.get("choices", []):
-                        text = choice.get("delta", {}).get("content") or ""
-                        if text:
-                            got = True
-                            yield text
-            log_call(caller, got, (time.monotonic() - t0) * 1000,
-                     "" if got else "流式响应为空")
+                break
+            except Exception as e:  # noqa: BLE001 主备切换需要捕获一切
+                if got:
+                    raise  # 已经吐了 token，换 Key 重发会让回复重复
+                last_err = e
+                break
+    log_call(caller, False, (time.monotonic() - t0) * 1000, str(last_err))
+    raise LLMError(f"LLM 流式调用失败: {last_err}")
 
 
 def extract_json(text: str) -> dict:
