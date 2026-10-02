@@ -830,10 +830,12 @@ async def _chat_stream(sess, raw_message: str, ctx: dict):
                     await asyncio.to_thread(a_store.update, affair["id"], patch,
                                             actor="butler", note="执行链已存档")
                 await emit({"type": "phase", "phase": "synthesizing"})
-                card = await synth.synthesize(sess.store, message, results)
+                card = await _card_with_fallback(
+                    sess.store, message, results=results, title=plan["title"],
+                    pairs=[(n["title"], results.get(n["id"], "")) for n in plan["nodes"]])
             else:
                 await emit({"type": "phase", "phase": "synthesizing"})
-                card = await synth.direct_card(sess.store, message)
+                card = await _card_with_fallback(sess.store, message, use_synth=False)
             reply_text = synth.card_to_text(card)
 
             # ③ 实际去执行：加提醒 / 生成清单 / 请家长确认。
@@ -1062,6 +1064,30 @@ def _clean_affair_title(message: str) -> str:
             break
     # 全是语气词（"啊" / "吧"）时剥不干净，退回默认名，别让看板挂一个字
     return t if len(t) >= 2 else "新的事"
+
+
+async def _card_with_fallback(store, message: str, *, results: dict | None = None,
+                              title: str = "", pairs=(), use_synth: bool = True) -> dict:
+    """出卡片的三档降级：汇总 → 单次直出 → 纯本地摊结果。
+
+    为什么要有第三档：synth 实测平均 35s、最慢 52.6s，已经贴着单次调用超时
+    上限跑。原来它一抛异常，整条已经跑完的规划链就白费了，孩子最后只看到
+    一句"大脑暂时连不上"——最贵的部分白干，最该给的结果反而没给。
+
+    实测 direct_card 只需 ~5s（比 synth 快 7 倍），所以拿它当中间档很划算；
+    连它也没赶上，就用本地那档把节点真实结果如实摊开，末尾说明是"来不及
+    整理"的版本，不假装成综合过的方案。
+    """
+    if use_synth:
+        try:
+            return await synth.synthesize(store, message, results or {})
+        except Exception as e:  # noqa: BLE001
+            print(f"[card] 汇总失败，降级到直出：{e}")
+    try:
+        return await synth.direct_card(store, message)
+    except Exception as e:  # noqa: BLE001
+        print(f"[card] 直出也失败，用本地兜底：{e}")
+    return synth.assemble_from_results(title, list(pairs))
 
 
 async def _open_affair(sess, a_store, message: str, hit: dict) -> tuple[dict | None, bool]:
