@@ -1053,7 +1053,7 @@ function renderDueStrip(due) {
   }
   strip.classList.remove("hidden");
   due.slice(0, 8).forEach((d) => {
-    const days = d.days !== undefined ? d.days : (d.due_in_days !== undefined ? d.due_in_days : daysUntil(d.due));
+    const days = d.days !== undefined ? d.days : daysUntil(d.due);
     const chip = el("button", "due-chip");
     chip.type = "button";
     chip.dataset.urgent = String(days !== null && days !== undefined && days <= 3);
@@ -1141,8 +1141,8 @@ function affairCard(a) {
   card.dataset.stage = cssStage;
   card.setAttribute("role", "button");
   card.tabIndex = 0;
-  const days = a.due_in_days !== undefined ? a.due_in_days : daysUntil(a.due);
-  if (days !== null && days !== undefined && days <= 3) card.dataset.urgent = "true";
+  const days = daysUntil(a.due);
+  if (days !== null && days <= 3) card.dataset.urgent = "true";
 
   card.appendChild(affairHeadEl(a));
   if (a.summary) card.appendChild(el("div", "affair-summary", a.summary));
@@ -1176,8 +1176,8 @@ function progressEl(a) {
     return wrap;
   }
   const cd = countdownText(a.due);
-  const days = a.due_in_days !== undefined ? a.due_in_days : daysUntil(a.due);
-  return el("span", `countdown${days !== null && days !== undefined && days < 0 ? " overdue" : ""}`,
+  const days = daysUntil(a.due);
+  return el("span", `countdown${days !== null && days < 0 ? " overdue" : ""}`,
     cd || (mode === "days" && p ? `${p.value} 天` : ""));
 }
 
@@ -1769,37 +1769,7 @@ function addCard(card) {
     wrap.appendChild(sec);
   });
 
-  const cl = card.checklist;
-  if (cl && (cl.items || []).length) {
-    wrap.appendChild(el("div", "sec-h", cl.title || "清单"));
-    const list = el("div", "checklist");
-    const cid = card.checklist_id || card.id || cl.id || "";
-    const total = cl.items.length;
-    const doneN = cl.items.filter((i) => i && i.done).length;
-    cl.items.forEach((item, i) => {
-      const row = checkRow(item, i, cid);
-      if (!cid) row.querySelector("input").disabled = true;
-      list.appendChild(row);
-    });
-    wrap.appendChild(list);
-    wrap.appendChild(el("div", "check-progress", `已勾 ${doneN}/${total}`));
-  }
-
   if (card.closing) wrap.appendChild(el("div", "card-closing", card.closing));
-
-  const footnotes = card.footnotes || [];
-  if (footnotes.length) {
-    const cites = el("div", "cite-list");
-    footnotes.forEach((f) => {
-      const item = el("span", "cite-item cite", f.text || "");
-      if (f.node_id) {
-        item.style.cursor = "pointer";
-        item.onclick = () => openNodeDrawer({ id: f.node_id, label: f.text || f.node_id });
-      }
-      cites.appendChild(item);
-    });
-    wrap.appendChild(cites);
-  }
 
   box.appendChild(wrap);
   scrollBottom();
@@ -2446,7 +2416,6 @@ async function loadParentInbox() {
       note.classList.toggle("hidden", !n);
     }
     renderInbox(box, (data && data.items) || []);
-    if (data && data.relay) renderRelay(data.relay);
   } catch (e) {
     if (box) box.innerHTML = `<p class="empty-hint">收件箱暂时取不到：${escapeHtml(e.message)}</p>`;
   }
@@ -2478,7 +2447,7 @@ function inboxCard(item, actionable) {
        <span class="inbox-status">${escapeHtml(String(item.created || item.ts || "").slice(0, 16))}</span>
      </div>
      <div class="inbox-detail">${escapeHtml(item.detail || "")}</div>`;
-  const reply = item.reply || item.answer;
+  const reply = item.reply;
   if (reply) card.appendChild(el("div", "inbox-reply", `家长回复：${reply}`));
 
   if (actionable) {
@@ -2492,12 +2461,6 @@ function inboxCard(item, actionable) {
     append(reject, icon("i-x"), document.createTextNode("先不用"));
     reject.onclick = () => decideInbox(item.id, "reject", reject);
     append(row, approve, reject);
-    (item.options || []).forEach((opt) => {
-      const b = el("button", "btn-approve", opt);
-      b.type = "button";
-      b.onclick = () => decideInbox(item.id, "approve", b, opt);
-      row.appendChild(b);
-    });
     card.appendChild(row);
   }
   return card;
