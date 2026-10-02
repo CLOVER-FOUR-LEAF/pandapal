@@ -18,7 +18,7 @@
 
 import * as scene3d from "./scene3d.js";
 import { renderFallback } from "./graph2d.js";
-import { mountPanda, setMood } from "./panda.js";
+import { mountPanda, setMood, attachLoginInteractions } from "./panda.js";
 import { marked } from "./vendor/marked.esm.js";
 import purify from "./vendor/purify.es.js";
 
@@ -373,10 +373,55 @@ function draw2D(host, graph, onClick) {
 }
 
 function renderMiniGraph() {
+  /** 星球速览：五领域节点分布条 + 最近点亮的记忆（2D 缩略图在 146px 高度里只是一团色块，讲不清楚）。 */
   const host = $("#graph-mini .graph-mini-canvas");
   if (!host) return;
-  // 速览图点节点 = 进星球页直接看该节点详情
-  draw2D(host, filteredGraph(), (n) => { go("graph"); openNodeDrawer(n); });
+  const nodes = (state.graph.nodes || []).filter((n) => n && n.id !== "xiaodou" && n.type !== "self");
+  host.innerHTML = "";
+  host.classList.add("mini-stats");
+  if (!nodes.length) {
+    host.appendChild(el("p", "empty-hint", "多聊几句，管家就会把你的世界点亮成星球～"));
+    return;
+  }
+  const counts = {};
+  DOMAIN_KEYS.forEach((k) => (counts[k] = 0));
+  nodes.forEach((n) => { if (counts[n.domain] !== undefined) counts[n.domain] += 1; });
+  const max = Math.max(1, ...Object.values(counts));
+  const bars = el("div", "mini-bars");
+  DOMAIN_KEYS.forEach((k) => {
+    const b = el("button", "mini-bar");
+    b.type = "button";
+    b.dataset.domain = k;
+    b.setAttribute("aria-label", `${DOMAINS[k][0]}：${counts[k]} 个记忆节点`);
+    const track = el("span", "mini-track");
+    const fill = el("i", "mini-fill");
+    fill.style.height = `${Math.max(8, Math.round((counts[k] / max) * 100))}%`;
+    track.appendChild(fill);
+    append(b, el("span", "mini-num", String(counts[k])), track, el("span", "mini-lab", DOMAINS[k][0]));
+    b.onclick = (e) => {
+      e.stopPropagation();
+      state.filters = { ...(state.filters || {}), domain: k };
+      go("graph");
+      s3("setDomainFilter", state.filters.domain, state.filters.status);
+    };
+    bars.appendChild(b);
+  });
+  const recent = nodes.slice()
+    .sort((a, b) => String(b.last_seen || "").localeCompare(String(a.last_seen || "")) || (b.weight || 0) - (a.weight || 0))
+    .slice(0, 3);
+  const side = el("div", "mini-side");
+  append(side, el("div", "mini-total", `${nodes.length}`), el("div", "mini-total-lab", "颗记忆星"));
+  const rec = el("div", "mini-recent");
+  recent.forEach((n) => {
+    const pill = el("button", "node-pill");
+    pill.type = "button";
+    pill.dataset.domain = n.domain || "";
+    pill.textContent = truncate(n.label || n.id, 6);
+    pill.onclick = (e) => { e.stopPropagation(); go("graph"); openNodeDrawer(n); };
+    rec.appendChild(pill);
+  });
+  side.appendChild(rec);
+  append(host, bars, side);
 }
 
 /* ==========================================================================
@@ -395,17 +440,39 @@ function saveAuth() {
   } catch { /* 私密模式下静默 */ }
 }
 
-async function login(username, password) {
+let loginPanda = null;
+let loginBusy = false;
+
+function setLoginHint(text, kind) {
   const hint = $("#login-hint");
+  if (!hint) return;
+  hint.textContent = text || "";
+  hint.classList.toggle("err", kind === "err");
+  hint.classList.toggle("ok", kind === "ok");
+}
+
+async function login(username, password, trigger) {
+  if (loginBusy) return;
   const u = String(username == null ? "" : username).trim();
   const p = String(password == null ? "" : password);
   if (!u || !p) {
-    if (hint) hint.textContent = "用户名和密码都要填哦";
+    setLoginHint(!u ? "先填一下用户名哦" : "密码还没填呢", "err");
+    const card = $("#login-card");
+    if (card) { card.classList.remove("shake"); void card.offsetWidth; card.classList.add("shake"); }
+    if (loginPanda) setMood(loginPanda, "oops");
+    const target = !u ? $("#login-name") : $("#login-pass");
+    if (target) target.focus();
     return;
   }
-  const btns = [$("#login-btn"), $("#demo-btn")];
+  loginBusy = true;
+  const mainBtn = $("#login-btn");
+  const btns = [mainBtn, ...document.querySelectorAll(".demo-role")];
   btns.forEach((b) => b && (b.disabled = true));
-  if (hint) hint.textContent = "正在验证身份…";
+  const busyBtn = trigger || mainBtn;
+  if (busyBtn) busyBtn.classList.add("loading");
+  if (busyBtn === mainBtn && mainBtn) mainBtn.disabled = false; // 保留可见态，pointer-events 已禁
+  setLoginHint("正在验证身份…");
+  if (loginPanda) setMood(loginPanda, "thinking");
   try {
     const resp = await api("/api/auth/login", jsonOpts({ username: u, password: p }));
     const data = await resp.json().catch(() => ({}));
@@ -415,21 +482,90 @@ async function login(username, password) {
     state.name = data.name || u;
     state.role = state.authRole === "parent" ? "parent" : "child";
     saveAuth();
-    if (hint) hint.textContent = data.is_new ? "新账号已建好空白档案～" : "";
+    setLoginHint(data.is_new ? "新账号已建好空白档案～" : `欢迎回来，${state.name}！`, "ok");
+    if (loginPanda) setMood(loginPanda, "happy");
     await enterMain();
+    setLoginHint("");
   } catch (e) {
-    if (hint) hint.textContent = e.message;
+    setLoginHint(e.message || "登录失败，请稍后再试", "err");
+    if (loginPanda) setMood(loginPanda, "oops");
+    const card = $("#login-card");
+    if (card) { card.classList.remove("shake"); void card.offsetWidth; card.classList.add("shake"); }
   } finally {
-    btns.forEach((b) => b && (b.disabled = false));
+    loginBusy = false;
+    btns.forEach((b) => b && (b.disabled = false, b.classList.remove("loading")));
   }
 }
 
-function demoLogin() {
+function demoLogin(btn) {
+  const b = btn && btn.dataset ? btn : $("#demo-btn");
+  const user = (b && b.dataset.user) || "小豆";
+  const pass = (b && b.dataset.pass) || "panda123";
   const name = $("#login-name");
-  const pass = $("#login-pass");
-  if (name) name.value = "小豆";
-  if (pass) pass.value = "panda123";
-  login("小豆", "panda123");
+  const pw = $("#login-pass");
+  if (name) name.value = user;
+  if (pw) pw.value = pass;
+  login(user, pass, b);
+}
+
+function setupLoginExtras() {
+  const nameInput = $("#login-name");
+  const passInput = $("#login-pass");
+  const toggle = $("#pass-toggle");
+  let peek = false;
+  const inter = attachLoginInteractions(loginPanda, { nameInput, passInput, isPeek: () => peek });
+  if (toggle && passInput) {
+    toggle.addEventListener("pointerdown", (e) => e.preventDefault()); // 不抢输入框焦点
+    toggle.onclick = () => {
+      peek = !peek;
+      passInput.type = peek ? "text" : "password";
+      toggle.setAttribute("aria-pressed", String(peek));
+      toggle.setAttribute("aria-label", peek ? "隐藏密码" : "显示密码");
+      const use = toggle.querySelector("use");
+      if (use) use.setAttribute("href", peek ? "#i-eye-off" : "#i-eye");
+      if (inter) inter.syncPass();
+    };
+  }
+  const caps = $("#caps-hint");
+  if (caps && passInput) {
+    const check = (e) => {
+      if (typeof e.getModifierState === "function") setHidden("#caps-hint", !e.getModifierState("CapsLock"));
+    };
+    passInput.addEventListener("keydown", check);
+    passInput.addEventListener("keyup", check);
+    passInput.addEventListener("blur", () => setHidden("#caps-hint", true));
+  }
+  [nameInput, passInput].forEach((n) => n && n.addEventListener("input", () => {
+    const hint = $("#login-hint");
+    if (hint && hint.classList.contains("err")) setLoginHint("");
+  }));
+  document.querySelectorAll(".demo-role").forEach((b) => { b.onclick = () => demoLogin(b); });
+
+  // 气泡轮播：讲解时展示管家"主动办事"的样子
+  const lines = [
+    "小豆，明天科学课的实验材料我已经帮你列好啦～",
+    "王老师说周五春游，我把要带的东西整理进清单了",
+    "这周你跳绳进步了 20 个！要不要告诉妈妈？",
+    "西客松还有 3 天，今晚先把演示稿过一遍吧",
+  ];
+  const txt = $("#hero-bubble-text");
+  const bubble = txt && txt.parentElement;
+  let i = 0;
+  if (txt && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    setInterval(() => {
+      if (state.view !== "login" || document.hidden) return;
+      i = (i + 1) % lines.length;
+      txt.textContent = lines[i];
+      bubble.classList.remove("swap"); void bubble.offsetWidth; bubble.classList.add("swap");
+      if (loginPanda && !loginPanda.classList.contains("shy") && !loginPanda.classList.contains("peek")
+          && !loginPanda.classList.contains("thinking")) {
+        setMood(loginPanda, "speaking");
+        setTimeout(() => {
+          if (loginPanda && loginPanda.classList.contains("speaking")) setMood(loginPanda, "normal");
+        }, 1400);
+      }
+    }, 4800);
+  }
 }
 
 async function restoreAuth() {
@@ -474,10 +610,17 @@ async function restoreAuth() {
   }
 }
 
+const CHAT_WELCOME =
+  '<div class="chat-welcome">' +
+  '<div class="cw-logo" aria-hidden="true"><svg class="ic"><use href="#i-logo"/></svg></div>' +
+  '<b>跟熊猫管家说点什么吧</b>' +
+  '<span>今天发生的事、要办的事、心里的话都能说<br>我会记住，也会帮你拆解成一步一步办掉</span>' +
+  '</div>';
+
 /** 清掉上一账号留在界面上的内容，避免换号后看到旧数据。 */
 function resetUserUI() {
   const box = chatBox();
-  if (box) box.innerHTML = '<p class="empty-hint">说一句「西客松我要准备啥」试试。</p>';
+  if (box) box.innerHTML = CHAT_WELCOME;
   const set = (sel, html) => { const n = $(sel); if (n) n.innerHTML = html; };
   set("#chips", ""); // 快捷话题是上一个账号的上下文，清掉等新账号的 /api/suggest
   set("#briefing-card .panel-body", '<div class="skeleton skeleton-lines"></div>');
@@ -1049,6 +1192,22 @@ function actionReceipt(ev) {
  * 6. 问候 + 历史
  * ========================================================================== */
 
+/** 逐字打出来：问候气泡里"管家正在开口"的感觉 */
+function typewrite(node, text, done) {
+  const t = String(text || "");
+  let i = 0;
+  node.classList.add("bb-typing");
+  const timer = setInterval(() => {
+    if (!state.name) { clearInterval(timer); return; } // 已退出登录
+    node.textContent = t.slice(0, ++i);
+    if (i >= t.length) {
+      clearInterval(timer);
+      node.classList.remove("bb-typing");
+      if (done) done();
+    }
+  }, 34);
+}
+
 async function loadGreeting() {
   const bubble = $("#panda-bubble");
   if (bubble) {
@@ -1060,9 +1219,12 @@ async function loadGreeting() {
     const data = await resp.json();
     const text = (data && data.text) || "早呀！今天想聊点什么？";
     if (bubble) {
-      bubble.textContent = text;
-      const reminders = (data && data.reminders) || [];
-      if (reminders.length) {
+      bubble.innerHTML = "";
+      const span = el("span", "bb-text");
+      bubble.appendChild(span);
+      typewrite(span, text, () => {
+        const reminders = (data && data.reminders) || [];
+        if (!reminders.length || !bubble.isConnected) return;
         const box = el("div", "reminders");
         reminders.forEach((r) => {
           const pill = el("span", "reminder-pill");
@@ -1071,7 +1233,7 @@ async function loadGreeting() {
           box.appendChild(pill);
         });
         bubble.appendChild(box);
-      }
+      });
     }
     addMsg("ai", text);
     s3("setPandaMood", "speaking");
@@ -1100,7 +1262,7 @@ async function loadHistory() {
 function chatBox() { return $("#chat"); }
 
 function clearChatHint() {
-  const hint = $("#chat .empty-hint");
+  const hint = $("#chat .empty-hint, #chat .chat-welcome");
   if (hint) hint.remove();
 }
 
@@ -1619,6 +1781,8 @@ async function loadGraph() {
     const resp = await api(`/api/graph?${q(state.name)}&view=${view}`);
     const data = await resp.json();
     state.graph = { nodes: (data && data.nodes) || [], edges: (data && data.edges) || [] };
+    // 事务卡的关联记忆标签依赖图谱节点名；看板可能先于图谱渲染，这里补刷一次
+    if (state.affairs && state.affairs.length) renderBoard(state.affairs);
     await s3("setGraphData", state.graph);
     renderMiniGraph();
     if (state.fallback2d) {
@@ -1854,6 +2018,32 @@ function openNodeDrawer(node) {
  * 11. 角色切换 + 家长视图
  * ========================================================================== */
 
+/** 浅色 / 深色主题切换（localStorage 持久化，全顶栏按钮同步） */
+const THEME_KEY = "pb_theme";
+
+function applyTheme(t) {
+  const light = t === "light";
+  if (light) document.body.dataset.theme = "light";
+  else document.body.removeAttribute("data-theme");
+  document.querySelectorAll(".theme-toggle").forEach((b) => {
+    const use = b.querySelector("use");
+    const lab = b.querySelector(".tt-label");
+    if (use) use.setAttribute("href", light ? "#i-moon" : "#i-sun");
+    if (lab) lab.textContent = light ? "深色" : "浅色";
+    b.setAttribute("aria-pressed", String(light));
+    b.setAttribute("aria-label", light ? "切换深色主题" : "切换浅色主题");
+  });
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.setAttribute("content", light ? "#eef2ef" : "#0a0f0d");
+}
+
+function toggleTheme() {
+  const light = document.body.dataset.theme !== "light";
+  applyTheme(light ? "light" : "dark");
+  try { localStorage.setItem(THEME_KEY, light ? "light" : "dark"); } catch { /* 忽略 */ }
+  toast(light ? "切到浅色模式" : "切回夜竹林");
+}
+
 function applyRole(role) {
   document.body.dataset.role = role;
   document.body.dataset.view = role;
@@ -2022,6 +2212,7 @@ function setRelayCol(sel, text, advice) {
   if (!col) return;
   const body = col.querySelector(".relay-body") || col;
   body.textContent = text || "";
+  col.classList.toggle("is-empty", !text);
   const old = col.querySelector(".relay-advice");
   if (old) old.remove();
   if (advice) {
@@ -2529,7 +2720,6 @@ function bind() {
   on("#login-btn", () => login(
     $("#login-name") ? $("#login-name").value : "",
     $("#login-pass") ? $("#login-pass").value : ""));
-  on("#demo-btn", demoLogin);
   on("#send-btn", () => send());
   on("#role-toggle", toggleRole);
   on("#secret-btn", toggleSecret);
@@ -2539,6 +2729,8 @@ function bind() {
   on("#logs-back", () => go("main"));
   // 退出按钮：主视图顶栏 + 各子视图导航里的 [data-act="logout"] 统一生效
   document.querySelectorAll('[data-act="logout"]').forEach((b) => { b.onclick = logout; });
+  // 浅色 / 深色主题切换：各顶栏的 .theme-toggle 统一生效
+  document.querySelectorAll(".theme-toggle").forEach((b) => { b.onclick = toggleTheme; });
 
   wireNav();
   buildTabbar();
@@ -2557,12 +2749,14 @@ function bind() {
   const passInput = $("#login-pass");
   if (nameInput) {
     nameInput.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") login(nameInput.value, passInput ? passInput.value : "");
+      if (e.key !== "Enter" || e.isComposing) return;
+      if (passInput && !passInput.value) passInput.focus();
+      else login(nameInput.value, passInput ? passInput.value : "");
     });
   }
   if (passInput) {
     passInput.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") login(nameInput ? nameInput.value : "", passInput.value);
+      if (e.key === "Enter" && !e.isComposing) login(nameInput ? nameInput.value : "", passInput.value);
     });
   }
   const msgInput = $("#msg-input");
@@ -2603,14 +2797,19 @@ function bind() {
 }
 
 function boot() {
+  try { applyTheme(localStorage.getItem(THEME_KEY) || "dark"); } catch { applyTheme("dark"); }
   if ($("#login-panda")) {
     try {
-      mountPanda($("#login-panda"));
+      loginPanda = mountPanda($("#login-panda"));
     } catch (e) { console.warn("[app] 登录页熊猫挂载失败：", e && e.message); }
   }
   setHidden("#secret-note", true);
   bind();
-  restoreAuth(); // 已有 token 则免登录直进
+  try { setupLoginExtras(); } catch (e) { console.warn("[app] 登录页增强失败：", e && e.message); }
+  Promise.resolve(restoreAuth()).finally(() => {
+    // 还停在登录页时直接聚焦名字输入框，评委上手少点一步
+    if (!state.name) { const n = $("#login-name"); if (n) n.focus({ preventScroll: true }); }
+  });
 }
 
 if (document.readyState === "loading") {

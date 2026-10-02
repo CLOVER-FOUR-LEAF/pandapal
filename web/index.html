@@ -109,6 +109,21 @@
   <symbol id="i-heart" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
     <path d="M12 20s-7.5-4.6-9.3-9.4A5.3 5.3 0 0 1 12 6.2a5.3 5.3 0 0 1 9.3 4.4C19.5 15.4 12 20 12 20z"/>
   </symbol>
+  <symbol id="i-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="12" cy="12" r="4.2"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.4 5.4l1.4 1.4M17.2 17.2l1.4 1.4M18.6 5.4l-1.4 1.4M6.8 17.2l-1.4 1.4"/>
+  </symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M20 13.2A7.8 7.8 0 0 1 10.8 4 8 8 0 1 0 20 13.2z"/>
+  </symbol>
+  <symbol id="i-user" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="12" cy="8.2" r="3.7"/><path d="M4.8 20c.8-3.9 3.6-6 7.2-6s6.4 2.1 7.2 6"/>
+  </symbol>
+  <symbol id="i-eye-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M9.9 6.1A9.6 9.6 0 0 1 12 5.8c6 0 9.5 6.2 9.5 6.2a16 16 0 0 1-2.6 3.3M6.4 7.6C3.9 9.3 2.5 12 2.5 12S6 18.2 12 18.2c1.8 0 3.3-.5 4.6-1.3"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2M3.5 3.5l17 17"/>
+  </symbol>
+  <symbol id="i-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M5 12h14M13.5 6.5L19 12l-5.5 5.5"/>
+  </symbol>
 </svg>
 
 <!-- ============================================================
@@ -116,30 +131,92 @@
      ============================================================ -->
 <section id="login-view" class="view">
   <div class="login-bg" aria-hidden="true">
+    <span class="login-moon"></span>
     <span class="bamboo-sil b1"></span><span class="bamboo-sil b2"></span>
     <span class="bamboo-sil b3"></span><span class="bamboo-sil b4"></span>
+    <span class="bamboo-sil b5"></span><span class="bamboo-sil b6"></span>
     <span class="firefly f1"></span><span class="firefly f2"></span><span class="firefly f3"></span>
-    <span class="firefly f4"></span><span class="firefly f5"></span>
+    <span class="firefly f4"></span><span class="firefly f5"></span><span class="firefly f6"></span>
   </div>
-  <div id="login-card" class="login-card" role="form" aria-labelledby="login-title">
-    <div id="login-panda" class="panda-holder" aria-hidden="true"></div>
-    <h1 id="login-title" class="login-title">熊猫管家</h1>
-    <p class="login-slogan">从小用到大，最懂你的那个人</p>
 
-    <label class="sr-only" for="login-name">用户名</label>
-    <input id="login-name" class="text-input" type="text" maxlength="24"
-           placeholder="用户名" autocomplete="username" enterkeyhint="next"
-           aria-describedby="login-hint">
+  <div class="login-shell">
+    <!-- 左：品牌与讲解要点 -->
+    <div class="login-hero">
+      <div class="hero-stage">
+        <div class="hero-halo" aria-hidden="true"></div>
+        <div id="login-panda" class="panda-holder" aria-hidden="true"></div>
+        <div class="hero-bubble" aria-hidden="true">
+          <span id="hero-bubble-text">小豆，明天科学课的实验材料我已经帮你列好啦～</span>
+        </div>
+      </div>
+      <div class="hero-copy">
+        <span class="hero-kicker"><svg class="ic" aria-hidden="true"><use href="#i-logo"/></svg> PandaButler · 家校协同成长管家</span>
+        <h1 id="login-title" class="login-title">熊猫管家</h1>
+        <p class="login-slogan">从小用到大，最懂你的那个人</p>
+        <ul class="hero-points">
+          <li><span class="hp-ic" data-domain="intellect"><svg class="ic" aria-hidden="true"><use href="#i-book"/></svg></span>
+            <span><b>双层记忆，持续知晓</b><small>活跃关注点每轮必注入 + 主题图谱检索</small></span></li>
+          <li><span class="hp-ic" data-domain="health"><svg class="ic" aria-hidden="true"><use href="#i-bolt"/></svg></span>
+            <span><b>一句话，把事办了</b><small>意图识别 → 任务拆解 DAG → 并行执行 → 结构化卡片</small></span></li>
+          <li><span class="hp-ic" data-domain="labor"><svg class="ic" aria-hidden="true"><use href="#i-heart"/></svg></span>
+            <span><b>主动关心，不等你问</b><small>记忆驱动的晨报与问候，家长老师孩子三方传话</small></span></li>
+        </ul>
+      </div>
+    </div>
 
-    <label class="sr-only" for="login-pass">密码</label>
-    <input id="login-pass" class="text-input" type="password" maxlength="64"
-           placeholder="密码" autocomplete="current-password" enterkeyhint="go">
+    <!-- 右：登录卡 -->
+    <div id="login-card" class="login-card" role="form" aria-labelledby="login-card-title">
+      <div class="lc-head">
+        <h2 id="login-card-title">欢迎回来</h2>
+        <p>登录后，管家会接着上次的话题继续陪伴</p>
+      </div>
 
-    <button id="login-btn" class="btn btn-primary btn-block" type="button">登录 · 开始陪伴</button>
-    <button id="demo-btn" class="btn btn-ghost btn-block" type="button">一键演示（小豆账号）</button>
+      <div class="field">
+        <svg class="ic field-ic" aria-hidden="true"><use href="#i-user"/></svg>
+        <label class="sr-only" for="login-name">用户名</label>
+        <input id="login-name" class="text-input" type="text" maxlength="24"
+               placeholder="用户名" autocomplete="username" enterkeyhint="next"
+               aria-describedby="login-hint">
+      </div>
 
-    <p class="login-accounts">演示账号 · 孩子 <b>小豆/panda123</b> · 家长 <b>豆豆妈/mama123</b> · 评委 <b>admin/admin123</b><br>输入新用户名会自动注册为「孩子」并新建空白档案</p>
-    <p id="login-hint" class="hint" role="status" aria-live="polite"></p>
+      <div class="field">
+        <svg class="ic field-ic" aria-hidden="true"><use href="#i-lock"/></svg>
+        <label class="sr-only" for="login-pass">密码</label>
+        <input id="login-pass" class="text-input" type="password" maxlength="64"
+               placeholder="密码" autocomplete="current-password" enterkeyhint="go">
+        <button id="pass-toggle" class="field-btn" type="button" aria-label="显示密码" aria-pressed="false">
+          <svg class="ic" aria-hidden="true"><use href="#i-eye"/></svg>
+        </button>
+      </div>
+      <p id="caps-hint" class="caps-hint hidden" role="status">大写锁定已开启</p>
+
+      <button id="login-btn" class="btn btn-primary btn-block btn-lg" type="button">
+        <span class="btn-spin" aria-hidden="true"></span><span class="btn-label">登录 · 开始陪伴</span>
+      </button>
+      <p id="login-hint" class="hint" role="status" aria-live="polite"></p>
+
+      <div class="lc-divider"><span>演示账号 · 点一下直接进入</span></div>
+
+      <div class="demo-roles" role="group" aria-label="演示账号一键登录">
+        <button id="demo-btn" class="demo-role" type="button" data-user="小豆" data-pass="panda123" data-domain="health">
+          <span class="dr-av"><svg class="ic" aria-hidden="true"><use href="#i-logo"/></svg></span>
+          <span class="dr-txt"><b>孩子 · 小豆</b><small>对话 · 办事 · 记忆星球</small></span>
+          <svg class="ic dr-go" aria-hidden="true"><use href="#i-arrow"/></svg>
+        </button>
+        <button class="demo-role" type="button" data-user="豆豆妈" data-pass="mama123" data-domain="ethics">
+          <span class="dr-av"><svg class="ic" aria-hidden="true"><use href="#i-users"/></svg></span>
+          <span class="dr-txt"><b>家长 · 豆豆妈</b><small>待确认 · 传话筒 · 不看悄悄话</small></span>
+          <svg class="ic dr-go" aria-hidden="true"><use href="#i-arrow"/></svg>
+        </button>
+        <button class="demo-role" type="button" data-user="admin" data-pass="admin123" data-domain="intellect">
+          <span class="dr-av"><svg class="ic" aria-hidden="true"><use href="#i-eye"/></svg></span>
+          <span class="dr-txt"><b>评委 · admin</b><small>双视角切换 · LLM 调用记录可核验</small></span>
+          <svg class="ic dr-go" aria-hidden="true"><use href="#i-arrow"/></svg>
+        </button>
+      </div>
+
+      <p class="login-accounts">输入一个新用户名 + 任意密码，会自动注册为「孩子」并新建空白档案</p>
+    </div>
   </div>
 </section>
 
@@ -178,6 +255,9 @@
       </button>
       <button id="nav-logs" class="nav-btn" type="button" data-go="logs" data-nav="logs" aria-label="打开调用记录">
         <svg class="ic" aria-hidden="true"><use href="#i-log"/></svg><span>记录</span>
+      </button>
+      <button class="nav-btn theme-toggle" type="button" aria-label="切换浅色主题" aria-pressed="false">
+        <svg class="ic" aria-hidden="true"><use href="#i-sun"/></svg><span class="tt-label">浅色</span>
       </button>
       <button id="nav-logout" class="nav-btn" type="button" data-act="logout" aria-label="退出登录">
         <svg class="ic" aria-hidden="true"><use href="#i-out"/></svg><span>退出</span>
@@ -248,7 +328,11 @@
       </div>
 
       <div id="chat" class="chat scroll" role="log" aria-live="polite" aria-label="对话流">
-        <p class="empty-hint">说一句「西客松我要准备啥」试试。</p>
+        <div class="chat-welcome">
+          <div class="cw-logo" aria-hidden="true"><svg class="ic"><use href="#i-logo"/></svg></div>
+          <b>跟熊猫管家说点什么吧</b>
+          <span>今天发生的事、要办的事、心里的话都能说<br>我会记住，也会帮你拆解成一步一步办掉</span>
+        </div>
       </div>
 
       <div id="chips" class="chips" role="group" aria-label="快捷话题"></div>
@@ -293,6 +377,9 @@
       </button>
       <button class="nav-btn" type="button" data-go="logs" data-nav="logs">
         <svg class="ic" aria-hidden="true"><use href="#i-log"/></svg><span>记录</span>
+      </button>
+      <button class="nav-btn theme-toggle" type="button" aria-label="切换浅色主题" aria-pressed="false">
+        <svg class="ic" aria-hidden="true"><use href="#i-sun"/></svg><span class="tt-label">浅色</span>
       </button>
       <button class="nav-btn" type="button" data-act="logout" aria-label="退出登录">
         <svg class="ic" aria-hidden="true"><use href="#i-out"/></svg><span>退出</span>
@@ -362,6 +449,9 @@
       <button class="nav-btn" type="button" data-go="logs" data-nav="logs">
         <svg class="ic" aria-hidden="true"><use href="#i-log"/></svg><span>记录</span>
       </button>
+      <button class="nav-btn theme-toggle" type="button" aria-label="切换浅色主题" aria-pressed="false">
+        <svg class="ic" aria-hidden="true"><use href="#i-sun"/></svg><span class="tt-label">浅色</span>
+      </button>
       <button class="nav-btn" type="button" data-act="logout" aria-label="退出登录">
         <svg class="ic" aria-hidden="true"><use href="#i-out"/></svg><span>退出</span>
       </button>
@@ -404,13 +494,15 @@
       </div>
 
       <div id="relay-out">
-        <div id="relay-t2p" class="relay-col" aria-label="转达结果一">
+        <div id="relay-t2p" class="relay-col is-empty" aria-label="转达结果一">
           <div class="relay-head">给家长</div>
           <p class="relay-body"></p>
+          <p class="relay-placeholder">管家会把老师的话翻成家长一眼能懂、知道要做什么的说法</p>
         </div>
-        <div id="relay-c2t" class="relay-col" aria-label="转达结果二">
+        <div id="relay-c2t" class="relay-col is-empty" aria-label="转达结果二">
           <div class="relay-head">给孩子</div>
           <p class="relay-body"></p>
+          <p class="relay-placeholder">同时生成一份孩子听得进去的版本，不说教、不吓人</p>
         </div>
       </div>
     </section>
@@ -437,6 +529,9 @@
       </button>
       <button class="nav-btn" type="button" data-go="logs" data-nav="logs">
         <svg class="ic" aria-hidden="true"><use href="#i-log"/></svg><span>记录</span>
+      </button>
+      <button class="nav-btn theme-toggle" type="button" aria-label="切换浅色主题" aria-pressed="false">
+        <svg class="ic" aria-hidden="true"><use href="#i-sun"/></svg><span class="tt-label">浅色</span>
       </button>
       <button class="nav-btn" type="button" data-act="logout" aria-label="退出登录">
         <svg class="ic" aria-hidden="true"><use href="#i-out"/></svg><span>退出</span>
@@ -494,6 +589,9 @@
       <button class="nav-btn" type="button" data-go="growth" data-nav="growth">
         <svg class="ic" aria-hidden="true"><use href="#i-growth"/></svg><span>成长</span>
       </button>
+      <button class="nav-btn theme-toggle" type="button" aria-label="切换浅色主题" aria-pressed="false">
+        <svg class="ic" aria-hidden="true"><use href="#i-sun"/></svg><span class="tt-label">浅色</span>
+      </button>
       <button class="nav-btn" type="button" data-act="logout" aria-label="退出登录">
         <svg class="ic" aria-hidden="true"><use href="#i-out"/></svg><span>退出</span>
       </button>
@@ -536,6 +634,9 @@
       </button>
       <button class="nav-btn" type="button" data-go="logs" data-nav="logs">
         <svg class="ic" aria-hidden="true"><use href="#i-log"/></svg><span>记录</span>
+      </button>
+      <button class="nav-btn theme-toggle" type="button" aria-label="切换浅色主题" aria-pressed="false">
+        <svg class="ic" aria-hidden="true"><use href="#i-sun"/></svg><span class="tt-label">浅色</span>
       </button>
       <button class="nav-btn" type="button" data-act="logout" aria-label="退出登录">
         <svg class="ic" aria-hidden="true"><use href="#i-out"/></svg><span>退出</span>
