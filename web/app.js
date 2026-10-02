@@ -103,9 +103,11 @@ const state = {
   chatCtx: null,     // 当前轮次的渲染上下文（暂停时按它决定「继续」入口）
   chatResume: null,  // 暂停后待续写的内容 {raw, bubble}
   retryText: "",     // 上一轮因网络失败的消息原文（点「重发」用）
+  retryFiles: [],    // 上一轮带走的附件 id（重发时不能丢，否则悄悄少了一半输入）
   attach: [],        // 待发送的附件元数据（上传成功后进这里）
   attachBusy: false, // 还有附件在上传中，此时不让发
   attachSeq: 0,      // 上传序号：连点两次上传时不至于互相覆盖
+  attachPending: [], // 上传中/失败的附件槽位
   recent: [],        // 服务端最近上传的附件（"最近上传"面板用）
   recentOpen: false, // 面板是否展开
   needGraphRefresh: false,
@@ -930,6 +932,7 @@ function resetUserUI() {
   state.recentOpen = false;
   const fb = $("#files-btn");
   if (fb) fb.setAttribute("aria-expanded", "false");
+  state.retryFiles = [];
   renderAttachList();
   const fi = $("#file-input");
   if (fi) fi.value = "";
@@ -1953,7 +1956,8 @@ function filesRow(files) {
     info.appendChild(el("span", "msg-file-name", f.name || "文件"));
     const bits = [attachKindCn(f.kind)];
     if (f.size_cn) bits.push(f.size_cn);
-    if (f.has_text && f.chars) bits.push(`已读出 ${f.chars} 字`);
+    // 图片的 text 是元信息行（"图片：W×H"），不是抽取正文——不能显示成"已读出 N 字"
+    if (f.kind !== "image" && f.has_text && f.chars) bits.push(`已读出 ${f.chars} 字`);
     else if (f.note) bits.push(f.note);
     info.appendChild(el("span", "msg-file-sub", bits.join(" · ")));
     card.appendChild(info);
@@ -2336,6 +2340,7 @@ function setupOfflineBar() {
 /** 网络类失败给一个「重试」入口，而不是只丢一句报错——点一下就重发刚才那条。 */
 function retryableError(msg) {
   const text = state.retryText;
+  const files = state.retryFiles || [];
   const row = addMsg("sys", text ? `${msg}（点这里重发）` : msg);
   if (!row || !text) return;
   row.classList.add("retryable");
@@ -2346,7 +2351,7 @@ function retryableError(msg) {
     row.classList.remove("retryable");
     row.removeAttribute("role");
     row.removeAttribute("tabindex");
-    send(text);
+    send(text, { attach: files }); // 上一轮带的附件一并重发，不能只重发文字
   };
   row.addEventListener("click", again);
   row.addEventListener("keydown", (e) => {
@@ -2383,7 +2388,8 @@ async function send(preset, opts = {}) {
   const raw = preset !== undefined ? String(preset) : input ? input.value : "";
   let text = raw.trim();
   // 只发文件不写字也允许：模型看得到图/文档，用户想说的往往就在文件里
-  const attach = preset === undefined ? (state.attach || []) : [];
+  // 重发（preset）时走 opts.attach 找回上一轮带的附件，preset 本身不带暂存区
+  const attach = preset === undefined ? (state.attach || []) : (opts.attach || []);
   const pending = (state.attachPending || []).length > 0;
   if (!text && !attach.length) return;
   if (!state.name) return;
@@ -2427,8 +2433,9 @@ async function send(preset, opts = {}) {
   if (!resume) {
     ctx.userRow = addMsg("me", text, secret, secret ? null : attach);
   }
-  // 附件已经交给这一轮，清空暂存区（图片预览走 id，不受影响）
-  if (attach.length) {
+  // 附件已经交给这一轮，清空暂存区（图片预览走 id，不受影响）；
+  // 悄悄话轮不消耗附件——服务端也会丢弃，留在暂存区让用户看见没发出去
+  if (attach.length && !secret) {
     state.attach = [];
     renderAttachList();
   }
@@ -2447,6 +2454,7 @@ async function send(preset, opts = {}) {
   };
 
   const fileIds = secret ? [] : attach.map((f) => f.id).filter(Boolean);
+  if (secret && attach.length) toast("悄悄话不带附件，文件还留在输入框上方");
   const body = { name: state.name, message: payload, files: fileIds };
   // 续写：把被打断那一轮的原问题与半截回答带回去（服务端据此接着往下说）
   if (resume) body.resume = { question: resume.question, partial: resume.raw };
@@ -2463,8 +2471,13 @@ async function send(preset, opts = {}) {
       if (gotNothing && !resume && input && preset === undefined && !input.value) {
         input.value = text; // 一个 token 都没回来：请求根本没生效，恢复草稿免得重打
       }
+      if (gotNothing && !resume && preset === undefined && attach.length && !state.attach.length) {
+        state.attach = attach; // 附件一并放回暂存区：请求没生效，文件 id 仍然有效
+        renderAttachList();
+      }
       // 网络层失败（没有 HTTP 状态码）留一份原文，聊天区那条提示点一下就重发
       state.retryText = !e.status && gotNothing && !resume ? text : "";
+      state.retryFiles = state.retryText ? attach : [];
       if (resume && gotNothing) {
         // 续写没连上：把「继续」入口还回去，别让那半截回答再也接不上
         state.chatResume = resume;

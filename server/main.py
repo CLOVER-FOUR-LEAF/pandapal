@@ -384,6 +384,27 @@ def _chat_throttle(key: str) -> bool:
     return ok
 
 
+_UPLOAD_HITS: dict[str, list[float]] = {}
+
+
+def _upload_throttle(key: str) -> bool:
+    """上传按账号限频：每份附件都要跑 PDF/Office 解析，没有闸门就是一个廉价的 CPU 打点。
+
+    窗口与额度走 config（PANDA_UPLOAD_MAX_PER_WINDOW），和其它限流一致按账号计。
+    """
+    now = time.monotonic()
+    hits = [t for t in _UPLOAD_HITS.get(key, []) if now - t < config.UPLOAD_WINDOW_S]
+    ok = len(hits) < config.UPLOAD_MAX_PER_WINDOW
+    if ok:
+        hits.append(now)
+    _UPLOAD_HITS[key] = hits
+    if len(_UPLOAD_HITS) > 500:
+        for k in [k for k, v in _UPLOAD_HITS.items()
+                  if not v or now - v[-1] >= config.UPLOAD_WINDOW_S]:
+            _UPLOAD_HITS.pop(k, None)
+    return ok
+
+
 # 所有会调 LLM 的接口共用一份额度：按账号 + 按 IP 双桶。
 # 只限 /api/chat 不够——问候/晨报/梦想/传话筒同样每次都烧 API Key，
 # 而登录对未知名字零门槛自动注册，单靠"按账号"换个名字就绕过去了，所以再按 IP 兜一层。
@@ -424,24 +445,6 @@ def _need_llm_quota(request: Request, username: str) -> None:
 
 _SIGNUP_HITS: dict[str, list[float]] = {}
 _SIGNUP_MAX, _SIGNUP_WIN = 10, 3600  # 每 IP 每小时最多自动建 10 个新号
-
-
-_UPLOAD_HITS: dict[str, list[float]] = {}
-
-
-def _upload_throttle(key: str) -> bool:
-    """上传按账号限频：每份附件都要跑 PDF/Office 解析，没有闸门就是一个廉价的 CPU 打点。"""
-    now = time.monotonic()
-    hits = [t for t in _UPLOAD_HITS.get(key, []) if now - t < config.UPLOAD_WINDOW_S]
-    ok = len(hits) < config.UPLOAD_MAX_PER_WINDOW
-    if ok:
-        hits.append(now)
-    _UPLOAD_HITS[key] = hits
-    if len(_UPLOAD_HITS) > 500:
-        for k in [k for k, v in _UPLOAD_HITS.items()
-                  if not v or now - v[-1] >= config.UPLOAD_WINDOW_S]:
-            _UPLOAD_HITS.pop(k, None)
-    return ok
 
 
 @app.post("/api/auth/login")
@@ -1745,8 +1748,8 @@ async def api_files_upload(request: Request, name: str = "", file: UploadFile = 
     公开可达的写入口，三道闸都在：单文件体积、单档案配额、扩展名白名单。
     超限一律 4xx + 人话原因，前端直接把这句话显示给用户。
     """
-    _, sess = await _auth_session(request, "chat", name)
-    if not _upload_throttle(sess.name):
+    user, sess = await _auth_session(request, "chat", name)
+    if not _upload_throttle(user["username"]):
         raise HTTPException(429, "附件传得太密啦，歇一会儿再传")
     if file is None or not file.filename:
         raise HTTPException(400, "没有收到文件")
@@ -1800,7 +1803,11 @@ async def api_files_content(request: Request, fid: str, name: str = ""):
     if not path.is_file():
         raise HTTPException(404, "文件已被清理")
     download = request.query_params.get("download") in ("1", "true")
-    headers = {"Cache-Control": "private, max-age=600"}
+    # nosniff + 非图片强制下载：html/svg 这类可被传成可执行 MIME 的文本文件，
+    # 不能在站点源内被当页面渲染（存储型 XSS 面）。图片预览前端走 fetch+blob，不受影响。
+    headers = {"Cache-Control": "private, max-age=600", "X-Content-Type-Options": "nosniff"}
+    if item.get("kind") != "image":
+        download = True
     if download:
         # 展示名消毒后再进响应头（防引号/换行注入）
         safe = re.sub(r'[^\w一-鿿.（）()\- ]', "_", str(item.get("name") or "file"))[:80]

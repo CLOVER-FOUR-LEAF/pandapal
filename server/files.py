@@ -108,8 +108,8 @@ _PDF_MIN_TEXT = 40  # 少于这么多字符就认为"没有可提取文本"（�
 
 
 def _read_text_bytes(data: bytes) -> str:
-    """纯文本/代码：先按 UTF-8，失败再退 GBK（国内学生文档常见编码）。"""
-    for enc in ("utf-8", "utf-8-sig", "gb18030"):
+    """纯文本/代码：先按 UTF-8（含 BOM 变体），失败再退 GBK（国内学生文档常见编码）。"""
+    for enc in ("utf-8-sig", "utf-8", "gb18030"):
         try:
             return data.decode(enc)
         except UnicodeDecodeError:
@@ -374,7 +374,8 @@ def prompt_note(item: dict) -> str:
         w, h = item.get("width"), item.get("height")
         bits.append(f"图片 {w}×{h}" if w and h else "图片")
     elif item.get("text"):
-        bits.append(f"已提取 {len(item['text'])} 字正文")
+        chars = int(item.get("text_chars") or len(item["text"]))
+        bits.append(f"已提取 {chars} 字正文")
     if item.get("note"):
         bits.append(str(item["note"]))
     return "；".join(bits)
@@ -534,10 +535,15 @@ class FileStore:
         return next((i for i in self._load() if i.get("id") == key), None)
 
     def resolve(self, ids: list[str]) -> tuple[list[dict], list[str]]:
-        """按 id 取出附件（保持传入顺序）。返回 (命中列表, 失效的 id 列表)。"""
+        """按 id 取出附件（保持传入顺序）。返回 (命中列表, 失效的 id 列表)。
+
+        索引只读一次：逐个 get 会每条 id 重读重解析 index.json，附件一大就慢。
+        """
         found, missing = [], []
+        by_id = {i.get("id"): i for i in self._load()}
         for fid in ids or []:
-            item = self.get(fid)
+            key = str(fid or "").strip()
+            item = by_id.get(key) if re.fullmatch(r"[0-9a-f]{12,32}", key) else None
             if item:
                 found.append(item)
             else:
@@ -567,7 +573,7 @@ class FileStore:
             "created": item.get("created") or "",
             # 让前端知道"这份文件读出了什么"，而不是只显示一个文件名
             "has_text": bool(str(item.get("text") or "").strip()),
-            "chars": len(str(item.get("text") or "")),
+            "chars": int(item.get("text_chars") or len(str(item.get("text") or ""))),
             "note": item.get("note") or "",
             "width": item.get("width"),
             "height": item.get("height"),
@@ -590,6 +596,13 @@ class FileStore:
         ext = split_ext(name) or ("png" if kind == "image" else "bin")
         fid = os.urandom(8).hex()
         text, meta, note = extract(data, name, kind)
+        # 正文落盘要封顶：全文塞进 index.json 会让每次 list/get 都解析一大坨，
+        # 而注入反正只吃 FILE_TEXT_MAX_CHARS。原长记进 text_chars 供展示。
+        text_chars = len(text)
+        if text_chars > config.FILE_TEXT_STORE_CHARS:
+            text = text[: config.FILE_TEXT_STORE_CHARS]
+            note = (note + "；" if note else "") + \
+                f"正文较长，只保留了前 {config.FILE_TEXT_STORE_CHARS} 字"
         item = {
             "id": fid,
             "name": name,
@@ -599,6 +612,7 @@ class FileStore:
             "size": len(data),
             "created": _now_iso(),
             "text": text,
+            "text_chars": text_chars,
         }
         for key in ("width", "height", "pages", "sheets", "slides", "vision_ok"):
             if meta.get(key) is not None:
@@ -608,11 +622,16 @@ class FileStore:
         with write_lock(self.dir):
             self.dir.mkdir(parents=True, exist_ok=True)
             self.path_of(item).write_bytes(data)
-            items = [i for i in self._load() if i.get("id") != fid]
-            item["_seq"] = max([int(i.get("_seq") or 0) for i in items] + [0]) + 1
-            items.append(item)
-            items = self._prune(items)
-            atomic_write(self.index_path, json.dumps({"files": items}, ensure_ascii=False, indent=1))
+            try:
+                items = [i for i in self._load() if i.get("id") != fid]
+                item["_seq"] = max([int(i.get("_seq") or 0) for i in items] + [0]) + 1
+                items.append(item)
+                items = self._prune(items)
+                atomic_write(self.index_path, json.dumps({"files": items}, ensure_ascii=False, indent=1))
+            except Exception:
+                # 索引没落成就把刚写的字节收掉：不留不占配额的孤儿文件
+                self._drop_file(item)
+                raise
         return item
 
     def delete(self, fid: str) -> bool:

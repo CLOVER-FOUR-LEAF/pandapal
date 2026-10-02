@@ -174,6 +174,36 @@ def _anthropic_messages(rest: list[dict]) -> list[dict]:
     return out
 
 
+def _openai_messages(messages: list[dict]) -> list[dict]:
+    """把统一结构翻译成 OpenAI 的 messages：图片块转成 image_url + data URL。
+
+    不翻译直接透传会被端点 400 拒掉（{"type":"image"} 是 Anthropic 的格式）。
+    冷门类型同样如实说明，不静默丢图。
+    """
+    out = []
+    for msg in messages:
+        content = msg.get("content")
+        if not isinstance(content, list):
+            out.append(msg)
+            continue
+        parts = []
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") == "text":
+                parts.append({"type": "text", "text": str(part.get("text") or "")})
+            elif part.get("type") == "image":
+                mime = str(part.get("mime") or "image/png")
+                if mime not in _ANTHROPIC_IMAGE_MIME:
+                    parts.append({"type": "text", "text": f"（不支持的图片类型 {mime}，已跳过）"})
+                    continue
+                url = f"data:{mime};base64,{part.get('data') or ''}"
+                parts.append({"type": "image_url", "image_url": {"url": url}})
+        out.append({"role": msg.get("role", "user"),
+                    "content": parts or [{"type": "text", "text": "（这条消息没有可读内容）"}]})
+    return out
+
+
 def count_images(messages: list[dict]) -> int:
     n = 0
     for m in messages:

@@ -139,6 +139,9 @@ UPLOAD_MAX_TOTAL_BYTES = int(os.getenv("PANDA_UPLOAD_QUOTA_MB", "60")) * 1024 * 
 # 抽取出来的正文注入 prompt 时的预算（超了按字符截断并标注）
 FILE_TEXT_MAX_CHARS = 6000           # 单个文件注入上限
 FILE_TEXT_TOTAL_CHARS = 14000        # 一轮里所有文件合计上限
+# 正文进 index.json 前的落盘上限：抽取结果要复用不能丢，但一份 10MB 文档的全文
+# 塞索引里会让每次 list/get 都解析一大坨；注入本来也只吃 FILE_TEXT_MAX_CHARS。
+FILE_TEXT_STORE_CHARS = FILE_TEXT_MAX_CHARS * 2
 # 图片进模型前统一压到这个长边（视觉 token 与请求体大小都随分辨率涨）。
 # 1568 是主流视觉模型"再大也不涨精度"的甜点（Anthropic 长边上限 1568，OpenAI 按 512 切块），
 # 作业照里的小字在这个尺寸下才读得清；1280 时小字常糊。

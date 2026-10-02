@@ -25,10 +25,14 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 os.environ["PANDA_DATA_DIR"] = tempfile.mkdtemp(prefix="panda_files_")
+# pytest 单进程里别的测试文件可能已经导入过 server 包（沙箱不同）：先清掉再导入，
+# 否则 config 停在先导入者的目录上，本文件登录 admin 会拿不到账号而 403。
+for _m in [m for m in sys.modules if m == "server" or m.startswith("server.")]:
+    del sys.modules[_m]
 
 import httpx  # noqa: E402
 
-from server import config, files, llm  # noqa: E402
+from server import config, files, llm, main as main_mod  # noqa: E402
 from server.files import FileStore  # noqa: E402
 from server.main import app  # noqa: E402
 from server.store import fence_data  # noqa: E402
@@ -295,6 +299,16 @@ def test_injection_budget() -> None:
     record("budget_total", len(ctx) <= config.FILE_TEXT_TOTAL_CHARS + 600,
            f"len={len(ctx)} cap={config.FILE_TEXT_TOTAL_CHARS}")
 
+    # 正文落盘也要封顶：index.json 不存全文，原长记在 text_chars 里供展示
+    over = "字" * (config.FILE_TEXT_STORE_CHARS + 500)
+    big = store.save(over.encode("utf-8"), "超大.txt", "text/plain")
+    record("store_text_capped", len(big["text"]) == config.FILE_TEXT_STORE_CHARS
+           and big["text_chars"] == config.FILE_TEXT_STORE_CHARS + 500,
+           f"stored={len(big['text'])} chars={big['text_chars']}")
+    pub_big = store.public(big)
+    record("store_public_full_chars", pub_big["chars"] == config.FILE_TEXT_STORE_CHARS + 500,
+           str(pub_big.get("chars")))
+
 
 def test_multimodal_messages() -> None:
     msgs = [
@@ -325,6 +339,22 @@ def test_multimodal_messages() -> None:
     # 纯文本消息走原样，别被多模态改造影响
     plain = llm._anthropic_messages([{"role": "user", "content": "你好"}])
     record("anthropic_plain_text", plain == [{"role": "user", "content": "你好"}], str(plain))
+
+    # OpenAI 协议：system 原样透传，图片块翻成 image_url + data URL
+    op = llm._openai_messages(msgs)
+    record("openai_system_passthrough", op[0] == msgs[0] and op[1] == msgs[1], str(op[0]))
+    oblock = op[2]["content"]
+    record("openai_image_block",
+           oblock[0] == {"type": "text", "text": "这题怎么做"}
+           and oblock[1] == {"type": "image_url",
+                             "image_url": {"url": "data:image/jpeg;base64,QUJD"}},
+           str(oblock)[:80])
+    oodd = llm._openai_messages([{"role": "user", "content": [
+        {"type": "image", "data": "QUJD", "mime": "image/tiff"}]}])
+    record("openai_odd_mime_told", "不支持的图片类型" in str(oodd[0]["content"]),
+           str(oodd[0]["content"])[:50])
+    oplain = llm._openai_messages([{"role": "user", "content": "你好"}])
+    record("openai_plain_text", oplain == [{"role": "user", "content": "你好"}], str(oplain))
 
     record("tokens_counts_image", llm.estimate_tokens(msgs) > 800
            and llm.count_images(msgs) == 1)
@@ -404,6 +434,20 @@ def test_api_upload_flow() -> None:
         record("api_delete", r9.status_code == 200, f"status={r9.status_code}")
         r10 = await client.delete(f"/api/files/{fid2}?name={NAME}")
         record("api_delete_missing_404", r10.status_code == 404, f"status={r10.status_code}")
+
+        # 上传限频：配额挡的是磁盘，限频挡的是"脚本反复刷解析烧 CPU"
+        old_max = config.UPLOAD_MAX_PER_WINDOW
+        main_mod._UPLOAD_HITS.clear()
+        config.UPLOAD_MAX_PER_WINDOW = 1
+        try:
+            await client.post(f"/api/files?name={NAME}",
+                              files={"file": ("一.txt", b"1", "text/plain")})
+            rlim = await client.post(f"/api/files?name={NAME}",
+                                     files={"file": ("二.txt", b"2", "text/plain")})
+        finally:
+            config.UPLOAD_MAX_PER_WINDOW = old_max
+            main_mod._UPLOAD_HITS.clear()
+        record("api_upload_throttled", rlim.status_code == 429, f"status={rlim.status_code}")
     asyncio.run(api_case("files", body))
 
 
