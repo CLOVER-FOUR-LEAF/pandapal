@@ -85,6 +85,13 @@ async def _security_headers(request: Request, call_next):
 _background: set[asyncio.Task] = set()
 SECRET_PREFIX = "[[secret]]"
 
+# 确定性意图锚点：只要孩子明确说"我要/帮我 准备·办·参加·报名·写…"，就一定是
+# 要管家接手的一件事（new_affair），不靠分类模型的手感。"查/问/看"不在锚点里——
+# 那类消息交给 ROUTER 的规则去 chat + 工具轮，正是上一条规则要保住的。
+_ACTION_ANCHOR = re.compile(
+    r"(?:我要|我想|帮我|打算|计划|准备)(?:准备|办|参加|报名|写|安排|收拾|整理|买|订|做)"
+    r"|(?:帮我|我要)把.{0,8}(?:定下来|安排好|理清楚)")
+
 
 def _bg(task: asyncio.Task) -> None:
     _background.add(task)
@@ -749,6 +756,10 @@ async def _chat_stream(sess, raw_message: str, ctx: dict):
         intent, mood = cls["intent"], cls["mood"]
         if intent == "affair_update" and not cls.get("affair_id"):
             intent = "chat"  # 没指到具体事务的"汇报"按闲聊走，不再静默落入 chat 分支
+        if intent in ("chat", "explain") and _ACTION_ANCHOR.search(message):
+            # 确定性意图锚点：模型偶尔把"我要准备/帮我办"这种明显要接手的事
+            # 晃到闲聊——意图边界不能靠模型手感，补一刀拉回 new_affair
+            intent = "new_affair"
         last_turn["intent"] = intent
         # 契约 §5：mode 是第一个事件，mood 随 mode 一起下发
         mode = {"new_affair": "plan", "todo": "todo", "affair_update": "affair",

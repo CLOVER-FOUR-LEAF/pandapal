@@ -51,14 +51,22 @@ def _cleanup() -> None:
         shutil.rmtree(DATA_DIR / f"child_{name}", ignore_errors=True)
     try:
         profiles = json.loads(PROFILES.read_text(encoding="utf-8"))
-        if any(profiles.pop(n, None) is not None for n in TEMP_NAMES):
+        changed = False
+        for n in TEMP_NAMES:
+            if profiles.pop(n, None) is not None:
+                changed = True
+        if changed:
             PROFILES.write_text(
                 json.dumps(profiles, ensure_ascii=False, indent=2), encoding="utf-8")
     except (OSError, ValueError):
         pass
     try:
         users = json.loads(USERS.read_text(encoding="utf-8"))
-        if any(users.pop(n, None) is not None for n in TEMP_NAMES):
+        changed = False
+        for n in TEMP_NAMES:
+            if users.pop(n, None) is not None:
+                changed = True
+        if changed:
             USERS.write_text(
                 json.dumps(users, ensure_ascii=False, indent=2), encoding="utf-8")
     except (OSError, ValueError):
@@ -139,7 +147,14 @@ def post_sse(base: str, path: str, body: dict, token: str | None = None) -> list
 
 
 def get_sse(base: str, path: str, token: str | None = None) -> list[dict]:
-    """GET 版 SSE（晨报/问候的 ?stream=1）；请求失败返回空列表。"""
+    """GET 版 SSE（晨报/问候的 ?stream=1）；请求失败返回空列表。
+
+    urllib 只收 ASCII URL，query 里的中文（name=小豆）必须先百分号编码，
+    否则 UnicodeEncodeError 被下面 except 吞掉，流式接口看着就像"没事件"。
+    """
+    if "?" in path:
+        head, _, query = path.partition("?")
+        path = head + "?" + urllib.parse.quote(query, safe="=&%")
     req = urllib.request.Request(base + path)
     if token:
         req.add_header("Authorization", f"Bearer {token}")
@@ -353,9 +368,10 @@ def _run(base: str) -> int:
         st3, snap = get(base, "/api/graph/snapshot?name=小豆&view=child&until=2999-12", tk_child)
         st4, snap0 = get(base, "/api/graph/snapshot?name=小豆&view=child&until=2000-01", tk_child)
         st5, lg = get(base, "/api/logs?limit=5&offset=1", tk_admin)
+        # 传话筒是家长向的能力：孩子转发走聊天里的 relay intent，不直接调 /api/relay
         st6, rl = post_json(base, "/api/relay",
-                            {"name": "小豆", "direction": "child2teacher",
-                             "text": "老师我想再想想"}, tk_child)
+                            {"name": "小豆", "direction": "teacher2parent",
+                             "text": "老师今天表扬了小豆，说作业写得认真。"}, tk_parent)
         ok = (st1 == 200 and st2 == 200
               and pr.get("affair", {}).get("stage") == stage
               and st3 == 200 and bool(snap.get("nodes"))

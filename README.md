@@ -61,16 +61,17 @@ cp .env.example .env   # 然后填入你的 LLM_API_KEY 等
 | 结构化卡片合成 | `server/synth.py` |
 | 代办文书（"帮我写份自我介绍/发言稿"→LLM 真写全文→文稿卡+落盘 `drafts.json` 挂回事务） | `server/actions.py` `draft` |
 | 文件式记忆读写：轮后 LLM 抽取→topics/daily/MEMORY；单写锁+原子写 | `server/memory.py` |
-| 工具：本地赛事库 / wttr.in 天气 / 可选联网搜索 | `server/tools.py` |
+| 工具脚手架（声明式注册表，@tool 注册即接入 planner/executor/闲聊通道）：看时间 `now` / 本地赛事库 `race_lookup` / 交通参考 `transport_lookup` / wttr.in 天气 `weather` / 联网搜索 `web_search`（Tavily 兼容端点，未配置则必应网页解析兜底）/ 打开网页 `web_browse` | `server/tools.py` |
+| 闲聊直答的工具轮：启发式命中 → 调度器挑工具 → 结果注入 system → 流式回复（`tool` SSE 事件驱动前端工具条） | `server/main.py` `_tool_round` + `server/prompts.py` `TOOL_PICK` |
 | 记忆本页：主题分组+时间线+长期记忆 | `web/` + `GET /api/memory` |
 
-**降级不降真**：DAG 规划失败 → 单 LLM 直出卡片（跳过拆解展示，绝不跳过生成）；节点失败 → 标记后继续；搜索无 Key → 模型知识补位。
+**降级不降真**：DAG 规划失败 → 单 LLM 直出卡片（跳过拆解展示，绝不跳过生成）；节点失败 → 标记后继续；联网工具失败/没搜到 → 如实告诉孩子"没查到"，不编造结果。
 
 ## 五、大模型使用说明
 
 - 模型：由 `.env` 中 `LLM_MODEL` 指定（开发用 DeepSeek `deepseek-chat` 验证；兼容任意 OpenAI 协议端点）
 - 调用方式：`server/llm.py` 统一封装双协议客户端；每轮对话最多涉及 分类→生成→记忆抽取 三次调用
-- **赞助商 API 使用清单**：LLM API（见 `.env`，OpenAI 兼容/Anthropic 兼容）、天气 [wttr.in](https://wttr.in)（免费无需 Key）、可选搜索（Tavily 兼容端点，未配置则自动跳过）
+- **赞助商 API 使用清单**：LLM API（见 `.env`，OpenAI 兼容/Anthropic 兼容）、天气 [wttr.in](https://wttr.in)（免费无需 Key）、联网搜索（配置 `SEARCH_API_KEY`+`SEARCH_BASE_URL` 走 Tavily 兼容端点；未配置时用必应网页结果解析，无需 Key）
 
 ## 六、项目结构
 

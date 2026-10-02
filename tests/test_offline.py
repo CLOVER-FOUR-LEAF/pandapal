@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -30,7 +31,7 @@ for _m in [m for m in sys.modules if m == "server" or m.startswith("server.")]:
 
 import httpx  # noqa: E402
 
-from server import config, llm  # noqa: E402
+from server import config, llm, planner, tools  # noqa: E402
 from server import executor, main as _main, sessions as _sess_mod  # noqa: E402
 from server.main import app  # noqa: E402
 
@@ -444,6 +445,70 @@ async def _run(client: httpx.AsyncClient) -> None:
     record("exec_ancestor_scope",
            "结果#根" in ctx_s and "结果#甲支" in ctx_s and "结果#乙支" not in ctx_s,
            f"s_ctx={'根' if '结果#根' in ctx_s else '?'}/{'甲' if '结果#甲支' in ctx_s else '?'}/{'乙!' if '结果#乙支' in ctx_s else '乙ok'}")
+
+    # 9.5 工具脚手架：注册表 + now + 解析器 + 启发式（全部离线，不碰网络）
+    names = tools.names()
+    record("tools_registry",
+           {"now", "weather", "race_lookup", "transport_lookup",
+            "web_search", "web_browse"} <= names,
+           f"tools={sorted(names)}")
+    record("tools_planner_aligned",
+           planner.VALID_TOOLS == names | {"llm"},
+           f"VALID_TOOLS={sorted(planner.VALID_TOOLS)}")
+    now_out = await tools.dispatch("now", {}, tools.ToolCtx())
+    record("tool_now_format",
+           bool(re.search(r"现在是 \d{4}-\d{2}-\d{2} \d{2}:\d{2}，星期[一二三四五六日]",
+                          now_out)),
+           now_out[:40])
+    tz_out = await tools.dispatch("now", {"tz": "Asia/Shanghai"}, tools.ToolCtx())
+    bad_tz = await tools.dispatch("now", {"tz": "不存在的时区"}, tools.ToolCtx())
+    record("tool_now_tz",
+           "时区偏移" in tz_out and "不认得" in bad_tz,
+           f"tz={tz_out[:30]} bad={bad_tz[:20]}")
+    try:
+        await tools.dispatch("不存在的工具", {}, tools.ToolCtx())
+        unknown_ok = False
+    except KeyError:
+        unknown_ok = True
+    record("tool_unknown_raises", unknown_ok, "KeyError")
+    hits = tools._parse_bing(
+        '<li class="b_algo"><h2><a href="https://a.cn/x">结果一</a></h2>'
+        '<p>摘要一</p></li><li class="b_algo"><h2><a href="https://b.cn">结果二</a></h2></li>')
+    record("tool_bing_parse",
+           hits and hits[0]["title"] == "结果一" and hits[0]["url"].startswith("https://")
+           and len(hits) == 2,
+           str(hits)[:100])
+    rss_hits = tools._parse_bing_rss(
+        '<?xml version="1.0"?><rss><channel><item><title>条目甲</title>'
+        '<link>https://a.cn/1</link><description>描述甲&lt;b&gt;加粗&lt;/b&gt;</description></item>'
+        '<item><title>条目乙</title><link>https://b.cn/2</link></item></channel></rss>')
+    record("tool_bing_rss_parse",
+           rss_hits and rss_hits[0]["title"] == "条目甲" and len(rss_hits) == 2
+           and "加粗" in rss_hits[0]["snippet"],
+           str(rss_hits)[:100])
+    record("tool_bing_rss_badxml",
+           tools._parse_bing_rss("<not-xml") == [], "坏 XML 安静返回空")
+    title, body = tools._html_to_text(
+        "<html><head><title>测试页</title></head><body><h1>标题</h1>"
+        "<p>第一段</p><script>var a=1;</script><div>第二段</div></body></html>")
+    record("tool_html_extract",
+           title == "测试页" and "第一段" in body and "第二段" in body
+           and "var a" not in body,
+           f"title={title} body={body[:40]}")
+    record("tool_ssrf_guard",
+           tools._blocked_host("localhost") and tools._blocked_host("192.168.1.1")
+           and not tools._blocked_host("www.baidu.com"),
+           "localhost/内网拦、公网放")
+    need = [m for m in ("现在几点了", "帮我查一下西安天气", "搜一下报名时间",
+                        "打开 https://example.com")
+            if not tools.might_need(m)]
+    plain = [m for m in ("我有点紧张", "画了一页漫画给你看") if tools.might_need(m)]
+    record("tool_might_need", not need and not plain, f"漏判={need} 误判={plain}")
+    record("tool_describe",
+           tools.describe("web_search", {"query": "西客松"}) == "联网搜索「西客松」"
+           and tools.describe("transport_lookup", {"from_city": "威海", "to_city": "西安"})
+           == "查交通「威海→西安」",
+           tools.describe("transport_lookup", {"from_city": "威海", "to_city": "西安"}))
 
 
     # 10. 扩展端点：增长雷达 / 梦想 / 传话筒 / PATCH / 时间轴切片 / 日志分页 / 流式晨报问候

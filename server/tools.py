@@ -268,12 +268,43 @@ async def _search_tavily(query: str) -> list[dict] | None:
 
 
 async def _search_bing(query: str) -> list[dict]:
-    """零配置兜底：必应网页版 HTML 结果解析（DuckDuckGo 在国内网络常超时，不用它）。"""
+    """零配置兜底：必应 RSS 优先，HTML 解析兜底（DuckDuckGo 在国内网络常超时，不用它）。
+
+    bing 网页版 HTML 结构说改就改（2026-10 起 cn.bing.com 会跳到无结果标记的
+    JS 壳页）；`&format=rss` 是稳定的 XML 输出，优先走它。
+    """
+    try:
+        url = f"https://www.bing.com/search?q={quote(query)}&format=rss"
+        resp = await shared_client().get(url, headers=_UA, timeout=config.TOOL_TIMEOUT,
+                                         follow_redirects=True)
+        resp.raise_for_status()
+        hits = _parse_bing_rss(resp.text)
+        if hits:
+            return hits
+    except Exception:  # noqa: BLE001 RSS 挂了再试网页版，不行就空结果
+        pass
     url = f"https://cn.bing.com/search?q={quote(query)}&setlang=zh-Hans"
     resp = await shared_client().get(url, headers=_UA, timeout=config.TOOL_TIMEOUT,
                                      follow_redirects=True)
     resp.raise_for_status()
     return _parse_bing(resp.text[:_MAX_HTML_BYTES])
+
+
+def _parse_bing_rss(xml_text: str) -> list[dict]:
+    """从必应 RSS（format=rss）抓 <item>；XML 解析失败安静返回空列表。"""
+    try:
+        import xml.etree.ElementTree as ET
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:  # noqa: BLE001 解析失败当没结果
+        return []
+    hits = []
+    for item in root.findall(".//item"):
+        title = _plain_text(item.findtext("title") or "")
+        url = str(item.findtext("link") or "").strip()
+        snippet = _plain_text(item.findtext("description") or "")
+        if url.startswith("http") and title:
+            hits.append({"title": title, "url": url, "snippet": snippet[:150]})
+    return hits[:_SEARCH_HITS]
 
 
 def _parse_bing(html: str) -> list[dict]:
