@@ -53,7 +53,37 @@ def _validate(plan: dict) -> dict:
         for deps in pending.values():
             deps.difference_update(ready)
     plan["title"] = str(plan.get("title") or "筹备计划")
+    _drop_summary_tail(plan)
     return plan
+
+
+# 汇总类节点：卡片由 synth 统一生成，规划里再放一个只会多花一次 LLM 调用
+_SUMMARY_WORDS = ("汇总", "总结", "整理成", "整理一下", "给孩子的方案", "输出方案", "给一份完整")
+
+
+def _drop_summary_tail(plan: dict) -> None:
+    """剔除末尾那个纯汇总 llm 节点。
+
+    提示词已经要求不要生成，但模型并不总是听话（实测同一句话，有时出 4 个
+    纯干活节点、有时会自己加一个"汇总成给孩子的方案"），所以这里做确定性兜底。
+
+    判定同时看标题和 args.task：只认"汇总/总结/整理成"这类**聚合**措辞，
+    并要求它确实依赖了别的环节（>=2 个且过半），避免误删"错开课程并列出要
+    带的东西"这种虽然收尾、但标题里没有聚合词的真活节点。
+    """
+    nodes = plan.get("nodes") or []
+    if len(nodes) < 3:  # 只有两个节点时没什么可汇总的，宁可不动
+        return
+    last = nodes[-1]
+    if last.get("tool") != "llm":
+        return
+    blob = str(last.get("title") or "") + " " + str((last.get("args") or {}).get("task") or "")
+    if not any(w in blob for w in _SUMMARY_WORDS):
+        return
+    deps = set(last.get("depends_on") or [])
+    others = {n["id"] for n in nodes[:-1]}
+    if len(deps & others) >= 2 and len(deps & others) * 2 >= len(others):
+        nodes.pop()
 
 
 async def make_plan(store: MemoryStore, message: str, affairs_snapshot: dict | None = None) -> dict:
@@ -80,7 +110,8 @@ async def make_plan(store: MemoryStore, message: str, affairs_snapshot: dict | N
                     message=message,
                 )},
             ],
-            max_tokens=3000,
+            max_tokens=1200,  # 3-5 个节点的 JSON 足够。实测调小并不省时间：
+                               # 瓶颈是模型推理本身，不是输出长度，保留上限只是兜底防跑飞
             caller="planner",
         )
         return _validate(plan)

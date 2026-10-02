@@ -40,7 +40,8 @@ async def synthesize(store: MemoryStore, event: str, results: dict[str, str]) ->
                 results=results_text,
             )},
         ],
-        max_tokens=3000,
+        max_tokens=1800,  # 卡片 4-6 板块 × 2-4 条，1800 有 3 倍余量。
+                         # 调小 max_tokens 同样不省时间（瓶颈是推理不是输出长度）
         caller="synth",
     )
     return _normalize_card(data)

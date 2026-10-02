@@ -68,8 +68,9 @@ cp .env.example .env   # 然后填入你的 LLM_API_KEY 等
 
 ## 五、大模型使用说明
 
-- 模型：由 `.env` 中 `LLM_MODEL` 指定（开发用 DeepSeek `deepseek-chat` 验证；兼容任意 OpenAI 协议端点）
-- 调用方式：`server/llm.py` 统一封装双协议客户端；每轮对话最多涉及 分类→生成→记忆抽取 三次调用
+- 模型：由 `.env` 中 `LLM_MODEL` 指定（当前用 `grok-4.7`，走 OpenAI 兼容端点；兼容任意 OpenAI 协议端点，也支持 Anthropic Messages 协议）
+- 调用方式：`server/llm.py` 统一封装双协议客户端；一轮规划型对话是 分类→拆解→执行→整理 四段，加上轮后的记忆抽取，最多七八次调用
+- 单轮耗时提示：`planner` 与 `synth` 是最重的两段（各自几十秒），界面会在这两段显示「正在拆解要办的事…」「快好了，正在整理成方案…」，属正常等待
 - **赞助商 API 使用清单**：LLM API（见 `.env`，OpenAI 兼容/Anthropic 兼容）、天气 [wttr.in](https://wttr.in)（免费无需 Key）、可选搜索（Tavily 兼容端点，未配置则自动跳过）
 
 ## 六、项目结构
