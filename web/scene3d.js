@@ -605,35 +605,55 @@ function build(container, hiddenCanvas, OrbitControls, CSS2D, pandaMod, post) {
       pandaMod.useThree && pandaMod.useThree(THREE);
       const pScene = new THREE.Scene();
       if (envTex) pScene.environment = envTex;
-      pScene.add(new THREE.HemisphereLight(0xffffff, 0x2a3a34, 1.1));
-      const pk = new THREE.DirectionalLight(0xfff2dd, 1.7);
-      pk.position.set(3, 6, 8);
+      pScene.add(new THREE.HemisphereLight(0xf5f4ee, 0x68747b, 0.6));
+      const pk = new THREE.DirectionalLight(0xfff3e2, 1.8);
+      pk.position.set(-5.5, 7.5, 6);
+      pk.target.position.set(0, 3.2, 0);
+      pk.castShadow = true;
+      pk.shadow.mapSize.set(1024, 1024);
+      pk.shadow.camera.left = -5;
+      pk.shadow.camera.right = 5;
+      pk.shadow.camera.top = 5;
+      pk.shadow.camera.bottom = -5;
+      pk.shadow.camera.near = 1;
+      pk.shadow.camera.far = 24;
+      pk.shadow.normalBias = 0.035;
+      pk.shadow.bias = -0.0001;
+      pk.shadow.radius = 2.5;
+      renderer.shadowMap.enabled = true;
+      renderer.shadowMap.type = THREE.PCFShadowMap;
+      pScene.add(pk.target);
       pScene.add(pk);
-      const pkRim = new THREE.DirectionalLight(0x8fe0bc, 0.9);
-      pkRim.position.set(-4, 2, -5);
+      const pkFill = new THREE.DirectionalLight(0xe4edf4, 0.38);
+      pkFill.position.set(5, 3, 5);
+      pScene.add(pkFill);
+      const pkRim = new THREE.DirectionalLight(0xf7f3e9, 1.3);
+      pkRim.position.set(3, 6, -4);
       pScene.add(pkRim);
       const group = pandaMod.createPanda(THREE, { scale: 1 });
-      group.rotation.y = 0.38;
-      // 环境反射强度压低：夜景里只要一点点高光层次
-      if (envTex) group.traverse((o) => {
-        const ms = o.material ? (Array.isArray(o.material) ? o.material : [o.material]) : [];
-        for (const m of ms) if ("envMapIntensity" in m) m.envMapIntensity = 0.55;
-      });
+      group.rotation.y = 0.23;
       pScene.add(group);
       const box = new THREE.Box3().setFromObject(group);
       const size = box.getSize(new THREE.Vector3());
       const center = box.getCenter(new THREE.Vector3());
+      const contactTexture = canvasTex(128, (g, s) => {
+        const gradient = g.createRadialGradient(s / 2, s / 2, 0, s / 2, s / 2, s / 2);
+        gradient.addColorStop(0, "rgba(0,0,0,0.5)");
+        gradient.addColorStop(0.45, "rgba(0,0,0,0.25)");
+        gradient.addColorStop(1, "rgba(0,0,0,0)");
+        g.fillStyle = gradient;
+        g.fillRect(0, 0, s, s);
+      });
       const shadow = new THREE.Mesh(
-        new THREE.CircleGeometry(Math.max(size.x, size.z) * 0.55, 32),
-        new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.28, depthWrite: false })
+        new THREE.PlaneGeometry(5.4, 3.6),
+        new THREE.MeshBasicMaterial({ map: contactTexture, transparent: true, depthWrite: false })
       );
       shadow.rotation.x = -Math.PI / 2;
       shadow.position.set(center.x, box.min.y + 0.02, center.z);
-      shadow.scale.set(1, 0.7, 1);
       pScene.add(shadow);
-      const pCam = new THREE.PerspectiveCamera(28, 1, 0.1, 200);
-      const dist = (size.y * 1.35) / (2 * Math.tan((28 * Math.PI) / 360));
-      pCam.position.set(center.x, center.y + size.y * 0.12, center.z + dist);
+      const pCam = new THREE.PerspectiveCamera(25, 1, 0.1, 200);
+      const dist = (size.y * 1.22) / (2 * Math.tan((25 * Math.PI) / 360));
+      pCam.position.set(center.x, center.y + size.y * 0.045, center.z + dist);
       pCam.lookAt(center.x, center.y, center.z);
       R.panda = { mod: pandaMod, scene: pScene, cam: pCam, group, rect: { x: 0, y: 0, w: 0, h: 0, on: false } };
       pandaMod.setPandaMood(group, cfg.mood);
@@ -751,8 +771,10 @@ function observe(container) {
   for (const ob of R.observers) { try { ob.disconnect(); } catch (_) {} }
   R.observers.length = 0;
   if (typeof ResizeObserver !== "undefined") {
-    const ro = new ResizeObserver(() => { if (R) { measure(); updateRunning(); } });
+    const ro = new ResizeObserver(() => { if (R) { measure(); layoutPandaRect(); updateRunning(); } });
     ro.observe(container);
+    const bubble = container.id === "scene-canvas" && document.getElementById("panda-bubble");
+    if (bubble) ro.observe(bubble);
     R.observers.push(ro);
   } else {
     on(window, "resize", () => { measure(); updateRunning(); });
@@ -812,12 +834,15 @@ function layoutPandaRect() {
   const P = R.panda;
   if (!P) return;
   const r = P.rect;
-  r.on = R.w >= 380 && R.h >= 280;
-  const s = Math.round(clamp(R.h * 0.3, 96, 170));
-  r.w = Math.round(s * 0.82);
+  r.on = R.w >= 240 && R.h >= 220;
+  const bubble = R.container.id === "scene-canvas" && document.getElementById("panda-bubble");
+  const bubbleHeight = bubble && !bubble.classList.contains("hidden") ? bubble.offsetHeight : 0;
+  const bottom = bubbleHeight ? bubbleHeight + 28 : 12;
+  const s = Math.round(Math.min(clamp(R.h * 0.44, 140, 258), R.w * 0.58, Math.max(72, R.h - bottom - 48)));
+  r.w = Math.round(s * 0.88);
   r.h = s;
-  r.x = 10;
-  r.y = 8; // 距底部（WebGL 视口原点在左下）
+  r.x = 12;
+  r.y = bottom; // 距底部（WebGL 视口原点在左下），给问候气泡留位置
   P.cam.aspect = r.w / r.h;
   P.cam.updateProjectionMatrix();
 }
