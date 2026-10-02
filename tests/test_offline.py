@@ -23,10 +23,15 @@ sys.path.insert(0, str(ROOT))
 
 # 必须先于 server 包导入：config 在 import 时读 PANDA_DATA_DIR
 os.environ["PANDA_DATA_DIR"] = tempfile.mkdtemp(prefix="panda_offline_")
+# pytest 单进程里别的测试文件可能已经导入过 server 包（沙箱不同）：先清掉再导入，
+# 否则 config 停在先导入者的目录上，本文件的落盘断言会看错沙箱。
+for _m in [m for m in sys.modules if m == "server" or m.startswith("server.")]:
+    del sys.modules[_m]
 
 import httpx  # noqa: E402
 
 from server import config, llm  # noqa: E402
+from server import executor, main as _main, sessions as _sess_mod  # noqa: E402
 from server.main import app  # noqa: E402
 
 NAME = "test_离线"
@@ -311,7 +316,6 @@ async def _run(client: httpx.AsyncClient) -> None:
            any(isinstance(m, dict) and m.get("role") == "user" for m in hist_items)
            and secret_kept,
            f"entries={len(hist_items)} secret={secret_kept}")
-    from server import sessions as _sess_mod  # noqa: E402
     _sess_mod._sessions.clear()  # 模拟服务重启：内存会话清空，history.json 顶上
     await post(client, "/api/session", {"name": NAME})
     h = await get_json(client, f"/api/history{q}")
@@ -406,7 +410,6 @@ async def _run(client: httpx.AsyncClient) -> None:
     client.headers.pop("Authorization", None)
 
     # 9. executor 祖先作用域：并行分支的产物不掺进别的 LLM 节点的上下文
-    from server import executor, sessions as _sess_mod
     sess = await _sess_mod.login(NAME)
     seen: dict[str, str] = {}
 
@@ -515,7 +518,6 @@ async def _run(client: httpx.AsyncClient) -> None:
            f"csp={'y' if csp else 'n'} vendor_cache={cc[:36]}")
 
     # 12. XFF 信任收窄：回环/私网可信，公网/非法值不信
-    from server import main as _main  # noqa: E402
     record("xff_trust",
            _main._trusted_proxy("127.0.0.1") and _main._trusted_proxy("::1")
            and _main._trusted_proxy("192.168.1.5")

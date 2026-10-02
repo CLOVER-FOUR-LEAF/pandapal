@@ -9,8 +9,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ["PANDA_DATA_DIR"] = tempfile.mkdtemp(prefix="panda_sec_")
+# pytest 单进程里别的测试文件可能已经导入过 server 包（沙箱不同）：先清掉再导入，
+# 否则 auth/config 停在先导入者的目录上，token 落盘断言会看错沙箱。
+for _m in [m for m in sys.modules if m == "server" or m.startswith("server.")]:
+    del sys.modules[_m]
 
-from server import auth, main  # noqa: E402
+from server import auth, main, tools  # noqa: E402
 
 
 class _Req:
@@ -50,7 +54,6 @@ def test_hit_tables_hard_capped():
 
 def test_weather_city_quoted(monkeypatch):
     import asyncio
-    from server import tools
     seen = {}
 
     class _Resp:
