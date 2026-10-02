@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>PandaButler 熊猫管家</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<!-- 登录选档 -->
+<section id="login-view" class="view">
+  <div class="login-card">
+    <div id="login-panda" class="panda-holder"></div>
+    <h1>熊猫管家</h1>
+    <p class="slogan">从小用到大，最懂你的那个人</p>
+    <input id="login-name" type="text" maxlength="24" placeholder="告诉我你的名字" autocomplete="off">
+    <button id="login-btn">开始陪伴</button>
+    <p class="hint" id="login-hint"></p>
+  </div>
+</section>
+
+<!-- 主界面 -->
+<section id="main-view" class="view hidden">
+  <header class="topbar">
+    <span class="brand">🐼 熊猫管家</span>
+    <span id="child-name" class="child-name"></span>
+    <button id="memory-btn" title="记忆本">📖</button>
+  </header>
+
+  <div class="panda-stage">
+    <div id="main-panda" class="panda-holder"></div>
+    <div id="panda-bubble" class="panda-bubble hidden"></div>
+  </div>
+
+  <div id="chat" class="chat"></div>
+
+  <div id="chips" class="chips"></div>
+
+  <div class="inputbar">
+    <input id="msg-input" type="text" placeholder="和熊猫管家聊聊…" autocomplete="off">
+    <button id="send-btn">发送</button>
+  </div>
+</section>
+
+<!-- 记忆本 -->
+<section id="memory-view" class="view hidden">
+  <header class="topbar">
+    <button id="memory-back">← 返回</button>
+    <span class="brand">📖 记忆本</span>
+    <span></span>
+  </header>
+  <div class="memory-body">
+    <h3>长期记忆</h3>
+    <div id="memory-md" class="memory-md"></div>
+    <h3>主题</h3>
+    <div id="memory-topics"></div>
+    <h3>时间线</h3>
+    <div id="memory-daily"></div>
+  </div>
+</section>
+
+<script type="module" src="/static/app.js"></script>
+</body>
+</html>
