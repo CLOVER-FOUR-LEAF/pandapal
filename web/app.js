@@ -202,6 +202,9 @@ function countdownText(due) {
  * 2. 网络 + 视图切换 + Toast
  * ========================================================================== */
 
+/* 部署在子路径（如 /pandapal/）时，API 请求统一带上挂载前缀；根路径部署时为空串 */
+const BASE = location.pathname.replace(/\/+$/, "");
+
 async function api(path, opts) {
   let resp;
   try {
@@ -209,7 +212,7 @@ async function api(path, opts) {
     if (state.token) {
       opts.headers = { ...(opts.headers || {}), Authorization: `Bearer ${state.token}` };
     }
-    resp = await fetch(path, opts);
+    resp = await fetch(BASE + path, opts);
   } catch {
     throw new Error("网络好像断了，检查连接再试试～");
   }
@@ -850,7 +853,7 @@ async function openAffairDetail(aid) {
   const icsBtn = el("button", "btn-approve");
   icsBtn.type = "button";
   append(icsBtn, icon("i-cal"), document.createTextNode("导出日历"));
-  icsBtn.onclick = () => window.open(`/api/ics/${encodeURIComponent(aff.id)}?${q(state.name)}&token=${encodeURIComponent(state.token || "")}`, "_blank");
+  icsBtn.onclick = () => window.open(`${BASE}/api/ics/${encodeURIComponent(aff.id)}?${q(state.name)}&token=${encodeURIComponent(state.token || "")}`, "_blank");
   const closeBtn = el("button", "btn-reject", "关闭");
   closeBtn.type = "button";
   closeBtn.onclick = () => holder.wrap.classList.add("hidden");
@@ -922,6 +925,10 @@ function checkRow(item, index, cid) {
   const cb = el("input");
   cb.type = "checkbox";
   cb.checked = !!item.done;
+  if (state.authRole === "parent") {
+    cb.disabled = true;           // 家长只读：勾选权在孩子手里（服务端也会 403）
+    row.title = "家长视角只读";
+  }
   cb.onchange = () => toggleChecklist(cid, index, cb.checked, cb, row);
   append(row, cb, el("span", "check-text", item.text || ""));
   if (item.note) row.appendChild(el("span", "check-note", `引用记忆：${item.note}`));
@@ -943,25 +950,31 @@ async function toggleChecklist(cid, index, done, cb, row) {
 }
 
 function dagBlock(aff) {
-  const nodes = aff.plan && aff.plan.nodes
-    ? aff.plan.nodes
-    : (aff.linked_nodes || []).map((id, i) => ({
-        id, title: nodeLabel(id), depends_on: i === 0 ? [] : [aff.linked_nodes[0]], status: "done",
-      }));
-  if (!nodes.length) return el("div");
   const wrap = el("div");
-  wrap.appendChild(el("div", "drawer-sub", "DAG 回放"));
-  const dag = el("div", "dag");
-  const title = el("div", "dag-title");
-  title.appendChild(icon("i-board"));
-  title.appendChild(document.createTextNode(aff.plan && aff.plan.title ? aff.plan.title : `${aff.title || ""} 的执行链`));
-  dag.appendChild(title);
-  const names = {};
-  nodes.forEach((n) => (names[n.id] = n.title || n.id));
-  const box = el("div", "dag-nodes");
-  nodes.forEach((n) => box.appendChild(dagNodeRow(n, names, n.status || "done")));
-  dag.appendChild(box);
-  wrap.appendChild(dag);
+  const nodes = (aff.plan && aff.plan.nodes) || [];
+  if (nodes.length) {
+    // 真执行链：后端把 plan+节点终态存进了 affair，这里是回放而不是摆拍
+    wrap.appendChild(el("div", "drawer-sub", "DAG 回放"));
+    const dag = el("div", "dag");
+    const title = el("div", "dag-title");
+    title.appendChild(icon("i-board"));
+    title.appendChild(document.createTextNode(aff.plan.title || `${aff.title || ""} 的执行链`));
+    dag.appendChild(title);
+    const names = {};
+    nodes.forEach((n) => (names[n.id] = n.title || n.id));
+    const box = el("div", "dag-nodes");
+    nodes.forEach((n) => box.appendChild(dagNodeRow(n, names, n.status || "done")));
+    dag.appendChild(box);
+    wrap.appendChild(dag);
+    return wrap;
+  }
+  // 没有执行链存档时如实展示"关联记忆"，不把记忆节点串成假 DAG
+  const linked = aff.linked_nodes || [];
+  if (!linked.length) return wrap;
+  wrap.appendChild(el("div", "drawer-sub", "关联记忆"));
+  const box = el("div", "linked-nodes");
+  linked.forEach((id) => box.appendChild(el("span", "node-pill", nodeLabel(id))));
+  wrap.appendChild(box);
   return wrap;
 }
 
@@ -1640,6 +1653,7 @@ function drawGraph2D() {
 
 function filteredGraph() {
   const nodes = (state.graph.nodes || []).filter((n) => {
+    if (state.role === "parent" && n.private) return false; // 家长视角私密节点前端再滤一道
     if (state.filters.domain && n.domain !== state.filters.domain) return false;
     if (state.filters.status && n.status !== state.filters.status) return false;
     if (state.timeline && String(n.first_seen || "").slice(0, 7) > state.timeline) return false;
