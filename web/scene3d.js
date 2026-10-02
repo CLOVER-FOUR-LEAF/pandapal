@@ -1121,8 +1121,9 @@ function applyVisibility() {
 
 function applyTheme() {
   if (!R) return;
-  const th = THEMES[cfg.role] || THEMES.child;
-  R.scene.background = R.bgTex[cfg.role] || R.bgTex.child;
+  // 背景/雾/光照固定用同一套：角色只决定"看得到哪些节点"，不改场景明暗（否则切视角时整屏闪）
+  const th = THEMES.child;
+  R.scene.background = R.bgTex.child;
   R.scene.fog.color.setHex(th.fog);
   R.scene.fog.density = th.fogD;
   R.hemi.intensity = th.hemi;

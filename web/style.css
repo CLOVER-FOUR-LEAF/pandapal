@@ -81,8 +81,8 @@
   --topbar-h: 56px;
 }
 
-/* 家长视角：白天 */
-body[data-role="parent"] {
+/* 浅色主题：仅在显式设置 body[data-theme="light"] 时启用；角色切换不再改配色（曾导致页面间明暗乱跳） */
+body[data-theme="light"] {
   --bg-0: #eef2ef;
   --bg-1: #e4ebe6;
   --bg-2: #d9e3dc;
@@ -412,7 +412,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   border-color: var(--bamboo);
   box-shadow: 0 0 0 3px rgba(95, 211, 155, .15);
 }
-body[data-role="parent"] .text-input { background: #f2f6f3; }
+body[data-theme="light"] .text-input { background: #f2f6f3; }
 
 /* ---------------------------------------- 4 顶栏 / 导航 */
 .topbar {
@@ -433,7 +433,7 @@ body[data-role="parent"] .text-input { background: #f2f6f3; }
   background: rgba(95, 211, 155, .10);
   border: 1px solid rgba(95, 211, 155, .25);
 }
-body[data-role="parent"] .child-name { background: rgba(47, 156, 102, .10); }
+body[data-theme="light"] .child-name { background: rgba(47, 156, 102, .10); }
 .mode-badge {
   font-size: 11px; white-space: nowrap;
   padding: 3px 11px; border-radius: 999px;
@@ -471,8 +471,8 @@ body[data-role="parent"] .child-name { background: rgba(47, 156, 102, .10); }
   background: rgba(95, 211, 155, .10);
   border-color: rgba(95, 211, 155, .3);
 }
-body[data-role="parent"] .nav-btn[aria-current="page"],
-body[data-role="parent"] .nav-btn.active {
+body[data-theme="light"] .nav-btn[aria-current="page"],
+body[data-theme="light"] .nav-btn.active {
   background: rgba(47, 156, 102, .10);
 }
 
@@ -698,7 +698,7 @@ body[data-role="parent"] .nav-btn.active {
   background: rgba(255, 255, 255, .08);
   overflow: hidden;
 }
-body[data-role="parent"] .progress-track { background: rgba(24, 44, 36, .10); }
+body[data-theme="light"] .progress-track { background: rgba(24, 44, 36, .10); }
 .progress-fill { display: block; height: 100%; border-radius: inherit; background: var(--stage, var(--bamboo)); }
 .progress-num { font-size: 10.5px; color: var(--ink-dim); }
 
@@ -831,6 +831,10 @@ body[data-role="parent"] .progress-track { background: rgba(24, 44, 36, .10); }
 #chat .dag, #chat .card.plan-card, #chat .chip-row, #chat .action-receipt {
   margin-left: 40px;
 }
+#chat .chip-row .chip { max-width: 100%; white-space: normal; line-height: 1.5; }
+#chat .chip-row .chip:hover { transform: none; }
+#chat .msg.me { max-width: 82%; }
+#chat .md ol, #chat .md ul { padding-left: 1.2em; }
 
 /* 悄悄话标记 */
 .msg .secret-tag {
@@ -870,14 +874,14 @@ body[data-role="parent"] .progress-track { background: rgba(24, 44, 36, .10); }
   padding: .1em .42em; border-radius: 5px;
   background: rgba(255, 255, 255, .08); border: 1px solid var(--line);
 }
-body[data-role="parent"] .md code { background: rgba(24, 44, 36, .08); }
+body[data-theme="light"] .md code { background: rgba(24, 44, 36, .08); }
 .md pre {
   margin: .5em 0; padding: 10px 12px;
   border-radius: var(--r-sm);
   background: rgba(0, 0, 0, .28); border: 1px solid var(--line);
   overflow-x: auto;
 }
-body[data-role="parent"] .md pre { background: #eef4f0; }
+body[data-theme="light"] .md pre { background: #eef4f0; }
 .md pre code { background: none; border: none; padding: 0; font-size: 12px; }
 .md a { color: var(--bamboo); text-decoration: underline; text-underline-offset: 2px; }
 .md blockquote { margin: .4em 0; padding: 2px 10px; border-left: 3px solid var(--line-strong); color: var(--ink-2); }
@@ -919,12 +923,23 @@ body[data-role="parent"] .md pre { background: #eef4f0; }
   animation: live-pulse 1.1s ease-in-out infinite;
 }
 
+/* 快捷话题：单行横滑，不再三行换行挤占对话区；两端渐隐提示可滑 */
 #chips {
-  display: flex; gap: 6px; flex-wrap: wrap;
-  padding: 8px 12px 4px;
+  display: flex; gap: 6px; flex-wrap: nowrap;
+  overflow-x: auto; overflow-y: hidden;
+  padding: 8px 12px 6px;
   border-top: 1px solid var(--line);
+  scrollbar-width: none;
+  scroll-snap-type: x proximity;
+  -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 12px, #000 calc(100% - 24px), transparent 100%);
+          mask-image: linear-gradient(90deg, transparent 0, #000 12px, #000 calc(100% - 24px), transparent 100%);
 }
+#chips::-webkit-scrollbar { display: none; }
 #chips:empty { display: none; }
+#chips .chip { flex: none; white-space: nowrap; max-width: 260px; overflow: hidden; text-overflow: ellipsis; scroll-snap-align: start; }
+#chips .chip:hover { transform: none; }
+#chips .chip-due { color: var(--amber); border-color: rgba(240, 180, 95, .35); }
+#chips .chip-next { color: var(--bamboo); border-color: rgba(95, 211, 155, .3); }
 
 .inputbar {
   display: flex; align-items: center; gap: 8px;

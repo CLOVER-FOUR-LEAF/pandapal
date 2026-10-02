@@ -72,7 +72,7 @@ const ACTION_KIND = {
   reminder: "加提醒", checklist: "生成清单",
   parent_confirm: "请家长确认", ics: "导出日历",
 };
-const MODE_LABEL = { plan: "规划链", affair: "事务更新", relay: "传话筒", explain: "讲给你听", chat: "" };
+const MODE_LABEL = { plan: "规划链", todo: "拆解待办", affair: "事务更新", relay: "传话筒", explain: "讲给你听", chat: "" };
 
 const KIND_ICON = { travel: "i-planet", goal: "i-growth", health: "i-heart", interest: "i-spark", study: "i-book", habit: "i-clock", event: "i-cal" };
 
@@ -476,6 +476,7 @@ function resetUserUI() {
   const box = chatBox();
   if (box) box.innerHTML = '<p class="empty-hint">说一句「西客松我要准备啥」试试。</p>';
   const set = (sel, html) => { const n = $(sel); if (n) n.innerHTML = html; };
+  set("#chips", ""); // 快捷话题是上一个账号的上下文，清掉等新账号的 /api/suggest
   set("#briefing-card .panel-body", '<div class="skeleton skeleton-lines"></div>');
   set("#affair-board .panel-body", '<p class="empty-hint">管家正在整理事务…</p>');
   setText("#affair-board .panel-sub", "— 件在办");
@@ -1464,6 +1465,10 @@ function handleEvent(ev, ctx, dropTyping) {
       break;
     }
 
+    case "suggest":
+      renderChips(ev.chips || []);
+      break;
+
     case "card":
       dropTyping();
       addCard(ev.card);
@@ -2335,17 +2340,42 @@ async function loadMemory() {
  * 14. 快捷 chips / 语音 / 悄悄话
  * ========================================================================== */
 
-function renderChips() {
+let chipsReqSeq = 0;
+
+/** 快捷话题：开场由服务端按孩子当下的事务/截止/兴趣/时段生成（见 /api/suggest），每轮对话后换成 SSE suggest 下发的"下一步"。 */
+const CHIP_FALLBACK = ["帮我排一下今天要做的事", "跟你说说我今天的心情", "你能帮我做什么？"];
+
+async function renderChips(chips) {
   const box = $("#chips");
   if (!box) return;
+  let list = chips;
+  if (list) chipsReqSeq++; // 新一轮的 suggest 先到：作废还在路上的开场请求
+  if (!list) {
+    const seq = ++chipsReqSeq; // 换号/退出期间在途的旧响应直接丢弃
+    try {
+      const resp = await api(`/api/suggest?${q(state.name)}`);
+      if (seq !== chipsReqSeq) return;
+      list = ((await resp.json()) || {}).chips;
+    } catch { if (seq !== chipsReqSeq) return; list = null; }
+  }
+  if (!Array.isArray(list) || !list.length) list = CHIP_FALLBACK.map((text) => ({ text, kind: "fallback" }));
+  if (!box.dataset.wheel) {
+    box.dataset.wheel = "1"; // 桌面鼠标滚轮 → 横向滑动
+    box.addEventListener("wheel", (e) => {
+      if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) { box.scrollLeft += e.deltaY; e.preventDefault(); }
+    }, { passive: false });
+  }
   box.innerHTML = "";
-  ["西客松我要准备啥？", "我最近在攒钱", "我又想学钢琴了", "什么是复利呀？", "帮我安排下周的机器人课", "妈妈说我该早点睡"]
-    .forEach((c) => {
-      const b = el("button", "chip", c);
-      b.type = "button";
-      b.onclick = () => send(c);
-      box.appendChild(b);
-    });
+  list.forEach((c) => {
+    const text = typeof c === "string" ? c : c && c.text;
+    if (!text) return;
+    const b = el("button", `chip chip-${(c && c.kind) || "x"}`, text);
+    b.type = "button";
+    b.title = text;
+    b.onclick = () => send(text);
+    box.appendChild(b);
+  });
+  box.scrollLeft = 0;
 }
 
 function setupMic() {
@@ -2430,6 +2460,10 @@ function wireNav() {
     }
     if (key === "main" && state.authRole === "parent") {
       go("parent"); // 家长账号的"首页"是家长视图
+      return;
+    }
+    if (key === "main" && state.authRole === "admin" && state.role === "parent") {
+      toggleRole(); // 评委从家长视角回管家台：角色一并切回孩子，否则主界面带着家长过滤
       return;
     }
     go(key);

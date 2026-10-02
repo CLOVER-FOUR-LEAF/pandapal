@@ -1,9 +1,11 @@
-"""意图分类：闲聊直答 / 新事务 / 事务进展 / 转达 / 讲懂知识点，并识别情绪。"""
+"""意图分类：闲聊直答 / 新事务 / 多任务拆解 / 事务进展 / 转达 / 讲懂知识点，并识别情绪。"""
 from __future__ import annotations
+
+import re
 
 from . import llm, prompts
 
-_VALID_INTENTS = {"chat", "new_affair", "affair_update", "relay", "explain"}
+_VALID_INTENTS = {"chat", "new_affair", "todo", "affair_update", "relay", "explain"}
 _VALID_MOODS = {"happy", "sad", "nervous", "normal"}
 
 # LLM 不可用时的关键词保底
@@ -11,11 +13,23 @@ _NEW_HINTS = ("准备", "规划", "安排", "要带", "带什么", "怎么去", 
 _UPDATE_HINTS = ("买好了", "订好了", "搞定了", "做完了", "不去了", "取消了", "已经准备", "考完了", "好了吗")
 _RELAY_HINTS = ("转达", "告诉老师", "跟妈妈说", "跟爸爸说", "帮我告诉", "帮我转", "帮我跟", "传达", "和老师说")
 _EXPLAIN_HINTS = ("什么是", "什么意思", "为什么", "没听懂", "听不懂", "是什么", "怎么理解", "给我讲讲", "讲一下", "教我")
+# 多任务：一句话里出现 ≥2 个"待办片段"
+_TODO_HINTS = ("要交", "要写", "要做", "要去", "要准备", "要复习", "还要", "还得", "需要写", "需要做", "截止",
+               "ddl", "作业", "论文", "ppt", "复习", "文章", "报告", "作品")
+_TODO_SPLIT = re.compile(r"[，,；;。、！!？?\n]|然后|以及|另外|还有")
+
+
+def looks_like_todos(message: str) -> bool:
+    """确定性兜底：拆成片段后，含待办词的片段 ≥2 个就视为多任务。LLM 漏判时用它纠偏。"""
+    parts = [p for p in _TODO_SPLIT.split(message.lower()) if p.strip()]
+    return sum(1 for p in parts if any(h in p for h in _TODO_HINTS)) >= 2
 
 
 def _fallback(message: str) -> dict:
     if any(h in message for h in _RELAY_HINTS):
         intent = "relay"
+    elif looks_like_todos(message):
+        intent = "todo"
     elif any(h in message for h in _UPDATE_HINTS):
         intent = "affair_update"
     elif any(h in message for h in _NEW_HINTS):
@@ -40,6 +54,8 @@ async def classify(message: str, affairs_brief: str = "") -> dict:
         )
         intent = str(data.get("intent", "")).lower()
         mood = str(data.get("mood", "normal")).lower()
+        if intent in ("chat", "new_affair") and looks_like_todos(message):
+            intent = "todo"  # 一句话好几件待办却被判成闲聊/单事务：纠偏成拆解
         if intent in _VALID_INTENTS:
             aid = data.get("affair_id")
             return {

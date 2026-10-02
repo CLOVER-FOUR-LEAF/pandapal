@@ -38,7 +38,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import (actions, affairs, auth, config, executor, graph, llm, memory, planner,
-               prompts, router, sessions, synth)
+               prompts, router, sessions, suggest, synth)
 
 app = FastAPI(title="PandaButler", docs_url=None, redoc_url=None)
 
@@ -217,6 +217,14 @@ async def api_greeting(request: Request, name: str = ""):
     return {"text": text.strip(), "reminders": sess.store.due_reminders(), "name": name}
 
 
+@app.get("/api/suggest")
+async def api_suggest(request: Request, name: str = ""):
+    """开场快捷话题：按这个孩子当下的事务/截止/兴趣/时段动态生成。"""
+    _, sess = await _auth_session(request, "chat", name)
+    g, a, _ = _stores(sess)
+    return {"chips": suggest.opening(a, g, history_len=len(sess.history))}
+
+
 # ---------------------------------------------------------------- 晨间巡检
 
 def _left(d: dict) -> str:
@@ -379,6 +387,7 @@ async def _chat_stream(sess, raw_message: str):
         await queue.put(event)
 
     reply_text = ""
+    last_turn: dict = {"intent": "chat"}  # 本轮实际走了哪条链路，供⑤生成后续话题
     g_store, a_store, m_store = _stores(sess)
 
     async def work():
@@ -387,8 +396,9 @@ async def _chat_stream(sess, raw_message: str):
         intent, mood = cls["intent"], cls["mood"]
         if intent == "affair_update" and not cls.get("affair_id"):
             intent = "chat"  # 没指到具体事务的"汇报"按闲聊走，不再静默落入 chat 分支
+        last_turn["intent"] = intent
         # 契约 §5：mode 是第一个事件，mood 随 mode 一起下发
-        mode = {"new_affair": "plan", "affair_update": "affair",
+        mode = {"new_affair": "plan", "todo": "todo", "affair_update": "affair",
                 "relay": "relay", "explain": "explain"}.get(intent, "chat")
         await emit({"type": "mode", "mode": mode, "mood": mood})
 
@@ -402,6 +412,15 @@ async def _chat_stream(sess, raw_message: str):
             reply_text = out.get("message", "")
             await emit({"type": "relay_result", **out})
             return
+
+        if intent == "todo":
+            # 一句话好几件事：拆解 → 排先后 → 每件落成事务 → 卡片 + 截止提醒
+            try:
+                reply_text = await _triage(sess, a_store, message, hit, emit)
+                return
+            except Exception as e:  # noqa: BLE001 拆解失败不能哑火：退回闲聊通道照常回应
+                print(f"[triage] 拆解失败，退回闲聊：{e}")
+                last_turn["intent"] = "chat"
 
         if intent == "new_affair":
             # ② 接下这件事：建事务
@@ -502,6 +521,100 @@ async def _chat_stream(sess, raw_message: str):
                 gdata["secret"] = True
             if gdata.get("added_nodes") or gdata.get("added_edges") or gdata.get("updated"):
                 yield _sse({"type": "memory", **gdata})
+
+    # ⑤ 按这一轮的实际情况换一批快捷话题（确定性规则，不额外调 LLM）
+    if not is_secret:
+        try:
+            chips = suggest.followups(last_turn.get("intent", "chat"), a_store, g_store)
+            if chips:
+                yield _sse({"type": "suggest", "chips": chips})
+        except Exception as e:  # noqa: BLE001 话题建议是锦上添花
+            print(f"[suggest] 生成失败：{e}")
+
+
+def _now_text() -> str:
+    now = datetime.now()
+    return now.strftime("%Y-%m-%d %H:%M 星期") + "一二三四五六日"[now.weekday()]
+
+
+async def _triage(sess, a_store, message: str, hit: dict, emit) -> str:
+    """多任务拆解：一次 LLM 调用拆出每件事 → 先流式回应 → 事务逐件落看板 → 截止提醒 → 卡片。
+
+    返回本轮回复的纯文本（进历史和记忆沉淀）。事务按 existing_id / 标题去重，不重复建单。
+    """
+    mem = sess.store.active_block() or "（暂无记忆）"
+    if hit.get("block"):
+        mem = f"{mem}\n\n和这次相关的记忆：\n{hit['block']}"
+    data = await llm.complete_json(
+        [{"role": "system", "content": "你是任务拆解模块，只输出 JSON。"},
+         {"role": "user", "content": prompts.TRIAGE.format(
+             name=sess.name, now=_now_text(), memory_block=mem,
+             affairs_brief=_affairs_brief(a_store, limit=8), message=message)}],
+        max_tokens=1600, caller="triage")
+    tasks = [t for t in data.get("tasks") or [] if isinstance(t, dict) and str(t.get("title") or "").strip()]
+    if not tasks:
+        raise ValueError("没拆出任何事项")
+    tasks.sort(key=lambda t: int(t.get("priority") or 99) if str(t.get("priority") or "").isdigit() else 99)
+
+    # ① 先说人话（和闲聊一样逐段推，右栏立刻有回应）
+    reply = str(data.get("reply") or "").strip() or f"收到！一共 {len(tasks)} 件事，我帮你排好先后了。"
+    for i in range(0, len(reply), 12):
+        await emit({"type": "token", "text": reply[i:i + 12]})
+
+    # ② 拆解树：每件事一个节点，前端复用 DAG 树渲染
+    await emit({"type": "plan", "title": f"拆成 {len(tasks)} 件事",
+                "nodes": [{"id": f"t{i + 1}", "title": str(t["title"])[:16], "tool": "triage",
+                           "depends_on": []} for i, t in enumerate(tasks)]})
+
+    # ③ 逐件落成事务（已在看板上的就更新，不重复建）
+    linked = [n["id"] for n in hit.get("nodes", [])[:2]]
+    existing = {a["id"]: a for a in a_store.list()}
+    sections = []
+    for i, t in enumerate(tasks):
+        title = str(t["title"]).strip()[:16]
+        due = str(t.get("due") or "").strip() or None
+        steps = [str(s).strip() for s in t.get("steps") or [] if str(s).strip()][:4]
+        summary = "；".join(steps[:2]) or "管家帮你拆好了步骤"
+        aid = str(t.get("existing_id") or "").strip()
+        if aid not in existing:  # LLM 没指认已有事务时，只按完全相同的标题去重（模糊匹配会张冠李戴）
+            aid = next((a["id"] for a in existing.values() if a["title"] == title), "")
+        await emit({"type": "node", "id": f"t{i + 1}", "title": title, "status": "running"})
+        try:
+            if aid:
+                patch = {"summary": summary}
+                if due:
+                    patch["due"] = due
+                affair = a_store.update(aid, patch, actor="child", note=f"又提起：{title}")
+                await emit({"type": "affair", "action": "update", "affair": affair})
+            else:
+                affair = a_store.create({
+                    "title": title, "kind": str(t.get("kind") or "goal"), "stage": "planning",
+                    "owner_next": "child", "summary": summary, "due": due,
+                    "linked_nodes": linked, "progress": {"mode": "none", "value": 0},
+                    "actor": "butler", "source": "triage",
+                })
+                existing[affair["id"]] = affair
+                await emit({"type": "affair", "action": "create", "affair": affair})
+            if affair.get("due"):
+                res = await actions.run_action(sess.dir, affair, {
+                    "kind": "reminder", "text": f"截止：{title}", "at": affair["due"]})
+                await emit({"type": "action", **res})
+            detail = (f"截止 {affair['due']}" if affair.get("due") else "未定截止") + \
+                     (f" · {steps[0]}" if steps else "")
+            await emit({"type": "node", "id": f"t{i + 1}", "title": title, "status": "done", "detail": detail})
+        except Exception as e:  # noqa: BLE001 一件落单失败不影响其它几件
+            print(f"[triage] 事务落盘失败：{e}")
+            await emit({"type": "node", "id": f"t{i + 1}", "title": title, "status": "error"})
+        head = f"{i + 1}. {title}" + (f"（{due}）" if due else "")
+        sections.append({"heading": head, "items": steps or ["先花 10 分钟想清楚第一步"]})
+
+    schedule = [str(x) for x in data.get("schedule") or [] if str(x).strip()][:5]
+    if schedule:
+        sections.append({"heading": "今明两天这样排", "items": schedule})
+    card = {"title": "帮你理了理手上的事", "emoji": "🗂", "sections": sections[:8],
+            "closing": str(data.get("tip") or "").strip()}
+    await emit({"type": "card", "card": card})
+    return reply + "\n" + synth.card_to_text(card)
 
 
 async def _open_affair(sess, a_store, message: str, hit: dict) -> dict | None:
