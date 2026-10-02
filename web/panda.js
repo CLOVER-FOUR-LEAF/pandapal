@@ -154,8 +154,9 @@ export function lookAt(svg, x, y) {
   svg.style.setProperty("--look-y", `${dy.toFixed(2)}px`);
 }
 
-/** 登录页互动：鼠标跟随 + 输入用户名时盯着看 + 输密码捂眼（显示密码时偷看）。 */
-export function attachLoginInteractions(svg, { nameInput, passInput, isPeek } = {}) {
+/** 登录页互动：鼠标跟随 + 输入用户名时盯着看 + 输密码捂眼（显示密码时偷看）。
+ *  passInputs 支持多个密码框（登录/注册/找回密码面板共用一只熊猫）。 */
+export function attachLoginInteractions(svg, { nameInput, passInput, passInputs, isPeek } = {}) {
   if (!svg) return;
   const reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   let focusMode = "";
@@ -179,9 +180,11 @@ export function attachLoginInteractions(svg, { nameInput, passInput, isPeek } = 
     nameInput.addEventListener("blur", () => { focusMode = ""; lookAt(svg, null); });
   }
   const syncPass = () => setMood(svg, isPeek && isPeek() ? "peek" : "shy");
-  if (passInput) {
-    passInput.addEventListener("focus", () => { focusMode = "pass"; syncPass(); });
-    passInput.addEventListener("blur", () => { focusMode = ""; setMood(svg, "normal"); lookAt(svg, null); });
-  }
+  const passFields = passInputs || (passInput ? [passInput] : []);
+  passFields.forEach((p) => {
+    if (!p) return;
+    p.addEventListener("focus", () => { focusMode = "pass"; syncPass(); });
+    p.addEventListener("blur", () => { focusMode = ""; setMood(svg, "normal"); lookAt(svg, null); });
+  });
   return { syncPass: () => { if (focusMode === "pass") syncPass(); } };
 }

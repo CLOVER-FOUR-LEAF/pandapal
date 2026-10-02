@@ -19,28 +19,6 @@
       "created": "2026-10-02T09:34:00",
       "decided_at": null,
       "reply": ""
-    },
-    {
-      "id": "pi_6b976a0e",
-      "affair_id": "西客松比赛我要准备啥",
-      "title": "西客松比赛我要准备啥：需要家长帮忙确认的事",
-      "detail": "管家已把行程与清单准备好，请家长确认交通与报名相关事项。",
-      "status": "pending",
-      "created": "2026-10-02T16:17:41",
-      "decided_at": null,
-      "reply": "",
-      "action": ""
-    },
-    {
-      "id": "pi_e52daedc",
-      "affair_id": "西客松比赛我要准备啥_2",
-      "title": "西客松比赛我要准备啥：需要家长帮忙确认的事",
-      "detail": "管家已把行程与清单准备好，请家长确认交通与报名相关事项。",
-      "status": "pending",
-      "created": "2026-10-02T16:27:13",
-      "decided_at": null,
-      "reply": "",
-      "action": ""
     }
   ]
 }

@@ -138,6 +138,11 @@ def _do_reminder(child_dir: Path, affair: dict, action: dict) -> dict:
     items = read_json(_reminders_path(child_dir), None)
     if not isinstance(items, list):
         items = []
+    # 幂等：同文同时间的提醒不重复入库——同一事务重跑规划不该刷一屏重复提醒
+    for it in items:
+        if isinstance(it, dict) and it.get("text") == text and it.get("time") == time_value:
+            return _result("reminder", True, f"这条提醒已在（{human}），不重复添加",
+                           {"reminder": it, "count": len(items), "dedup": True})
     taken = {str(i.get("id")) for i in items if isinstance(i, dict)}
     item = {"id": _new_rid(taken), "text": text, "time": time_value, "fired": False}
     items.append(item)
@@ -174,6 +179,12 @@ def _do_parent_confirm(store: AffairStore, affair: dict, action: dict) -> dict:
     """追加一条待家长确认的事（status=pending）。"""
     title = str(action.get("title") or action.get("text") or affair.get("title") or "需要家长确认").strip()
     detail = str(action.get("detail") or affair.get("summary") or "").strip()
+    # 幂等：同一事务的同标题请求若还在 pending，不重复塞家长收件箱
+    for it in store.inbox():
+        if (it.get("status") == "pending" and it.get("title") == title
+                and it.get("affair_id") == affair.get("id")):
+            return _result("parent_confirm", True, f"这条已在收件箱等确认：{title}",
+                           {"item": it, "dedup": True})
     item = store.add_inbox(title, detail, affair.get("id"), extra={"action": str(action.get("text") or "")})
     return _result("parent_confirm", True, f"已送到家长收件箱等确认：{title}", {"item": item})
 

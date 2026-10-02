@@ -1,9 +1,12 @@
 """PandaButler Server：FastAPI 应用与 API 端点。
 
 端点：
-  POST /api/auth/login   用户名+密码登录 → Bearer token（未知名自动注册孩子档）
-  POST /api/auth/logout  注销 token
-  GET  /api/auth/me      当前登录信息（刷新恢复会话用）
+  POST /api/auth/login    用户名+密码登录 → Bearer token（未知名自动注册孩子档）
+  POST /api/auth/register 显式注册（孩子/家长 + 密保问题）→ 注册即登录
+  GET  /api/auth/question 取账号密保问题（找回密码第一步）
+  POST /api/auth/reset    密保答案核对 → 重置密码并吊销旧 token
+  POST /api/auth/logout   注销 token
+  GET  /api/auth/me       当前登录信息（刷新恢复会话用）
   POST /api/session    登录选档：名字 → 绑定 data/{child}/ 档案目录
   GET  /api/greeting   开场主动问候（记忆驱动生成）
   GET  /api/briefing   管家晨间巡检（事务 + 临近截止 + 主动建议）
@@ -51,6 +54,16 @@ async def _lifespan(_app: FastAPI):
 
 app = FastAPI(title="PandaButler", docs_url=None, redoc_url=None, lifespan=_lifespan)
 
+
+@app.middleware("http")
+async def _security_headers(request: Request, call_next):
+    resp = await call_next(request)
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["Referrer-Policy"] = "same-origin"
+    resp.headers["X-Frame-Options"] = "DENY"
+    return resp
+
+
 _background: set[asyncio.Task] = set()
 SECRET_PREFIX = "[[secret]]"
 
@@ -62,6 +75,21 @@ def _bg(task: asyncio.Task) -> None:
 
 class AuthReq(BaseModel):
     username: str = Field(min_length=1, max_length=24)
+    password: str = Field(min_length=1, max_length=64)
+
+
+class RegisterReq(BaseModel):
+    username: str = Field(min_length=1, max_length=24)
+    password: str = Field(min_length=1, max_length=64)
+    role: str = Field(default="child", pattern="^(child|parent)$")
+    child: str = Field(default="", max_length=24)  # 家长账号要绑定的孩子登录名
+    question: str = Field(default="", max_length=60)
+    answer: str = Field(default="", max_length=60)
+
+
+class ResetReq(BaseModel):
+    username: str = Field(min_length=1, max_length=24)
+    answer: str = Field(default="", max_length=60)
     password: str = Field(min_length=1, max_length=64)
 
 
@@ -90,7 +118,7 @@ class ChecklistReq(BaseModel):
 class InboxReq(BaseModel):
     name: str = Field(default="", max_length=24)
     action: str = Field(pattern="^(approve|reject)$")
-    reply: str = ""
+    reply: str = Field(default="", max_length=1000)
 
 
 class RelayReq(BaseModel):
@@ -118,11 +146,17 @@ async def _get_session(name: str):
 # ---------------------------------------------------------------- 鉴权
 
 def _token(request: Request) -> str:
-    """Bearer 头优先；?token= 兜底给 window.open 下载（ics）这类不能带头的场景。"""
+    """Bearer 头优先；?token= 只放行 ics 下载（window.open 带不了头）。
+
+    其它端点不收 query token——URL 会进浏览器历史、反代 access log、
+    Referer，token 漏出去等于账号送出去。
+    """
     h = request.headers.get("authorization", "")
     if h.lower().startswith("bearer "):
         return h[7:].strip()
-    return request.query_params.get("token", "")
+    if request.url.path.startswith("/api/ics/"):
+        return request.query_params.get("token", "")
+    return ""
 
 
 def _user(request: Request) -> dict:
@@ -167,16 +201,8 @@ def _login_throttle(ip: str) -> bool:
     return ok
 
 
-@app.post("/api/auth/login")
-async def api_auth_login(request: Request, req: AuthReq):
-    ip = request.client.host if request.client else "-"
-    if not _login_throttle(ip):
-        raise HTTPException(429, "尝试太频繁，歇一分钟再来")
-    try:
-        # PBKDF2 十多万次迭代要跑几十上百毫秒，挪出事件循环免得卡住别人的 SSE 流
-        res = await asyncio.to_thread(auth.login, req.username, req.password)
-    except ValueError as e:
-        raise HTTPException(401, str(e))
+async def _auth_response(res: dict) -> dict:
+    """登录/注册共用的响应载荷：token + 账号信息 + 绑定档案名（顺带预热会话）。"""
     user = res["user"]
     sess = await _get_session(user["child"])
     return {
@@ -187,6 +213,80 @@ async def api_auth_login(request: Request, req: AuthReq):
         "name": sess.name,
         "is_new": res["is_new"],
     }
+
+
+def _client_ip(request: Request) -> str:
+    """真实客户端 IP：nginx 反代后 client.host 全是回环地址，取 X-Forwarded-For 首跳。"""
+    fwd = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+    return fwd or (request.client.host if request.client else "-")
+
+
+def _throttled(request: Request) -> None:
+    if not _login_throttle(_client_ip(request)):
+        raise HTTPException(429, "尝试太频繁，歇一分钟再来")
+
+
+_CHAT_HITS: dict[str, list[float]] = {}
+_CHAT_MAX, _CHAT_WIN = 30, 300  # 每账号 5 分钟 30 条
+
+
+def _chat_throttle(key: str) -> bool:
+    """聊天按账号限频——自动注册零门槛，没有它公网上 API Key 会被刷爆。"""
+    now = time.monotonic()
+    hits = [t for t in _CHAT_HITS.get(key, []) if now - t < _CHAT_WIN]
+    ok = len(hits) < _CHAT_MAX
+    if ok:
+        hits.append(now)
+    _CHAT_HITS[key] = hits
+    if len(_CHAT_HITS) > 500:
+        for k in [k for k, v in _CHAT_HITS.items() if not v or now - v[-1] >= _CHAT_WIN]:
+            _CHAT_HITS.pop(k, None)
+    return ok
+
+
+@app.post("/api/auth/login")
+async def api_auth_login(request: Request, req: AuthReq):
+    _throttled(request)
+    try:
+        # PBKDF2 十多万次迭代要跑几十上百毫秒，挪出事件循环免得卡住别人的 SSE 流
+        res = await asyncio.to_thread(auth.login, req.username, req.password)
+    except ValueError as e:
+        raise HTTPException(401, str(e))
+    return await _auth_response(res)
+
+
+@app.post("/api/auth/register")
+async def api_auth_register(request: Request, req: RegisterReq):
+    _throttled(request)
+    try:
+        res = await asyncio.to_thread(
+            auth.register, req.username, req.password, req.role,
+            req.child, req.question, req.answer)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return await _auth_response(res)
+
+
+@app.get("/api/auth/question")
+async def api_auth_question(request: Request, username: str = ""):
+    """找回密码第一步：按用户名取密保问题；recoverable=false 表示没设过密保。"""
+    _throttled(request)
+    try:
+        return await asyncio.to_thread(auth.security_question, username)
+    except KeyError:
+        raise HTTPException(404, "没有这个账号，先去注册吧")
+
+
+@app.post("/api/auth/reset")
+async def api_auth_reset(request: Request, req: ResetReq):
+    """找回密码第二步：密保答案核对通过即重置，旧 token 全部作废。"""
+    _throttled(request)
+    try:
+        await asyncio.to_thread(
+            auth.reset_password, req.username, req.answer, req.password)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True}
 
 
 @app.post("/api/auth/logout")
@@ -482,10 +582,10 @@ async def _chat_stream(sess, raw_message: str, ctx: dict):
                 last_turn["intent"] = "chat"
 
         if intent == "new_affair":
-            # ② 接下这件事：建事务
-            affair = await _open_affair(sess, a_store, message, hit)
+            # ② 接下这件事：建事务（或认领已存在的同题事务，不重复开单）
+            affair, created = await _open_affair(sess, a_store, message, hit)
             if affair:
-                await emit({"type": "affair", "action": "create",
+                await emit({"type": "affair", "action": "create" if created else "update",
                             "affair": await asyncio.to_thread(a_store.get, affair["id"])})
             try:
                 snapshot = await asyncio.to_thread(a_store.snapshot)
@@ -493,6 +593,13 @@ async def _chat_stream(sess, raw_message: str, ctx: dict):
             except planner.PlanError:
                 plan = None
             if plan:
+                if created and affair:
+                    # 事务名用规整后的计划名，不拿用户原句切片当标题；
+                    # 存量事务的标题不动——那是用户/管家已经叫顺了的名字
+                    affair = await asyncio.to_thread(
+                        a_store.update, affair["id"], {"title": plan["title"][:18]},
+                        actor="butler", note="定下事务名")
+                    await emit({"type": "affair", "action": "update", "affair": affair})
                 await emit({
                     "type": "plan", "title": plan["title"],
                     "nodes": [{"id": n["id"], "title": n["title"], "tool": n["tool"],
@@ -711,16 +818,37 @@ async def _triage(sess, a_store, message: str, hit: dict, emit) -> str:
     return reply + "\n" + synth.card_to_text(card)
 
 
-async def _open_affair(sess, a_store, message: str, hit: dict) -> dict | None:
-    """把一句需求变成一个事务（不额外调 LLM：用消息与前几个命中节点拼出事务）。"""
+def _flat(text: str) -> str:
+    """标题归一化：去标点空白，只留文字，用来比"是不是同一件事"。"""
+    return re.sub(r"[^\w一-鿿]+", "", text or "")
+
+
+async def _open_affair(sess, a_store, message: str, hit: dict) -> tuple[dict | None, bool]:
+    """把一句需求变成一个事务；返回 (事务, 是否新建)。
+
+    同一批记忆支撑的事不重复建单：recall 命中的节点若已挂在某个事务上，
+    就直接认领它——"西客松要准备啥"和"西客松行李清单"不该是两个事务。
+    """
     try:
-        linked = [n["id"] for n in hit["nodes"][:3]]
+        nodes = hit.get("nodes") or []
+        linked = [n["id"] for n in nodes[:3]]
+        hit_ids = {n["id"] for n in nodes}
+        # 先落个短标题占位，规划成功后由调用方换成 plan["title"]
         title = re.sub(r"[，。！？!?~～\s]+", "", message)[:18] or "新的事"
         snapshot = await asyncio.to_thread(a_store.list)
-        # 同一件事已在看板上就不重复建
+        msg_flat = _flat(message)
+        best, best_score = None, 0
         for it in snapshot:
-            if it["title"][:6] and it["title"][:6] in message:
-                return None
+            if it.get("stage") == "done":
+                continue
+            score = 2 * len(hit_ids & set(it.get("linked_nodes") or []))
+            t = _flat(it.get("title"))
+            if len(t) >= 4 and (t[:6] in msg_flat or msg_flat[:6] in t):
+                score += 3
+            if score > best_score:
+                best, best_score = it, score
+        if best is not None:
+            return best, False
         affair = await asyncio.to_thread(a_store.create, {
             "title": title,
             "kind": "event",
@@ -732,10 +860,10 @@ async def _open_affair(sess, a_store, message: str, hit: dict) -> dict | None:
             "log": [{"ts": datetime.now().isoformat(timespec="seconds"), "actor": "butler",
                      "text": f"接下这件事：{message[:40]}"}],
         })
-        return affair
+        return affair, True
     except Exception as e:  # noqa: BLE001 建事务失败不影响出方案
         print(f"[affair] 创建失败：{e}")
-        return None
+        return None, False
 
 
 async def _execute_actions(sess, a_store, affair: dict, card: dict, message: str, emit) -> None:
@@ -785,7 +913,9 @@ async def _execute_actions(sess, a_store, affair: dict, card: dict, message: str
 
 @app.post("/api/chat")
 async def api_chat(request: Request, req: ChatReq):
-    _, sess = await _auth_session(request, "chat", req.name)
+    user, sess = await _auth_session(request, "chat", req.name)
+    if not _chat_throttle(user["username"]):
+        raise HTTPException(429, "说得太快啦，喝口水歇五分钟再聊")
     try:
         await asyncio.wait_for(sess.lock.acquire(), timeout=0.3)
     except asyncio.TimeoutError:
@@ -898,10 +1028,12 @@ async def api_ics(request: Request, aid: str, name: str = ""):
         ics = await asyncio.to_thread(a.ics, aid)
     except KeyError:
         raise HTTPException(404, "事务不存在")
+    # 事务 id 进 Content-Disposition 文件名前消毒，防引号/换行注入响应头
+    safe = re.sub(r"[^\w一-鿿.-]", "_", aid)[:40] or "affair"
     return PlainTextResponse(
         ics,
         media_type="text/calendar; charset=utf-8",
-        headers={"Content-Disposition": f'attachment; filename="{aid}.ics"'},
+        headers={"Content-Disposition": f'attachment; filename="{safe}.ics"'},
     )
 
 

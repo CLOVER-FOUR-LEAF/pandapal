@@ -17,6 +17,7 @@
 //   spawnPlanSatellites([{id,title,depends_on}]) / setPlanNode(id,status) / clearPlanSatellites()
 //   focusNode(id) / focusDomain(key)
 //   setPandaMood(mood)
+//   setTheme("dark"|"light")            跟随界面深浅色
 //   resize() / disposeScene() / isSceneReady()
 
 // ============================================================
@@ -47,9 +48,26 @@ const FOV = 45;
 const IDLE_RESUME_MS = 20000;
 const RECALL_MS = 3200;
 
+// 场景明暗只跟界面主题走（key 是 "dark"/"light"，不是角色）——
+// 角色只决定"看得到哪些节点"，不改场景明暗（否则切视角时整屏闪）。
+// 浅色底上 AdditiveBlending 只会更亮、等于隐形，additive:false 时统一换 NormalBlending。
 const THEMES = {
-  child: { top: "#0b1a1f", bottom: "#10302a", glow: "rgba(63,174,116,0.16)", fog: 0x0d2224, fogD: 0.014, hemi: 0.85, edge: 0.34 },
-  parent: { top: "#12303a", bottom: "#1a4a3e", glow: "rgba(120,210,170,0.20)", fog: 0x173a3a, fogD: 0.011, hemi: 1.15, edge: 0.42 },
+  dark: {
+    top: "#0b1a1f", bottom: "#10302a", glow: "rgba(63,174,116,0.16)",
+    fog: 0x0d2224, fogD: 0.014, hemi: 0.85, hemiGround: 0x0b1a1f,
+    edge: 0.34, additive: true, bloom: 0.62,
+    dust: 0xa6e3c8, dustOp: 0.55, core: 0x7fd8ae, coreOp: 0.16,
+    disc: BAMBOO, discOp: 0.22, circle: 0x8fd9b6, circleOp: 0.10,
+    spoke: 0x9fd9bf, spokeOp: 0.13,
+  },
+  light: {
+    top: "#edf4ee", bottom: "#c6ddcd", glow: "rgba(72,160,110,0.22)",
+    fog: 0xd8e8dc, fogD: 0.016, hemi: 1.35, hemiGround: 0x9db8a8,
+    edge: 0.42, additive: false, bloom: 0.18,
+    dust: 0x4a9070, dustOp: 0.45, core: 0x3f9e6e, coreOp: 0.30,
+    disc: 0x3f9e6e, discOp: 0.16, circle: 0x4a9a72, circleOp: 0.16,
+    spoke: 0x4a9a72, spokeOp: 0.20,
+  },
 };
 
 const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
@@ -69,6 +87,7 @@ const str = (x) => (x == null ? "" : String(x));
 const cfg = {
   graph: { nodes: [], edges: [] },
   role: "child",
+  theme: "dark",
   timeline: null,
   filter: { domain: "", status: "" },
   onClick: null,
@@ -116,6 +135,14 @@ const CSS = `
 .s3d-tip-lock::before{content:"";position:absolute;left:0;top:-6px;width:4px;height:5px;border:1.5px solid currentColor;border-bottom:0;border-radius:4px 4px 0 0}
 @keyframes s3d-in{from{opacity:0;filter:blur(2px)}to{opacity:1;filter:none}}
 @media (prefers-reduced-motion:reduce){.s3d-label,.s3d-cluster,.s3d-sat{animation:none}}
+/* 浅色主题：CSS2D 标签/提示/卫星编号随界面切浅（画布内颜色由 applyTheme 换） */
+body[data-theme="light"] .s3d-root{background:#e3ede4;--s3d-ink:#22332b;--s3d-ink-dim:rgba(34,51,43,.62);--s3d-ink-strong:#141f18;--s3d-label-bg:rgba(255,255,255,.8);--s3d-label-border:rgba(24,44,36,.14);--s3d-private:rgba(120,85,140,.55);--s3d-tip-bg:rgba(255,255,255,.94);--s3d-vignette:rgba(255,255,255,.30)}
+body[data-theme="light"] .s3d-label{text-shadow:none}
+body[data-theme="light"] .s3d-label.is-hl{color:#7a4a12;border-color:#e0a04a}
+body[data-theme="light"] .s3d-cluster-ch{text-shadow:0 0 12px var(--c),0 1px 0 rgba(255,255,255,.5)}
+body[data-theme="light"] .s3d-sat{color:#22332b}
+body[data-theme="light"] .s3d-sat-n,body[data-theme="light"] .s3d-sat-t{background:rgba(255,255,255,.82);color:#3c5546}
+body[data-theme="light"] .s3d-tip{box-shadow:0 8px 24px rgba(24,44,36,.18)}
 `;
 
 function injectStyle() {
@@ -202,6 +229,22 @@ function makeBackground(theme) {
     g.fillStyle = rad;
     g.fillRect(0, 0, s, s);
   });
+}
+
+// additive 材质登记处：浅色主题下统一换 NormalBlending（additive 在浅底上只会更亮、等于隐形）。
+// R 建好之前创建的材质（如领域簇 halo）先存 early，R 初始化时并入。
+const _earlyAdditive = [];
+function regAdditive(mat) {
+  if (!R) {
+    _earlyAdditive.push(mat);
+  } else {
+    R.additive.add(mat);
+    if (!THEMES[R.theme].additive) {
+      mat.blending = THREE.NormalBlending;
+      mat.needsUpdate = true;
+    }
+  }
+  return mat;
 }
 
 // ============================================================
@@ -372,9 +415,9 @@ function build(container, hiddenCanvas, OrbitControls, CSS2D, pandaMod, post) {
   const camera = new THREE.PerspectiveCamera(FOV, 1, 0.1, 400);
   camera.position.set(0, 9, 30);
   const tex = makeTextures();
-  const bgTex = { child: makeBackground(THEMES.child), parent: makeBackground(THEMES.parent) };
-  scene.background = bgTex.child;
-  scene.fog = new THREE.FogExp2(THEMES.child.fog, THEMES.child.fogD);
+  const bgTex = { dark: makeBackground(THEMES.dark), light: makeBackground(THEMES.light) };
+  scene.background = bgTex.dark;
+  scene.fog = new THREE.FogExp2(THEMES.dark.fog, THEMES.dark.fogD);
 
   // PMREM 环境反射：让 PBR 材质有商业级高光层次（失败则跳过）
   let envTex = null, pmrem = null;
@@ -386,7 +429,7 @@ function build(container, hiddenCanvas, OrbitControls, CSS2D, pandaMod, post) {
     } catch (_) { envTex = null; }
   }
 
-  const hemi = new THREE.HemisphereLight(0xcdeee2, 0x0b1a1f, THEMES.child.hemi);
+  const hemi = new THREE.HemisphereLight(0xcdeee2, THEMES.dark.hemiGround, THEMES.dark.hemi);
   scene.add(hemi);
   const key = new THREE.DirectionalLight(0xfff4e0, 1.9);   // 月光主光（暖白）
   key.position.set(6, 12, 9);
@@ -399,10 +442,11 @@ function build(container, hiddenCanvas, OrbitControls, CSS2D, pandaMod, post) {
   scene.add(fill);
 
   // 中心"星球"柔光核：远处看是一颗微光星球
-  const core = new THREE.Sprite(new THREE.SpriteMaterial({
-    map: tex.glow, color: 0x7fd8ae, transparent: true, opacity: 0.16,
+  const coreMat = new THREE.SpriteMaterial({
+    map: tex.glow, color: THEMES.dark.core, transparent: true, opacity: THEMES.dark.coreOp,
     blending: THREE.AdditiveBlending, depthWrite: false, fog: false,
-  }));
+  });
+  const core = new THREE.Sprite(coreMat);
   core.scale.setScalar(11);
   scene.add(core);
 
@@ -413,13 +457,13 @@ function build(container, hiddenCanvas, OrbitControls, CSS2D, pandaMod, post) {
   const ground = new THREE.Group();
   ground.position.y = -6.5;
   const discMat = new THREE.MeshBasicMaterial({
-    map: tex.glow, color: BAMBOO, transparent: true, opacity: 0.22,
+    map: tex.glow, color: THEMES.dark.disc, transparent: true, opacity: THEMES.dark.discOp,
     blending: THREE.AdditiveBlending, depthWrite: false, fog: false,
   });
   const disc = new THREE.Mesh(new THREE.PlaneGeometry(34, 34), discMat);
   disc.rotation.x = -Math.PI / 2;
   ground.add(disc);
-  const circleMat = new THREE.LineBasicMaterial({ color: 0x8fd9b6, transparent: true, opacity: 0.1, depthWrite: false });
+  const circleMat = new THREE.LineBasicMaterial({ color: THEMES.dark.circle, transparent: true, opacity: THEMES.dark.circleOp, depthWrite: false });
   for (const r of [6, 10.5, 15]) {
     const pts = [];
     for (let i = 0; i <= 96; i++) {
@@ -443,14 +487,15 @@ function build(container, hiddenCanvas, OrbitControls, CSS2D, pandaMod, post) {
   }
   const dustGeo = new THREE.BufferGeometry();
   dustGeo.setAttribute("position", new THREE.BufferAttribute(dustPos, 3));
-  const dust = new THREE.Points(dustGeo, new THREE.PointsMaterial({
-    size: 0.32, map: tex.glow, color: 0xa6e3c8, transparent: true, opacity: 0.55,
+  const dustMat = new THREE.PointsMaterial({
+    size: 0.32, map: tex.glow, color: THEMES.dark.dust, transparent: true, opacity: THEMES.dark.dustOp,
     depthWrite: false, blending: THREE.AdditiveBlending, sizeAttenuation: true, fog: false,
-  }));
+  });
+  const dust = new THREE.Points(dustGeo, dustMat);
   scene.add(dust);
 
   // 中心到五领域的虚线辐条
-  const spokeMat = new THREE.LineDashedMaterial({ color: 0x9fd9bf, dashSize: 0.35, gapSize: 0.45, transparent: true, opacity: 0.13, depthWrite: false });
+  const spokeMat = new THREE.LineDashedMaterial({ color: THEMES.dark.spoke, dashSize: 0.35, gapSize: 0.45, transparent: true, opacity: THEMES.dark.spokeOp, depthWrite: false });
   const spokePts = [];
   const tmpA = new THREE.Vector3();
   for (const k of DOMAIN_KEYS) {
@@ -467,10 +512,10 @@ function build(container, hiddenCanvas, OrbitControls, CSS2D, pandaMod, post) {
     const d = DOMAINS[k];
     const g = new THREE.Group();
     anchorOf(k, g.position);
-    const halo = new THREE.Sprite(new THREE.SpriteMaterial({
+    const halo = new THREE.Sprite(regAdditive(new THREE.SpriteMaterial({
       map: tex.glow, color: d.hex, transparent: true, opacity: 0.0,
       blending: THREE.AdditiveBlending, depthWrite: false, fog: false,
-    }));
+    })));
     halo.scale.setScalar(9);
     g.add(halo);
     const el = document.createElement("div");
@@ -515,6 +560,9 @@ function build(container, hiddenCanvas, OrbitControls, CSS2D, pandaMod, post) {
   R = {
     container, hiddenCanvas, restorePos, root, canvas, renderer, css2d, CSS2D, tip,
     scene, camera, controls, world, tex, bgTex, hemi, key, rim, fill, core, ground, dust, spokes, clusters,
+    discMat, circleMat, spokeMat, dustMat, coreMat,
+    additive: new Set([coreMat, discMat, dustMat, ..._earlyAdditive]),
+    theme: cfg.theme,
     composer: null, bloom: null, envTex, pmrem,
     edgeMat, edgeLines: null, edgeCap: 0, edgeList: [],
     sphereGeo, satGeo,
@@ -925,9 +973,9 @@ function createNodeState(n) {
   const mesh = new THREE.Mesh(R.sphereGeo, mat);
   mesh.userData.nid = n.id;
   group.add(mesh);
-  const halo = new THREE.Sprite(new THREE.SpriteMaterial({
+  const halo = new THREE.Sprite(regAdditive(new THREE.SpriteMaterial({
     map: R.tex.glow, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, fog: false,
-  }));
+  })));
   group.add(halo);
   const el = document.createElement("div");
   el.className = "s3d-label";
@@ -1121,13 +1169,35 @@ function applyVisibility() {
 
 function applyTheme() {
   if (!R) return;
-  // 背景/雾/光照固定用同一套：角色只决定"看得到哪些节点"，不改场景明暗（否则切视角时整屏闪）
-  const th = THEMES.child;
-  R.scene.background = R.bgTex.child;
+  // 场景明暗只跟界面主题走：角色只决定"看得到哪些节点"，不改场景明暗（否则切视角时整屏闪）
+  const light = cfg.theme === "light";
+  const th = light ? THEMES.light : THEMES.dark;
+  R.theme = light ? "light" : "dark";
+  R.scene.background = light ? R.bgTex.light : R.bgTex.dark;
   R.scene.fog.color.setHex(th.fog);
   R.scene.fog.density = th.fogD;
   R.hemi.intensity = th.hemi;
+  R.hemi.groundColor.setHex(th.hemiGround);
   R.edgeBase = th.edge;
+  if (R.bloom) R.bloom.strength = th.bloom; // 浅底 + bloom 会整屏泛白，压低强度
+  R.dustMat.color.setHex(th.dust);
+  R.dustMat.opacity = th.dustOp;
+  R.coreMat.color.setHex(th.core);
+  R.coreMat.opacity = th.coreOp;
+  R.discMat.color.setHex(th.disc);
+  R.discMat.opacity = th.discOp;
+  R.circleMat.color.setHex(th.circle);
+  R.circleMat.opacity = th.circleOp;
+  R.spokeMat.color.setHex(th.spoke);
+  R.spokeMat.opacity = th.spokeOp;
+  // additive 在浅底上等于隐形 → 换普通混合让光晕/星尘显示真实颜色
+  const blend = th.additive ? THREE.AdditiveBlending : THREE.NormalBlending;
+  for (const m of R.additive) {
+    if (m.blending !== blend) {
+      m.blending = blend;
+      m.needsUpdate = true;
+    }
+  }
 }
 
 // ============================================================
@@ -1565,9 +1635,9 @@ function fitOverview(instant) {
 // ============================================================
 
 function addBurst(pos, color, size) {
-  const sp = new THREE.Sprite(new THREE.SpriteMaterial({
+  const sp = new THREE.Sprite(regAdditive(new THREE.SpriteMaterial({
     map: R.tex.ring, color, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, fog: false,
-  }));
+  })));
   sp.position.copy(pos);
   sp.scale.setScalar(0.1);
   R.world.add(sp);
@@ -1655,7 +1725,7 @@ function buildPlan(list) {
     const mesh = new THREE.Mesh(R.satGeo, mat);
     mesh.position.set(Math.cos(a) * radius, 0, Math.sin(a) * radius);
     mesh.scale.setScalar(0.001);
-    const halo = new THREE.Sprite(new THREE.SpriteMaterial({ map: R.tex.glow, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, fog: false }));
+    const halo = new THREE.Sprite(regAdditive(new THREE.SpriteMaterial({ map: R.tex.glow, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, fog: false })));
     halo.position.copy(mesh.position);
     const el = document.createElement("div");
     el.className = "s3d-sat";
@@ -1839,6 +1909,17 @@ export const setRole = safe(function setRole(role) {
     R.themeRole = r;
     applyTheme();
     applyVisibility();
+  }
+});
+
+/** 深浅色切换：整个 3D 场景（背景/雾/光照/叠加材质/bloom）跟随界面主题。 */
+export const setTheme = safe(function setTheme(theme) {
+  const t = theme === "light" ? "light" : "dark";
+  if (cfg.theme === t && (!R || R.theme === t)) return;
+  cfg.theme = t;
+  if (R && R.ready) {
+    applyTheme();
+    if (!R.running) renderFrame(0);
   }
 });
 

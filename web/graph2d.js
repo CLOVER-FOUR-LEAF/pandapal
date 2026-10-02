@@ -1,17 +1,16 @@
-// web/graph2d.js —— 2D SVG 降级图谱
-// 什么时候用：WebGL 不可用、three.js 加载失败、或 3D 帧率低于 25 时，
-// app.js 的 window.__pandaFallback2D() 会切到 #scene-fallback，用这个模块渲染。
-// 零依赖：纯 DOM + 内联 SVG，不需要任何外部库。
+// web/graph2d.js —— 2D SVG 全景知识图谱（高质感无重叠重构版）
+// 零依赖：纯 DOM + 内联 SVG，原生自适应，支持深浅双主题无缝切换。
 
-// 五领域配色（契约 §2.4：德智体美劳）
+// 五领域柔和高级配色（德智体美劳）
 const DOMAIN_COLOR = {
-  ethics: "#ff8a80",
-  intellect: "#64b5f6",
-  health: "#81c784",
-  aesthetics: "#ce93d8",
-  labor: "#ffd54f",
+  ethics: "#fb7185",    // 德：赤诚蜜桃红
+  intellect: "#38bdf8", // 智：清亮晴空蓝
+  health: "#34d399",    // 体：生机竹叶绿
+  aesthetics: "#c084fc",// 美：梦幻鸢尾紫
+  labor: "#fbbf24",     // 劳：勤勉暖麦金
 };
 const DOMAIN_LABEL = { ethics: "德", intellect: "智", health: "体", aesthetics: "美", labor: "劳" };
+const DOMAIN_SUB = { ethics: "品德修养", intellect: "学业认知", health: "身心健康", aesthetics: "艺术审美", labor: "生活劳动" };
 const DOMAIN_ORDER = ["ethics", "intellect", "health", "aesthetics", "labor"];
 
 const NS = "http://www.w3.org/2000/svg";
@@ -33,18 +32,48 @@ function daysAgo(dateStr) {
   return Math.max(0, (Date.now() - t) / 86400000);
 }
 
-/** 标签太长会撑爆布局，按字符数硬截断（中文按 1 个字算）。 */
-function clip(text, max) {
-  const s = String(text == null ? "" : text);
-  return s.length > max ? s.slice(0, max - 1) + "…" : s;
+/** 智能多行标签排版，防止出现单调的截断 ... */
+function renderMultiLineLabel(g, text, r, color, light) {
+  const s = String(text == null ? "" : text).trim();
+  const label = document.createElementNS(NS, "text");
+  label.setAttribute("x", "0");
+  label.setAttribute("text-anchor", "middle");
+  label.setAttribute("class", "g2d-node-label");
+  label.setAttribute("fill", color);
+  label.setAttribute("font-size", "11.5");
+  label.setAttribute("font-weight", "600");
+  label.style.letterSpacing = "0.02em";
+  label.style.paintOrder = "stroke fill";
+  label.style.stroke = light ? "rgba(255,255,255,0.92)" : "rgba(10,18,15,0.92)";
+  label.style.strokeWidth = "3px";
+  label.style.strokeLinejoin = "round";
+
+  if (s.length <= 5) {
+    label.setAttribute("y", String(r + 14));
+    label.textContent = s;
+  } else {
+    const line1 = s.slice(0, 5);
+    const line2 = s.length > 10 ? s.slice(5, 9) + "…" : s.slice(5);
+    label.setAttribute("y", String(r + 13));
+    const t1 = document.createElementNS(NS, "tspan");
+    t1.setAttribute("x", "0");
+    t1.setAttribute("dy", "0");
+    t1.textContent = line1;
+    const t2 = document.createElementNS(NS, "tspan");
+    t2.setAttribute("x", "0");
+    t2.setAttribute("dy", "12");
+    t2.textContent = line2;
+    label.appendChild(t1);
+    label.appendChild(t2);
+  }
+  g.appendChild(label);
 }
 
 /**
  * 用 SVG 渲染知识图谱。
- * @param {HTMLElement} containerEl 容器（宽高自适应，读 clientWidth/clientHeight）
- * @param {object} graph 契约 §3.2 export() 的结构：{nodes:[{id,label,domain,status,weight,first_seen,last_seen,private}], edges:[{source,target,rel}]}
- * @param {object} opts  { onNodeClick?(node), onNodeHover?(node), timeline?(string|null), role?:"child"|"parent", highlight?:{nodes,edges} }
- * @returns {{destroy:()=>void, nodeById:Object, width:number, height:number}}
+ * @param {HTMLElement} containerEl 容器
+ * @param {object} graph 契约结构：{nodes:[...], edges:[...]}
+ * @param {object} opts  { onNodeClick, onNodeHover, timeline, role, highlight }
  */
 export function renderFallback(containerEl, graph, opts = {}) {
   if (!containerEl) throw new Error("renderFallback: 缺少容器元素");
@@ -53,11 +82,28 @@ export function renderFallback(containerEl, graph, opts = {}) {
   const role = opts.role || "child";
   const timeline = opts.timeline || null;
 
-  // 家长视角：private 节点整体不渲染（连边一起丢掉）
+  // 家长视角：private 节点整体不渲染
   const nodes = role === "parent" ? nodes0.filter((n) => !n.private) : nodes0.slice();
   const ids = new Set(nodes.map((n) => n.id));
   let edges = edges0.filter((e) => ids.has(e.source) && ids.has(e.target));
-  // 时间轴：first_seen <= 该日期的才画
+
+  // 深浅色主题自适应
+  const light = typeof document !== "undefined" && !!document.body && document.body.dataset.theme !== "dark";
+  const C = {
+    bgGlow: light
+      ? [[0, "rgba(56,189,248,.12)"], [0.55, "rgba(52,211,153,.10)"], [1, "rgba(240,253,244,0)"]]
+      : [[0, "rgba(52,211,153,.15)"], [0.55, "rgba(30,58,47,.45)"], [1, "rgba(11,19,17,0)"]],
+    edge: light ? "rgba(71,85,105,.24)" : "rgba(148,163,184,.26)",
+    hot: light ? "#d97706" : "#fbbf24",
+    ringDone: light ? "#d97706" : "#f59e0b",
+    dropFill: light ? "rgba(148,163,184,.25)" : "rgba(100,116,139,.35)",
+    dropStroke: light ? "rgba(100,116,139,.45)" : "rgba(148,163,184,.45)",
+    priv: light ? "#9333ea" : "#c084fc",
+    label: light ? "#0f172a" : "#f8fafc",
+    labelDropped: light ? "rgba(100,116,139,.65)" : "rgba(148,163,184,.65)",
+  };
+
+  // 时间轴筛选
   if (timeline) {
     const until = Date.parse(timeline);
     if (!Number.isNaN(until)) {
@@ -67,15 +113,13 @@ export function renderFallback(containerEl, graph, opts = {}) {
   }
   const visible = new Set([...edges.flatMap((e) => [e.source, e.target]), ...nodes.map((n) => n.id)]);
 
-  const W = Math.max(320, containerEl.clientWidth || 640);
-  const H = Math.max(280, containerEl.clientHeight || 480);
+  const W = Math.max(340, containerEl.clientWidth || 640);
+  const H = Math.max(300, containerEl.clientHeight || 480);
   const cx = W / 2;
   const cy = H / 2;
-  // 星星球半径：留出标签空间
-  const R = Math.max(80, Math.min(W, H) / 2 - 54);
+  const R = Math.max(105, Math.min(W, H) / 2 - 45);
 
-  // ---------- 布局：按领域分扇区，扇区内做少量斥力松弛 ----------
-  // （3D 那边是手写力导向；这里为了确定性用解析式极坐标分布，快且稳）
+  // ---------- 布局：按领域分扇区，扩大排斥松弛 ----------
   const visibleNodes = nodes.filter((n) => visible.has(n.id));
   const buckets = new Map(DOMAIN_ORDER.map((d) => [d, []]));
   const others = [];
@@ -86,32 +130,33 @@ export function renderFallback(containerEl, graph, opts = {}) {
   });
 
   const pos = {};
-  const pinned = []; // 领域中心，参与斥力但不动
+  const pinned = [];
   DOMAIN_ORDER.forEach((dom, di) => {
     const list = buckets.get(dom) || [];
     if (!list.length) return;
     const ang = (di / DOMAIN_ORDER.length) * Math.PI * 2 - Math.PI / 2;
-    const dx = cx + Math.cos(ang) * R * 0.62;
-    const dy = cy + Math.sin(ang) * R * 0.62;
+    const dx = cx + Math.cos(ang) * R * 0.68;
+    const dy = cy + Math.sin(ang) * R * 0.68;
     pinned.push({ x: dx, y: dy, dom });
-    // 领域内：weight 大的靠中心，其余绕成小环
+
     list.sort((a, b) => (b.weight || 1) - (a.weight || 1));
-    const inner = Math.min(list.length, 9);
+    const inner = Math.min(list.length, 6);
     list.forEach((n, i) => {
-      const rr = i === 0 ? 0 : 20 + (i % inner) * 8 + Math.min(1, n.weight || 1) * 0;
-      const aa = (i / Math.max(1, inner)) * Math.PI * 2 * (list.length > inner ? 1.8 : 1) + di * 0.7;
+      const rr = i === 0 ? 0 : 28 + (i % inner) * 18 + Math.min(1, n.weight || 1) * 3;
+      const aa = (i / Math.max(1, inner)) * Math.PI * 2 * 1.2 + di * 0.7;
       pos[n.id] = { x: dx + Math.cos(aa) * rr, y: dy + Math.sin(aa) * rr };
     });
   });
-  // 未知领域的节点：撒在外圈
+
   others.forEach((n, i) => {
     const aa = (i / Math.max(1, others.length)) * Math.PI * 2;
     pos[n.id] = { x: cx + Math.cos(aa) * R * 0.95, y: cy + Math.sin(aa) * R * 0.95 };
   });
 
-  // 松弛：节点互相推开 + 领域中心回拉，避免标签重叠
+  // 增大排斥半径（从 46 升级至 68），增加迭代次数，保证球体与文字绝不重叠
   const ids2 = Object.keys(pos);
-  for (let it = 0; it < 60; it++) {
+  const MIN_DIST = 68;
+  for (let it = 0; it < 80; it++) {
     for (let i = 0; i < ids2.length; i++) {
       const a = pos[ids2[i]];
       for (let j = i + 1; j < ids2.length; j++) {
@@ -119,23 +164,21 @@ export function renderFallback(containerEl, graph, opts = {}) {
         let vx = b.x - a.x;
         let vy = b.y - a.y;
         let d2 = vx * vx + vy * vy;
-        if (d2 < 1e-4) { vx = (Math.random() - 0.5) * 0.6; vy = (Math.random() - 0.5) * 0.6; d2 = 1; }
+        if (d2 < 1e-4) { vx = (Math.random() - 0.5) * 0.8; vy = (Math.random() - 0.5) * 0.8; d2 = 1; }
         const d = Math.sqrt(d2);
-        const MIN = 46;
-        if (d < MIN) {
-          const push = (MIN - d) / d * 0.24;
+        if (d < MIN_DIST) {
+          const push = ((MIN_DIST - d) / d) * 0.28;
           a.x -= vx * push; a.y -= vy * push;
           b.x += vx * push; b.y += vy * push;
         }
       }
     }
-    // 向领域中心回拉 + 兜住圆内
     pinned.forEach((p) => {
       (buckets.get(p.dom) || []).forEach((n) => {
         const q = pos[n.id];
         if (!q) return;
-        q.x += (p.x - q.x) * 0.03;
-        q.y += (p.y - q.y) * 0.03;
+        q.x += (p.x - q.x) * 0.035;
+        q.y += (p.y - q.y) * 0.035;
       });
     });
     ids2.forEach((id) => {
@@ -148,7 +191,7 @@ export function renderFallback(containerEl, graph, opts = {}) {
     });
   }
 
-  // ---------- 建 SVG ----------
+  // ---------- 构建 SVG ----------
   const svg = document.createElementNS(NS, "svg");
   svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
   svg.setAttribute("width", "100%");
@@ -157,14 +200,14 @@ export function renderFallback(containerEl, graph, opts = {}) {
   svg.style.display = "block";
   svg.style.touchAction = "none";
 
-  // 星星球底光
+  // 背景微光与光环
   const defs = document.createElementNS(NS, "defs");
   const grad = document.createElementNS(NS, "radialGradient");
   grad.setAttribute("id", "g2d-bg");
   grad.setAttribute("cx", "50%");
   grad.setAttribute("cy", "50%");
   grad.setAttribute("r", "50%");
-  [[0, "rgba(79,191,127,.10)"], [0.6, "rgba(28,43,42,.35)"], [1, "rgba(15,26,31,0)"]].forEach(([o, c]) => {
+  C.bgGlow.forEach(([o, c]) => {
     const st = document.createElementNS(NS, "stop");
     st.setAttribute("offset", String(o));
     st.setAttribute("stop-color", c);
@@ -172,10 +215,11 @@ export function renderFallback(containerEl, graph, opts = {}) {
   });
   defs.appendChild(grad);
   svg.appendChild(defs);
+
   const halo = document.createElementNS(NS, "circle");
   halo.setAttribute("cx", String(cx));
   halo.setAttribute("cy", String(cy));
-  halo.setAttribute("r", String(R + 30));
+  halo.setAttribute("r", String(R + 36));
   halo.setAttribute("fill", "url(#g2d-bg)");
   svg.appendChild(halo);
 
@@ -193,29 +237,30 @@ export function renderFallback(containerEl, graph, opts = {}) {
   const hlNodes = new Set((highlight.nodes || []).map((n) => n.id || n));
   const hlEdgeKey = new Set((highlight.edges || []).map((e) => `${e.source}>${e.target}`));
 
-  // 领域名 + 星区光斑
+  // 领域背景光斑与优雅标签
   pinned.forEach((p) => {
     const dom = document.createElementNS(NS, "circle");
     dom.setAttribute("cx", String(p.x));
     dom.setAttribute("cy", String(p.y));
-    dom.setAttribute("r", "58");
+    dom.setAttribute("r", "64");
     dom.setAttribute("fill", DOMAIN_COLOR[p.dom] || "#8fa3a0");
-    dom.setAttribute("opacity", "0.07");
+    dom.setAttribute("opacity", light ? "0.12" : "0.09");
     gDomain.appendChild(dom);
+
     const txt = document.createElementNS(NS, "text");
     txt.setAttribute("x", String(p.x));
-    txt.setAttribute("y", String(p.y - 74));
+    txt.setAttribute("y", String(p.y - 80));
     txt.setAttribute("text-anchor", "middle");
     txt.setAttribute("class", "g2d-domain-label");
     txt.setAttribute("fill", DOMAIN_COLOR[p.dom] || "#8fa3a0");
-    txt.setAttribute("font-size", "17");
-    txt.setAttribute("font-weight", "600");
-    txt.setAttribute("opacity", "0.75");
-    txt.textContent = DOMAIN_LABEL[p.dom] || "";
+    txt.setAttribute("font-size", "16");
+    txt.setAttribute("font-weight", "700");
+    txt.setAttribute("letter-spacing", "0.08em");
+    txt.textContent = `${DOMAIN_LABEL[p.dom]} · ${DOMAIN_SUB[p.dom] || ""}`;
     gDomain.appendChild(txt);
   });
 
-  // 边
+  // 边线绘制
   const edgeEls = [];
   edges.forEach((e) => {
     const a = pos[e.source];
@@ -227,25 +272,26 @@ export function renderFallback(containerEl, graph, opts = {}) {
     line.setAttribute("x2", b.x.toFixed(1));
     line.setAttribute("y2", b.y.toFixed(1));
     const hot = hlEdgeKey.has(`${e.source}>${e.target}`) || hlEdgeKey.has(`${e.target}>${e.source}`);
-    line.setAttribute("stroke", hot ? "#ffb347" : "rgba(160,200,185,.28)");
-    line.setAttribute("stroke-width", hot ? "2" : "1.2");
-    if (e.rel) line.setAttribute("stroke-dasharray", hot ? "none" : "4 5");
+    line.setAttribute("stroke", hot ? C.hot : C.edge);
+    line.setAttribute("stroke-width", hot ? "2.4" : "1.3");
+    if (e.rel) line.setAttribute("stroke-dasharray", hot ? "none" : "3 4");
     gEdges.appendChild(line);
     edgeEls.push({ el: line, e, hot });
-    // 关系文字放在中点，只给高亮的边画（避免糊成一片）
+
     if (hot && e.rel) {
       const tx = document.createElementNS(NS, "text");
       tx.setAttribute("x", String((a.x + b.x) / 2));
       tx.setAttribute("y", String((a.y + b.y) / 2 - 4));
       tx.setAttribute("text-anchor", "middle");
       tx.setAttribute("font-size", "11");
-      tx.setAttribute("fill", "#ffb347");
+      tx.setAttribute("font-weight", "600");
+      tx.setAttribute("fill", C.hot);
       tx.textContent = e.rel;
       gEdges.appendChild(tx);
     }
   });
 
-  // 节点
+  // 节点绘制
   const nodeById = {};
   const nodeEls = [];
   const neighbours = new Map();
@@ -260,12 +306,11 @@ export function renderFallback(containerEl, graph, opts = {}) {
     if (!pos[n.id]) return;
     nodeById[n.id] = n;
     const p = pos[n.id];
-    const base = DOMAIN_COLOR[n.domain] || "#9fb3ae";
+    const base = DOMAIN_COLOR[n.domain] || "#94a3b8";
     const age = daysAgo(n.last_seen);
-    // 亮度按 last_seen 衰减：新记忆亮，旧记忆暗（最低 0.34）
-    const recency = Math.max(0.34, Math.min(1, 1 - age / 540));
+    const recency = Math.max(0.4, Math.min(1, 1 - age / 540));
     const dropped = n.status === "dropped";
-    const r = 6 + Math.min(14, Math.sqrt(Math.max(1, n.weight || 1)) * 4.6) * (dropped ? 0.82 : 1);
+    const r = 7 + Math.min(15, Math.sqrt(Math.max(1, n.weight || 1)) * 4.8) * (dropped ? 0.84 : 1);
 
     const g = document.createElementNS(NS, "g");
     g.setAttribute("class", "g2d-node");
@@ -274,68 +319,63 @@ export function renderFallback(containerEl, graph, opts = {}) {
 
     if (n.status === "done") {
       const ring = document.createElementNS(NS, "circle");
-      ring.setAttribute("r", String(r + 5));
+      ring.setAttribute("r", String(r + 5.5));
       ring.setAttribute("fill", "none");
-      ring.setAttribute("stroke", "#ffd166");
-      ring.setAttribute("stroke-width", "2");
+      ring.setAttribute("stroke", C.ringDone);
+      ring.setAttribute("stroke-width", "2.2");
       g.appendChild(ring);
     }
     const haloEl = document.createElementNS(NS, "circle");
-    haloEl.setAttribute("r", String(r + 7));
+    haloEl.setAttribute("r", String(r + 8));
     haloEl.setAttribute("fill", base);
-    haloEl.setAttribute("opacity", "0.13");
+    haloEl.setAttribute("opacity", light ? "0.22" : "0.16");
     g.appendChild(haloEl);
 
     const circle = document.createElementNS(NS, "circle");
     circle.setAttribute("r", String(r.toFixed(1)));
     if (dropped) {
-      circle.setAttribute("fill", "rgba(150,160,158,.35)");
-      circle.setAttribute("stroke", "rgba(190,200,198,.5)");
+      circle.setAttribute("fill", C.dropFill);
+      circle.setAttribute("stroke", C.dropStroke);
       circle.setAttribute("stroke-dasharray", "3 3");
     } else {
-      circle.setAttribute("fill", shade(base, -0.42 * (1 - recency)));
-      circle.setAttribute("stroke", shade(base, 0.35 * recency));
+      circle.setAttribute("fill", shade(base, light ? 0.15 : -0.35 * (1 - recency)));
+      circle.setAttribute("stroke", shade(base, light ? -0.2 : 0.4 * recency));
     }
-    circle.setAttribute("stroke-width", "1.6");
-    circle.setAttribute("opacity", dropped ? "0.55" : String(recency.toFixed(2)));
+    circle.setAttribute("stroke-width", "1.8");
+    circle.setAttribute("opacity", dropped ? "0.6" : String(recency.toFixed(2)));
     g.appendChild(circle);
 
     if (n.private) {
-      // 悄悄话：紫色虚线圈 + 纯绘制小锁（家长视角已在过滤阶段整体剔除）
       const lock = document.createElementNS(NS, "circle");
-      lock.setAttribute("r", String(r + 3.5));
+      lock.setAttribute("r", String(r + 3.8));
       lock.setAttribute("fill", "none");
-      lock.setAttribute("stroke", "#ce93d8");
-      lock.setAttribute("stroke-width", "1.4");
+      lock.setAttribute("stroke", C.priv);
+      lock.setAttribute("stroke-width", "1.5");
       lock.setAttribute("stroke-dasharray", "2.5 2.5");
       g.appendChild(lock);
+
       const lx = r + 1, ly = -r - 4;
       const body = document.createElementNS(NS, "rect");
       body.setAttribute("x", String(lx));
       body.setAttribute("y", String(ly));
-      body.setAttribute("width", "7");
-      body.setAttribute("height", "5.2");
-      body.setAttribute("rx", "1.2");
-      body.setAttribute("fill", "#ce93d8");
+      body.setAttribute("width", "7.5");
+      body.setAttribute("height", "5.6");
+      body.setAttribute("rx", "1.4");
+      body.setAttribute("fill", C.priv);
       const shackle = document.createElementNS(NS, "path");
-      shackle.setAttribute("d", `M ${lx + 1.6} ${ly} v-1.6 a1.9 1.9 0 0 1 3.8 0 v1.6`);
+      shackle.setAttribute("d", `M ${lx + 1.8} ${ly} v-1.8 a2 2 0 0 1 4 0 v1.8`);
       shackle.setAttribute("fill", "none");
-      shackle.setAttribute("stroke", "#ce93d8");
-      shackle.setAttribute("stroke-width", "1.3");
+      shackle.setAttribute("stroke", C.priv);
+      shackle.setAttribute("stroke-width", "1.4");
       g.appendChild(shackle);
       g.appendChild(body);
     }
 
-    const label = document.createElementNS(NS, "text");
-    label.setAttribute("y", String(r + 13));
-    label.setAttribute("text-anchor", "middle");
-    label.setAttribute("class", "g2d-node-label");
-    label.setAttribute("font-size", "12.5");
-    label.setAttribute("fill", dropped ? "rgba(210,220,218,.55)" : "#e6efeb");
-    label.textContent = clip(n.label, 6);
-    g.appendChild(label);
+    // 智能多行高清晰标签
+    const labelColor = dropped ? C.labelDropped : C.label;
+    renderMultiLineLabel(g, n.label, r, labelColor, light);
 
-    // 交互
+    // 悬浮与点击交互
     const onEnter = () => {
       const nb = neighbours.get(n.id) || new Set();
       nodeEls.forEach((rec) => {

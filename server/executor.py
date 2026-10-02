@@ -59,6 +59,18 @@ async def run_plan(
     done_events = {n["id"]: asyncio.Event() for n in nodes}
     results: dict[str, str] = {}
     statuses: dict[str, str] = {}
+    by_id = {n["id"]: n for n in nodes}
+
+    def _ancestors(node: dict) -> set[str]:
+        """节点的全部上游依赖（传递闭包）——LLM 上下文只该看到祖先结果，
+        并行分支的产物不掺进来，不然比赛交通的结论会被隔壁乐器分支串味。"""
+        seen, stack = set(), list(node["depends_on"])
+        while stack:
+            d = stack.pop()
+            if d not in seen:
+                seen.add(d)
+                stack.extend((by_id.get(d) or {}).get("depends_on", []))
+        return seen
 
     async def worker(node: dict):
         for dep in node["depends_on"]:
@@ -67,7 +79,9 @@ async def run_plan(
                 await ev.wait()
         await emit({"type": "node", "id": node["id"], "title": node["title"], "status": "running"})
         try:
-            text = await _run_node(store, event, node, results)
+            anc = _ancestors(node)
+            text = await _run_node(store, event, node,
+                                   {k: v for k, v in results.items() if k in anc})
             results[node["id"]] = text
             statuses[node["id"]] = "done"
             await emit({

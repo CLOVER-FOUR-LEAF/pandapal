@@ -27,9 +27,13 @@ RESULTS = []
 
 # 验证会话隔离用的一次性账号，跑完必须清干净（见 _cleanup）
 GUEST = "评测员B"
+# 注册/找回密码用例用的临时账号
+REG = "评测员C"
+REG_PARENT = "评测员C妈"
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
-GUEST_DIR = DATA_DIR / f"child_{GUEST}"
 PROFILES = DATA_DIR / "profiles.json"
+USERS = DATA_DIR / "users.json"
+TEMP_NAMES = [GUEST, REG, REG_PARENT]
 
 
 def _is_local(base: str) -> bool:
@@ -38,17 +42,25 @@ def _is_local(base: str) -> bool:
 
 
 def _cleanup() -> None:
-    """删掉本脚本造出来的评测员B 档案与 profiles.json 条目。
+    """删掉本脚本造出来的临时账号：users.json 条目、档案目录、profiles.json 映射。
 
     profiles.json 与 data/child_*/ 都已被 .gitignore 排除，不会进仓库；
     清掉只是让本地 data/ 不留测试残留。
     """
-    shutil.rmtree(GUEST_DIR, ignore_errors=True)
+    for name in TEMP_NAMES:
+        shutil.rmtree(DATA_DIR / f"child_{name}", ignore_errors=True)
     try:
         profiles = json.loads(PROFILES.read_text(encoding="utf-8"))
-        if profiles.pop(GUEST, None) is not None:
+        if any(profiles.pop(n, None) is not None for n in TEMP_NAMES):
             PROFILES.write_text(
                 json.dumps(profiles, ensure_ascii=False, indent=2), encoding="utf-8")
+    except (OSError, ValueError):
+        pass
+    try:
+        users = json.loads(USERS.read_text(encoding="utf-8"))
+        if any(users.pop(n, None) is not None for n in TEMP_NAMES):
+            USERS.write_text(
+                json.dumps(users, ensure_ascii=False, indent=2), encoding="utf-8")
     except (OSError, ValueError):
         pass
 
@@ -295,6 +307,46 @@ def _run(base: str) -> int:
                f"briefing={st6} dream={st7} logs={st8}")
     except Exception as e:
         record("endpoints_matrix", False, str(e))
+
+    # 10.7 显式注册 + 密保找回密码：注册即登录 → 查密保 → 错答案拒绝 → 对答案重置
+    # → 旧 token 作废 → 新密码可登录；顺带覆盖家长注册需绑定已存在的孩子账号
+    try:
+        st1, reg = post_json(base, "/api/auth/register", {
+            "username": REG, "password": "reg123", "role": "child",
+            "question": "最喜欢的颜色？", "answer": "蓝色"})
+        st2, _ = post_json(base, "/api/auth/register", {
+            "username": REG, "password": "reg123", "question": "q", "answer": "a"})
+        st3, qd = get(base, f"/api/auth/question?username={REG}")
+        st5, _ = post_json(base, "/api/auth/reset", {
+            "username": REG, "answer": "红色", "password": "reg456"})
+        st6, _ = post_json(base, "/api/auth/reset", {
+            "username": REG, "answer": " 蓝色 ", "password": "reg456"})
+        st7, _ = get(base, "/api/auth/me", reg.get("token"))  # 重置后旧 token 必须失效
+        st8, _ = post_json(base, "/api/auth/login", {"username": REG, "password": "reg123"})
+        relogin = login(base, REG, "reg456")
+        ok = (st1 == 200 and reg.get("role") == "child" and reg.get("is_new") is True
+              and st2 == 400 and st3 == 200 and qd.get("recoverable") is True
+              and qd.get("question") == "最喜欢的颜色？"
+              and st5 == 400 and st6 == 200 and st7 == 401 and st8 == 401
+              and relogin.get("username") == REG)
+        record("register_reset", ok,
+               f"reg={st1} dup={st2} q={st3} wrong={st5} reset={st6} "
+               f"old_tk={st7} old_pw={st8}")
+    except Exception as e:
+        record("register_reset", False, str(e))
+
+    try:
+        st1, preg = post_json(base, "/api/auth/register", {
+            "username": REG_PARENT, "password": "mamab1", "role": "parent",
+            "child": REG, "question": "q", "answer": "a"})
+        st2, _ = post_json(base, "/api/auth/register", {
+            "username": "评测员孤儿妈", "password": "mamab1", "role": "parent",
+            "child": "不存在的孩子", "question": "q", "answer": "a"})
+        ok = (st1 == 200 and preg.get("role") == "parent" and preg.get("name") == REG
+              and st2 == 400)
+        record("register_parent", ok, f"parent={st1} orphan={st2}")
+    except Exception as e:
+        record("register_parent", False, str(e))
 
     # 11. 会话隔离 + 并发不崩（自动注册的新孩子账号 + 小豆同时聊）
     try:

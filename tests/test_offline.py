@@ -285,6 +285,94 @@ async def _run(client: httpx.AsyncClient) -> None:
                    {"name": "小豆", "action": "approve"})
     record("parent_inbox_allowed", r.status_code == 404, f"status={r.status_code}")
 
+    # 8. 账号→档案越权防线回归：别名登录、撞名目录、query token 收窄、聊天限频
+    (SANDBOX / "aliases.seed.json").write_text(
+        json.dumps({"xiaodou": "小豆"}, ensure_ascii=False), encoding="utf-8")
+    client.headers.pop("Authorization", None)
+    # 别名 + 正确密码 → 身份归一到小豆本人
+    r = await post(client, "/api/auth/login",
+                   {"username": "xiaodou", "password": "panda123"})
+    j = r.json()
+    record("alias_login_ok",
+           r.status_code == 200 and j.get("username") == "小豆",
+           f"status={r.status_code} user={j.get('username')}")
+    # 别名 + 错密码 → 401：绝不能因"未知名"自动注册而绕过小豆的密码
+    r = await post(client, "/api/auth/login",
+                   {"username": "xiaodou", "password": "hackme"})
+    record("alias_no_bypass", r.status_code == 401, f"status={r.status_code}")
+    # 别名不能注册成独立账号（否则永远被旧账号遮住，登不进去）
+    r = await post(client, "/api/auth/register",
+                   {"username": "xiaodou", "password": "pass1234",
+                    "question": "q", "answer": "a"})
+    record("alias_register_blocked", r.status_code == 400, f"status={r.status_code}")
+    # 清洗/分隔符撞档：a.b 与 a_b 映射到同一 slug，但必须各自独立目录
+    r = await post(client, "/api/auth/login", {"username": "a.b", "password": "pw1"})
+    ok1 = r.status_code == 200
+    r = await post(client, "/api/auth/login", {"username": "a_b", "password": "pw2"})
+    record("slug_collision_users", ok1 and r.status_code == 200,
+           f"statuses={ok1},{r.status_code}")
+    dirs = sorted(p.name for p in SANDBOX.glob("child_a_b*"))
+    record("dir_collision_split", dirs == ["child_a_b", "child_a_b_2"], str(dirs))
+    owners = sorted(
+        json.loads((SANDBOX / d / "index.json").read_text(encoding="utf-8"))["name"]
+        for d in dirs)
+    record("dir_owner_distinct", owners == ["a.b", "a_b"], str(owners))
+    # ?token= 只在 /api/ics/ 生效，其它端点必须 401
+    r = await client.get(f"/api/graph?token={token}")
+    record("query_token_rejected", r.status_code == 401, f"status={r.status_code}")
+    r = await client.get(f"/api/ics/nonexistent_aid?token={token}")
+    record("ics_query_token_ok", r.status_code == 404,  # 认证过了→事务不存在
+           f"status={r.status_code}")
+    # 每账号聊天限频：30 条/5 分钟（挡公网刷 Key）
+    r = await post(client, "/api/auth/login", {"username": "限速员", "password": "pw1"})
+    client.headers["Authorization"] = f"Bearer {r.json()['token']}"
+    codes = []
+    for _ in range(31):
+        rr = await client.post("/api/chat",
+                               json={"name": "限速员", "message": "你好"})
+        codes.append(rr.status_code)
+    record("chat_rate_limit",
+           codes[-1] == 429 and all(c == 200 for c in codes[:-1]),
+           f"codes={codes.count(200)}x200 tail={codes[-1]}")
+    client.headers.pop("Authorization", None)
+
+    # 9. executor 祖先作用域：并行分支的产物不掺进别的 LLM 节点的上下文
+    from server import executor, sessions as _sess_mod
+    sess = await _sess_mod.login(NAME)
+    seen: dict[str, str] = {}
+
+    async def cap_complete(messages, *, caller="unknown", **kw):
+        if caller == "node":
+            content = str(messages[-1]["content"])
+            title = content.split("本环节：", 1)[-1].split("—", 1)[0].strip()
+            seen[title] = content
+            return f"结果#{title}"
+        return "无关"
+
+    async def _noop_emit(_e):
+        pass
+
+    saved_complete = llm.complete
+    llm.complete = cap_complete
+    try:
+        plan = {"title": "钻石形", "nodes": [
+            {"id": "r", "title": "根", "tool": "llm",
+             "args": {"task": "根"}, "depends_on": []},
+            {"id": "a", "title": "甲支", "tool": "llm",
+             "args": {"task": "甲"}, "depends_on": ["r"]},
+            {"id": "b", "title": "乙支", "tool": "llm",
+             "args": {"task": "乙"}, "depends_on": ["r"]},
+            {"id": "s", "title": "汇总", "tool": "llm",
+             "args": {"task": "汇"}, "depends_on": ["a"]},
+        ]}
+        await executor.run_plan(plan, sess.store, "测试", _noop_emit)
+    finally:
+        llm.complete = saved_complete
+    ctx_s = seen.get("汇总", "")
+    record("exec_ancestor_scope",
+           "结果#根" in ctx_s and "结果#甲支" in ctx_s and "结果#乙支" not in ctx_s,
+           f"s_ctx={'根' if '结果#根' in ctx_s else '?'}/{'甲' if '结果#甲支' in ctx_s else '?'}/{'乙!' if '结果#乙支' in ctx_s else '乙ok'}")
+
 
 if __name__ == "__main__":
     sys.exit(asyncio.run(main()))

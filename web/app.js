@@ -355,10 +355,9 @@ function useFallback2D(reason) {
   setHidden("#scene-canvas", true);
   setHidden("#graph-canvas-2d", false);
   const note = $("#scene-fallback .fallback-note");
-  if (note) note.textContent = reason ? `2D 降级模式 · ${reason}` : "2D 降级模式 · 数据与交互不变";
+  if (note) note.textContent = "2D 全景图谱 · 交互与数据实时同步";
   renderFallbackGraph();
   mount2DPanda();
-  if (state.name) addSys("3D 星球没启动起来，已切到 2D 图谱，其他功能照常～");
 }
 
 function mount2DPanda() {
@@ -466,12 +465,199 @@ function saveAuth() {
 let loginPanda = null;
 let loginBusy = false;
 
-function setLoginHint(text, kind) {
-  const hint = $("#login-hint");
+function setHint(sel, text, kind) {
+  const hint = typeof sel === "string" ? $(sel) : sel;
   if (!hint) return;
   hint.textContent = text || "";
   hint.classList.toggle("err", kind === "err");
   hint.classList.toggle("ok", kind === "ok");
+}
+function setLoginHint(text, kind) { setHint("#login-hint", text, kind); }
+
+function shakeCard() {
+  const card = $("#login-card");
+  if (card) { card.classList.remove("shake"); void card.offsetWidth; card.classList.add("shake"); }
+}
+
+function busyBtn(btn, on) {
+  if (!btn) return;
+  btn.disabled = on;
+  btn.classList.toggle("loading", on);
+}
+
+/* 登录卡三个面板：登录 / 注册 / 找回密码 */
+const AUTH_PANES = {
+  login:    { sel: "#pane-login",    title: "欢迎回来",   sub: "登录后，管家会接着上次的话题继续陪伴" },
+  register: { sel: "#pane-register", title: "创建新账号", sub: "选一个身份，注册即拥有专属档案" },
+  forgot:   { sel: "#pane-forgot",   title: "找回密码",   sub: "答对注册时设的密保问题，就能重置密码" },
+};
+
+function setAuthPane(name) {
+  const cfg = AUTH_PANES[name] || AUTH_PANES.login;
+  Object.values(AUTH_PANES).forEach((p) => setHidden(p.sel, p.sel !== cfg.sel));
+  setText("#login-card-title", cfg.title);
+  setText("#login-card-sub", cfg.sub);
+  ["#login-hint", "#register-hint", "#forgot-hint"].forEach((s) => setHint(s, ""));
+  if (name === "forgot") forgotToStep1();
+  if (loginPanda) setMood(loginPanda, "normal");
+  const input = document.querySelector(`${cfg.sel} input`);
+  if (input) input.focus({ preventScroll: true });
+}
+
+function fieldVal(sel, trim = true) {
+  const n = $(sel);
+  const v = n ? String(n.value) : "";
+  return trim ? v.trim() : v;
+}
+
+/** 注册/找回/登录共用 loginBusy 防重入——同一时刻只允许一笔账号操作在飞。 */
+async function register() {
+  if (loginBusy) return;
+  const u = fieldVal("#reg-name");
+  const p1 = fieldVal("#reg-pass", false), p2 = fieldVal("#reg-pass2", false);
+  const child = fieldVal("#reg-child"), q = fieldVal("#reg-question"), a = fieldVal("#reg-answer");
+  const bad = !u ? ["先起个用户名吧", "#reg-name"]
+    : p1.length < 4 ? ["密码太短啦，至少 4 位", "#reg-pass"]
+    : p1 !== p2 ? ["两遍密码不一样哦", "#reg-pass2"]
+    : regRole === "parent" && !child ? ["家长账号要填孩子的登录名", "#reg-child"]
+    : !q ? ["设一个密保问题吧，忘密码时全靠它", "#reg-question"]
+    : !a ? ["密保答案也要填哦", "#reg-answer"] : null;
+  if (bad) {
+    setHint("#register-hint", bad[0], "err");
+    shakeCard();
+    if (loginPanda) setMood(loginPanda, "oops");
+    const t = $(bad[1]);
+    if (t) t.focus();
+    return;
+  }
+  loginBusy = true;
+  const btn = $("#register-btn");
+  busyBtn(btn, true);
+  setHint("#register-hint", "正在创建账号…");
+  if (loginPanda) setMood(loginPanda, "thinking");
+  try {
+    const resp = await api("/api/auth/register", jsonOpts({
+      username: u, password: p1, role: regRole,
+      child: regRole === "parent" ? child : "", question: q, answer: a,
+    }));
+    const data = await resp.json().catch(() => ({}));
+    state.token = data.token;
+    state.username = data.username;
+    state.authRole = data.role || "child";
+    state.name = data.name || u;
+    state.role = state.authRole === "parent" ? "parent" : "child";
+    saveAuth();
+    setHint("#register-hint", "账号建好啦，正在进入…", "ok");
+    if (loginPanda) setMood(loginPanda, "happy");
+    await enterMain();
+    setAuthPane("login");
+    ["#reg-name", "#reg-pass", "#reg-pass2", "#reg-child", "#reg-question", "#reg-answer"]
+      .forEach((s) => { const n = $(s); if (n) n.value = ""; });
+  } catch (e) {
+    setHint("#register-hint", e.message || "注册失败，请稍后再试", "err");
+    if (loginPanda) setMood(loginPanda, "oops");
+    shakeCard();
+  } finally {
+    loginBusy = false;
+    busyBtn(btn, false);
+  }
+}
+
+let regRole = "child";
+let fpUser = "";  // 找回流程第二步要记住第一步查过的用户名
+
+function setRegRole(role) {
+  regRole = role === "parent" ? "parent" : "child";
+  document.querySelectorAll("#reg-role .seg-btn").forEach((b) => {
+    const on = b.dataset.role === regRole;
+    b.classList.toggle("active", on);
+    b.setAttribute("aria-checked", String(on));
+  });
+  setHidden("#reg-child-field", regRole !== "parent");
+}
+
+function forgotToStep1() {
+  setHidden("#forgot-step1", false);
+  setHidden("#forgot-step2", true);
+  fpUser = "";
+}
+
+async function forgotNext() {
+  if (loginBusy) return;
+  const u = fieldVal("#fp-name");
+  if (!u) {
+    setHint("#forgot-hint", "先填一下用户名哦", "err");
+    shakeCard();
+    const t = $("#fp-name");
+    if (t) t.focus();
+    return;
+  }
+  loginBusy = true;
+  const btn = $("#forgot-next-btn");
+  busyBtn(btn, true);
+  setHint("#forgot-hint", "正在查找账号…");
+  try {
+    const resp = await api(`/api/auth/question?username=${encodeURIComponent(u)}`);
+    const data = await resp.json().catch(() => ({}));
+    if (!data.recoverable) {
+      setHint("#forgot-hint", "这个账号注册时没设密保，没法自助找回哦", "err");
+      shakeCard();
+      return;
+    }
+    fpUser = u;
+    setText("#fp-question", data.question);
+    setHidden("#forgot-step1", true);
+    setHidden("#forgot-step2", false);
+    setHint("#forgot-hint", "");
+    const ans = $("#fp-answer");
+    if (ans) ans.focus();
+  } catch (e) {
+    setHint("#forgot-hint", e.message || "查询失败，请稍后再试", "err");
+    shakeCard();
+  } finally {
+    loginBusy = false;
+    busyBtn(btn, false);
+  }
+}
+
+async function forgotReset() {
+  if (loginBusy || !fpUser) return;
+  const a = fieldVal("#fp-answer");
+  const p1 = fieldVal("#fp-pass", false), p2 = fieldVal("#fp-pass2", false);
+  const bad = !a ? ["密保答案还没填", "#fp-answer"]
+    : p1.length < 4 ? ["新密码太短啦，至少 4 位", "#fp-pass"]
+    : p1 !== p2 ? ["两遍新密码不一样哦", "#fp-pass2"] : null;
+  if (bad) {
+    setHint("#forgot-hint", bad[0], "err");
+    shakeCard();
+    const t = $(bad[1]);
+    if (t) t.focus();
+    return;
+  }
+  loginBusy = true;
+  const btn = $("#forgot-reset-btn");
+  busyBtn(btn, true);
+  setHint("#forgot-hint", "正在重置密码…");
+  if (loginPanda) setMood(loginPanda, "thinking");
+  try {
+    await api("/api/auth/reset", jsonOpts({ username: fpUser, answer: a, password: p1 }));
+    setAuthPane("login");
+    const name = $("#login-name");
+    if (name) name.value = fpUser;
+    const pass = $("#login-pass");
+    if (pass) { pass.value = ""; pass.focus(); }
+    setLoginHint("密码已重置，用新密码登录吧～", "ok");
+    if (loginPanda) setMood(loginPanda, "happy");
+    ["#fp-name", "#fp-answer", "#fp-pass", "#fp-pass2"]
+      .forEach((s) => { const n = $(s); if (n) n.value = ""; });
+  } catch (e) {
+    setHint("#forgot-hint", e.message || "重置失败，请稍后再试", "err");
+    if (loginPanda) setMood(loginPanda, "oops");
+    shakeCard();
+  } finally {
+    loginBusy = false;
+    busyBtn(btn, false);
+  }
 }
 
 async function login(username, password, trigger) {
@@ -480,8 +666,7 @@ async function login(username, password, trigger) {
   const p = String(password == null ? "" : password);
   if (!u || !p) {
     setLoginHint(!u ? "先填一下用户名哦" : "密码还没填呢", "err");
-    const card = $("#login-card");
-    if (card) { card.classList.remove("shake"); void card.offsetWidth; card.classList.add("shake"); }
+    shakeCard();
     if (loginPanda) setMood(loginPanda, "oops");
     const target = !u ? $("#login-name") : $("#login-pass");
     if (target) target.focus();
@@ -536,7 +721,12 @@ function setupLoginExtras() {
   const passInput = $("#login-pass");
   const toggle = $("#pass-toggle");
   let peek = false;
-  const inter = attachLoginInteractions(loginPanda, { nameInput, passInput, isPeek: () => peek });
+  const inter = attachLoginInteractions(loginPanda, {
+    nameInput,
+    passInputs: [passInput, "#reg-pass", "#reg-pass2", "#fp-pass", "#fp-pass2"]
+      .map((s) => (typeof s === "string" ? $(s) : s)),
+    isPeek: () => peek,
+  });
   if (toggle && passInput) {
     toggle.addEventListener("pointerdown", (e) => e.preventDefault()); // 不抢输入框焦点
     toggle.onclick = () => {
@@ -563,6 +753,23 @@ function setupLoginExtras() {
     if (hint && hint.classList.contains("err")) setLoginHint("");
   }));
   document.querySelectorAll(".demo-role").forEach((b) => { b.onclick = () => demoLogin(b); });
+
+  // 注册面板：身份选择 + 输错提示即改即消
+  document.querySelectorAll("#reg-role .seg-btn").forEach((b) => {
+    b.onclick = () => setRegRole(b.dataset.role);
+  });
+  document.querySelectorAll("#pane-register input").forEach((n) => {
+    n.addEventListener("input", () => {
+      const hint = $("#register-hint");
+      if (hint && hint.classList.contains("err")) setHint("#register-hint", "");
+    });
+  });
+  document.querySelectorAll("#pane-forgot input").forEach((n) => {
+    n.addEventListener("input", () => {
+      const hint = $("#forgot-hint");
+      if (hint && hint.classList.contains("err")) setHint("#forgot-hint", "");
+    });
+  });
 
   // 气泡轮播：讲解时展示管家"主动办事"的样子
   const lines = [
@@ -711,6 +918,7 @@ function logout() {
   applyRole("child");
   setRelayDir("teacher2parent");
   resetUserUI();
+  setAuthPane("login");
   const hint = $("#login-hint");
   if (hint) hint.textContent = "";
   show("login");
@@ -1261,7 +1469,15 @@ async function loadGreeting() {
     addMsg("ai", text);
     s3("setPandaMood", "speaking");
   } catch (e) {
-    if (bubble) bubble.textContent = `问候生成失败：${e.message}`;
+    const fallbackText = `早呀，${state.name || "小豆"}！今天有什么想和管家聊聊的吗？无论是生活小事、竞赛备战还是心里话，我都一直陪着你～`;
+    if (bubble) {
+      bubble.innerHTML = "";
+      const span = el("span", "bb-text");
+      bubble.appendChild(span);
+      typewrite(span, fallbackText);
+    }
+    addMsg("ai", fallbackText);
+    s3("setPandaMood", "happy");
   }
 }
 
@@ -2047,9 +2263,8 @@ function openNodeDrawer(node) {
 const THEME_KEY = "pb_theme";
 
 function applyTheme(t) {
-  const light = t === "light";
-  if (light) document.body.dataset.theme = "light";
-  else document.body.removeAttribute("data-theme");
+  const light = t !== "dark";
+  document.body.dataset.theme = light ? "light" : "dark";
   document.querySelectorAll(".theme-toggle").forEach((b) => {
     const use = b.querySelector("use");
     const lab = b.querySelector(".tt-label");
@@ -2059,7 +2274,10 @@ function applyTheme(t) {
     b.setAttribute("aria-label", light ? "切换深色主题" : "切换浅色主题");
   });
   const meta = document.querySelector('meta[name="theme-color"]');
-  if (meta) meta.setAttribute("content", light ? "#eef2ef" : "#0a0f0d");
+  if (meta) meta.setAttribute("content", light ? "#f6faf7" : "#0c1512");
+  // 记忆星球跟着切（s3() 被 sceneReady 门挡住会丢调用，这里直调——setTheme 在 init 前也生效）
+  if (typeof scene3d.setTheme === "function") scene3d.setTheme(light ? "light" : "dark");
+  if (state.fallback2d) { renderFallbackGraph(); drawGraph2D(); }
 }
 
 function toggleTheme() {
@@ -2745,6 +2963,14 @@ function bind() {
   on("#login-btn", () => login(
     $("#login-name") ? $("#login-name").value : "",
     $("#login-pass") ? $("#login-pass").value : ""));
+  // 登录卡三个面板的切换与提交
+  on("#to-register", () => setAuthPane("register"));
+  on("#to-forgot", () => setAuthPane("forgot"));
+  on("#back-login-reg", () => setAuthPane("login"));
+  on("#back-login-fp", () => setAuthPane("login"));
+  on("#register-btn", register);
+  on("#forgot-next-btn", forgotNext);
+  on("#forgot-reset-btn", forgotReset);
   on("#send-btn", () => send());
   on("#role-toggle", toggleRole);
   on("#secret-btn", toggleSecret);
@@ -2784,6 +3010,19 @@ function bind() {
       if (e.key === "Enter" && !e.isComposing) login(nameInput ? nameInput.value : "", passInput.value);
     });
   }
+  // 注册 / 找回面板：输入框里回车 = 点当前面板的主按钮
+  const paneEnter = (paneSel, btnSel) => {
+    const pane = $(paneSel);
+    if (!pane) return;
+    pane.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter" || e.isComposing || e.target.tagName !== "INPUT") return;
+      const btn = $(btnSel);
+      if (btn && !btn.closest(".hidden")) btn.click();
+    });
+  };
+  paneEnter("#pane-register", "#register-btn");
+  paneEnter("#forgot-step1", "#forgot-next-btn");
+  paneEnter("#forgot-step2", "#forgot-reset-btn");
   const msgInput = $("#msg-input");
   if (msgInput) {
     msgInput.addEventListener("keydown", (e) => {
@@ -2822,7 +3061,7 @@ function bind() {
 }
 
 function boot() {
-  try { applyTheme(localStorage.getItem(THEME_KEY) || "dark"); } catch { applyTheme("dark"); }
+  try { applyTheme(localStorage.getItem(THEME_KEY) || "light"); } catch { applyTheme("light"); }
   if ($("#login-panda")) {
     try {
       loginPanda = mountPanda($("#login-panda"));
