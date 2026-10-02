@@ -27,25 +27,18 @@ async def _run_llm_node(ctx: tuple[str, str], event: str, node: dict, results: d
     )
 
 
-async def _run_node(ctx: tuple[str, str], event: str, node: dict, results: dict) -> str:
+async def _run_node(ctx: tuple[str, str], store: MemoryStore, event: str,
+                    node: dict, results: dict) -> str:
     tool, args = node["tool"], node.get("args", {})
-    if tool == "race_lookup":
-        return await asyncio.to_thread(tools.race_lookup, str(args.get("query", event)))
-    if tool == "transport_lookup":
-        return await asyncio.to_thread(
-            tools.transport_lookup,
-            str(args.get("from_city", "")),
-            str(args.get("to_city", "")),
-        )
-    if tool == "weather":
-        return await tools.weather(str(args.get("city", "")))
-    if tool == "web_search":
-        out = await tools.web_search(str(args.get("query", event)))
-        if out is not None:
-            return out
-        # 未配置搜索 Key：降级为模型知识，仍真生成
+    if tools.get(tool) is None:
+        # llm 或未知工具（planner 已校验，走到这是兜底）：交给模型环节
         return await _run_llm_node(ctx, event, node, results)
-    return await _run_llm_node(ctx, event, node, results)
+    out = await tools.dispatch(tool, args, tools.ToolCtx(
+        store=store, event=event, results=results))
+    if out is None:
+        # 工具不可用（如联网功能被配置关闭）：降级为模型知识，仍真生成
+        return await _run_llm_node(ctx, event, node, results)
+    return out
 
 
 async def run_plan(
@@ -82,7 +75,7 @@ async def run_plan(
         await emit({"type": "node", "id": node["id"], "title": node["title"], "status": "running"})
         try:
             anc = _ancestors(node)
-            text = await _run_node(ctx, event, node,
+            text = await _run_node(ctx, store, event, node,
                                    {k: v for k, v in results.items() if k in anc})
             results[node["id"]] = text
             statuses[node["id"]] = "done"

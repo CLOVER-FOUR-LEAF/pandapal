@@ -2,13 +2,13 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import date
 
-from . import llm, prompts
+from . import llm, prompts, tools
 from .memory import MemoryStore
 from .store import bigrams
 
-VALID_TOOLS = {"race_lookup", "transport_lookup", "weather", "web_search", "llm"}
+# 可用工具集合 = 注册表全部工具 + llm 兜底环节，注册即生效不用改这里
+VALID_TOOLS = tools.names() | {"llm"}
 
 
 class PlanError(RuntimeError):
@@ -73,7 +73,8 @@ async def make_plan(store: MemoryStore, message: str, affairs_snapshot: dict | N
                 {"role": "system", "content": "你是任务规划模块，只输出 JSON。"},
                 {"role": "user", "content": prompts.PLANNER.format(
                     name=name,
-                    today=date.today().isoformat(),
+                    now=tools.now_text(),
+                    tools_doc=tools.planner_docs(),
                     memory_block=mem or "（暂无记忆）",
                     affairs_brief=brief,
                     message=message,
