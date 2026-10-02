@@ -12,14 +12,15 @@ Emit = Callable[[dict], Awaitable[None]]
 
 async def _run_llm_node(store: MemoryStore, event: str, node: dict, results: dict) -> str:
     context = "\n\n".join(f"【{nid}】{text}" for nid, text in results.items())
+    name, mem = await asyncio.to_thread(lambda: (store.child_name, store.active_block()))
     return await llm.complete(
         [{"role": "user", "content": prompts.NODE_LLM.format(
-            name=store.child_name,
+            name=name,
             event=event,
             title=node["title"],
             task=node["args"].get("task", node["title"]),
             context=context or "（无前置结果）",
-            memory_block=store.active_block() or "（暂无记忆）",
+            memory_block=mem or "（暂无记忆）",
         )}],
         max_tokens=800,
         caller="node",

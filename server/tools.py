@@ -4,9 +4,8 @@ from __future__ import annotations
 import json
 import re
 
-import httpx
-
 from . import config
+from .llm import shared_client
 
 RACE_DB = config.DATA_DIR / "race_db.json"
 TRANSPORT_DB = config.DATA_DIR / "transport_db.json"
@@ -49,10 +48,10 @@ def race_lookup(query: str) -> str:
 async def weather(city: str) -> str:
     """wttr.in 免费天气服务，无需 Key。"""
     url = f"https://wttr.in/{city}?format=j1&lang=zh"
-    async with httpx.AsyncClient(timeout=config.TOOL_TIMEOUT) as client:
-        resp = await client.get(url, headers={"User-Agent": "curl/8"})
-        resp.raise_for_status()
-        data = resp.json()
+    resp = await shared_client().get(
+        url, headers={"User-Agent": "curl/8"}, timeout=config.TOOL_TIMEOUT)
+    resp.raise_for_status()
+    data = resp.json()
     out = []
     for day in data.get("weather", [])[:3]:
         date = day.get("date", "")
@@ -73,13 +72,13 @@ async def web_search(query: str) -> str | None:
     """可选联网搜索（Tavily 兼容 POST）。未配置 Key 时返回 None，由调用方降级。"""
     if not config.SEARCH_API_KEY or not config.SEARCH_BASE_URL:
         return None
-    async with httpx.AsyncClient(timeout=config.TOOL_TIMEOUT) as client:
-        resp = await client.post(
-            f"{config.SEARCH_BASE_URL}/search",
-            json={"api_key": config.SEARCH_API_KEY, "query": query, "max_results": 3},
-        )
-        resp.raise_for_status()
-        data = resp.json()
+    resp = await shared_client().post(
+        f"{config.SEARCH_BASE_URL}/search",
+        json={"api_key": config.SEARCH_API_KEY, "query": query, "max_results": 3},
+        timeout=config.TOOL_TIMEOUT,
+    )
+    resp.raise_for_status()
+    data = resp.json()
     results = data.get("results") or []
     if not results:
         return f"搜索「{query}」没有结果"

@@ -49,9 +49,9 @@ def _time_chips(now: datetime) -> list[dict]:
     return [_chip("我还有事没做完，要不要熬夜？", "time")]
 
 
-def _due_chips(a: AffairStore) -> list[dict]:
+def _due_chips(due: list[dict]) -> list[dict]:
     out = []
-    for d in a.due_soon(days=14):
+    for d in due:
         title, days = _short(d["title"]), int(d.get("days") or 0)
         if d.get("kind") == "health":
             out.append(_chip(f"{title}：我今天感觉好点了", "due"))
@@ -76,9 +76,9 @@ _KIND_ASK = {
 }
 
 
-def _affair_chips(a: AffairStore, skip: set[str]) -> list[dict]:
+def _affair_chips(affairs: list[dict], skip: set[str]) -> list[dict]:
     out = []
-    items = sorted(a.list(), key=lambda x: str(x.get("updated") or ""), reverse=True)
+    items = sorted(affairs, key=lambda x: str(x.get("updated") or ""), reverse=True)
     for it in items:
         if it.get("id") in skip:
             continue
@@ -92,9 +92,9 @@ def _affair_chips(a: AffairStore, skip: set[str]) -> list[dict]:
     return out
 
 
-def _graph_chips(g: GraphStore, linked: set[str]) -> list[dict]:
+def _graph_chips(all_nodes: list[dict], linked: set[str]) -> list[dict]:
     """反复提起、但还没挂到事务上的兴趣/目标 → 邀请聊或接成计划。"""
-    nodes = [n for n in g.load()["nodes"] if not n.get("private") and n.get("status") == "active"]
+    nodes = [n for n in all_nodes if not n.get("private") and n.get("status") == "active"]
     nodes.sort(key=lambda n: -int(n.get("weight") or 1))
     out = []
     for n in nodes:
@@ -113,11 +113,13 @@ def _graph_chips(g: GraphStore, linked: set[str]) -> list[dict]:
 def opening(a: AffairStore, g: GraphStore, history_len: int = 0, now: datetime | None = None) -> list[dict]:
     """开场 chips：先说最要紧的，再说正在办的，再顺着兴趣，最后按时段兜底。"""
     now = now or datetime.now()
-    due = _due_chips(a)
-    due_ids = {d["id"] for d in a.due_soon(days=14)}
-    linked = {nid for it in a.list() for nid in it.get("linked_nodes") or []}
-    chips = due[:2] + _affair_chips(a, due_ids)[:2] + _graph_chips(g, linked)
-    if not a.list() and not history_len:
+    items = a.list()                      # affairs.json 只读一次，下面各步共用
+    due_items = a.due_soon(days=14, items=items)
+    due_ids = {d["id"] for d in due_items}
+    linked = {nid for it in items for nid in it.get("linked_nodes") or []}
+    chips = (_due_chips(due_items)[:2] + _affair_chips(items, due_ids)[:2]
+             + _graph_chips(g.load()["nodes"], linked))
+    if not items and not history_len:
         # 全新档案：先认识，再帮忙
         chips += [_chip("我先介绍一下我自己", "intro"), _chip("我最近在忙好几件事", "intro"),
                   _chip("你能帮我做什么？", "intro")]

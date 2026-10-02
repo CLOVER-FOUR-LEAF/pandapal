@@ -339,7 +339,9 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   padding: 32px 24px calc(32px + var(--safe-b));
   overflow: hidden;
 }
-.login-bg { position: fixed; inset: 0; pointer-events: none; z-index: 0; }
+.login-bg { position: fixed; inset: 0; pointer-events: none; z-index: 0;
+  background: radial-gradient(130% 90% at 50% -6%, #12201b 0%, #0a0f0d 58%, #080d0b 100%);
+}
 .login-bg::before {
   content: ""; position: absolute; inset: 0;
   background:
@@ -547,19 +549,17 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 
 .login-accounts { font-size: 11.5px; line-height: 1.6; text-align: center; color: var(--ink-faint); margin-top: 2px; }
 
-/* 浅色主题下的登录页适配：场景仍是夜竹林氛围，卡片转亮面玻璃 */
-body[data-theme="light"] .login-bg::before {
-  background:
-    radial-gradient(40% 36% at 28% 46%, rgba(47, 156, 102, .10), transparent 70%),
-    radial-gradient(60% 40% at 50% 120%, rgba(201, 139, 48, .08), transparent 72%);
-}
-body[data-theme="light"] .login-card {
-  background: rgba(255, 255, 255, .82);
-  border-color: var(--line-strong);
-}
-body[data-theme="light"] .hero-bubble {
-  background: rgba(255, 255, 255, .85);
-  border-color: var(--line-strong);
+/* 登录页始终是「夜竹林」场景：浅色主题下也强制深色变量，
+   否则半透明卡 + 夜光竹林叠在白底上完全没法看。 */
+body[data-theme="light"] #login-view {
+  --bg-0: #080d0b; --bg-1: #0d1613; --bg-2: #12201b;
+  --card: #121c18; --card-2: #16241e; --card-3: #1a2b23;
+  --line: rgba(214, 236, 226, .08); --line-strong: rgba(214, 236, 226, .16);
+  --bamboo: #5fd39b; --bamboo-deep: #39a86f;
+  --amber: #f0b45f; --amber-deep: #d99a3f;
+  --ink: #e9f1ec; --ink-2: #aec2b7; --ink-dim: #72877d; --ink-faint: #4f6157;
+  --shadow-card: 0 1px 0 rgba(255, 255, 255, .04) inset, 0 10px 28px rgba(0, 0, 0, .30);
+  --shadow-pop: 0 18px 50px rgba(0, 0, 0, .45);
   color: var(--ink);
 }
 
@@ -1606,8 +1606,22 @@ body[data-theme="light"] .md pre { background: #eef4f0; }
 @media (max-width: 1099px) {
   :root { --gap: 10px; }
   #main-view { padding-bottom: calc(var(--topbar-h) + var(--safe-b) + 18px); }
+  /* 其余视图同样要给固定 tabbar 让出底部空间，
+     否则 graph/logs（100dvh 钉底栏）与 parent/growth/memory（滚动到底）的内容会被 tabbar 盖住且吃掉点击 */
+  #graph-view, #logs-view, #parent-view, #growth-view, #memory-view {
+    padding-bottom: calc(var(--topbar-h) + var(--safe-b) + 18px);
+  }
   #main-view .topbar { flex-wrap: wrap; height: auto; padding: 10px 12px; }
   #main-view .topbar-nav { display: none; }  /* 主视图导航收口到底部 tab */
+
+  /* 子视图顶栏同理：一排 nav-btn + brand + 日期在窄屏必溢出，
+     而横向溢出会把固定 tabbar 顶到 layout viewport 之外——点击全部失效。
+     底部 tabbar 已提供全量导航，子视图只保留「返回」。 */
+  .subview-nav .nav-btn { display: none; }
+  .subview-nav .nav-btn[data-go="main"],
+  .subview-nav #memory-back,
+  .subview-nav #logs-back { display: inline-flex; }
+  .topbar-date { display: none; }
 
   /* 底部 Tab：把 topbar-nav 克隆视觉做成固定条（JS 会渲染 #tabbar） */
   #tabbar {
