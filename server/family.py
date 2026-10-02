@@ -10,7 +10,10 @@
 进入这两条 prompt；本周事实统计同样先滤掉 private。导出只给孩子本人（和 admin）：
 那是孩子自己的档案，悄悄话也在里面。
 
-挂在 main.py 末尾 include_router，因此这里可以直接用 main 里的鉴权/会话辅助。
+挂在 main.py 末尾 include_router，因此这里要用 main 里的鉴权/会话辅助；但**不能在顶层
+import**：`python -m server.main` 时本模块的入口名是 __main__，顶层 `from .main import`
+会让 server.main 被当作另一个模块二次导入，触发 main ↔ family 循环导入而启动失败
+（uvicorn 直接 import server.main:app 时反而正常，问题只在 -m 启动路径上暴露）。
 """
 from __future__ import annotations
 
@@ -28,9 +31,14 @@ from pydantic import BaseModel, Field
 
 from . import actions, auth, graph, llm, prompts, sessions, store
 from .affairs import STAGE_CN, AffairStore
-from .main import _affairs_brief, _auth_session, _get_session, _need, _now_text, _stores, _user
 
 router = APIRouter()
+
+
+def _m():
+    """延迟取 main 的鉴权/会话辅助（避免顶层循环导入，见模块 docstring）。"""
+    from . import main
+    return main
 
 
 
@@ -111,8 +119,8 @@ def _weekly_prompt(name: str, d: dict) -> str:
 
 @router.get("/api/parent/weekly")
 async def api_weekly(request: Request, name: str = "", days: int = 7):
-    _, sess = await _auth_session(request, "weekly", name)
-    g, a, _ = _stores(sess)
+    _, sess = await _m()._auth_session(request, "weekly", name)
+    g, a, _ = _m()._stores(sess)
     days = max(1, min(int(days), 31))
     d = await asyncio.to_thread(_weekly_collect, a, g, days)
     try:
@@ -163,15 +171,15 @@ def _claim(a: AffairStore, title: str) -> dict | None:
 
 async def _land_notice(sess, text: str, source: str) -> dict:
     """一个孩子的落地：LLM 读通知+记忆 → 专属版文案 → 事务/清单/提醒真落盘。"""
-    g, a, _ = _stores(sess)
+    g, a, _ = _m()._stores(sess)
     mem = await asyncio.to_thread(g.brief_block, limit=24)
     rec = (await asyncio.to_thread(g.recall, text, limit=3))["block"]
     if rec:
         mem = f"{mem}\n\n和这份通知相关的记忆：\n{rec}" if mem else rec
-    brief = await asyncio.to_thread(_affairs_brief, a, 6)
+    brief = await asyncio.to_thread(_m()._affairs_brief, a, 6)
     data = await llm.complete_json(
         [{"role": "user", "content": prompts.NOTICE.format(
-            name=sess.name, now=_now_text(), source=source, text=text,
+            name=sess.name, now=_m()._now_text(), source=source, text=text,
             affairs_brief=brief, memory_block=mem or "（暂无记忆）")}],
         max_tokens=1200, caller="notice")
     title = str(data.get("title") or "").strip()[:18] or "学校通知"
@@ -227,8 +235,8 @@ async def _land_notice(sess, text: str, source: str) -> dict:
 
 @router.post("/api/notice")
 async def api_notice(request: Request, req: NoticeReq):
-    user = _user(request)
-    _need(user, "notice")
+    user = _m()._user(request)
+    _m()._need(user, "notice")
     if req.names:
         # 批量下发是机构侧能力：只有 admin（代表学校/机构账号）能一次覆盖多个孩子
         if user["role"] != "admin":
@@ -248,7 +256,7 @@ async def api_notice(request: Request, req: NoticeReq):
     async def one(n: str) -> dict:
         async with sem:
             try:
-                sess = await _get_session(n)
+                sess = await _m()._get_session(n)
                 return await _land_notice(sess, req.text.strip(), req.source.strip() or "老师")
             except HTTPException:
                 raise
@@ -298,7 +306,7 @@ def _build_zip(child_dir: Path, name: str) -> bytes:
 
 @router.get("/api/export")
 async def api_export(request: Request, name: str = ""):
-    _, sess = await _auth_session(request, "export", name)
+    _, sess = await _m()._auth_session(request, "export", name)
     data = await asyncio.to_thread(_build_zip, Path(sess.dir), sess.name)
     fname = f"童年备忘录-{sess.name}-{date.today().isoformat()}.zip"
     safe = f"panda-memoir-{date.today().isoformat()}.zip"  # ASCII 兜底名；中文名走 filename*
