@@ -11,5 +11,7 @@ data/child_*/
 data/logs/
 data/users.json
 data/tokens.json
+data/profiles.json
+data/**/*.tmp
 daily_tmp/
 !data/child_xiaodou/
