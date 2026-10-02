@@ -59,6 +59,34 @@ def test_braces_balanced() -> None:
                f"(={src.count('(')} )={src.count(')')}")
 
 
+# 前端模块按 ES module 解析。括号配平挡不住"同一作用域重复声明"——
+# 那是模块解析期就抛的 SyntaxError，整个 app.js 不会执行，页面永远停在启动层。
+# 注意 node --check 对含 import 的文件按 CommonJS 解析，会漏报重复声明，
+# 所以这里把源码落到 .mjs 再检查（与浏览器一致）。
+ESM_MODULES = ("app.js", "admin.js", "scene3d.js", "graph2d.js", "panda.js",
+               "panda3d.js", "splash.js", "sw.js")
+
+
+def test_es_modules_parse() -> None:
+    import shutil
+    import subprocess
+    import tempfile
+
+    node = shutil.which("node")
+    if not node:
+        record("esm_parse_skipped", True, "本机无 node，跳过（CI 上应安装 node ）")
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        for name in ESM_MODULES:
+            mod = Path(tmp) / (name.replace(".js", "") + ".mjs")
+            mod.write_text(read(name), encoding="utf-8")
+            r = subprocess.run([node, "--check", str(mod)],
+                               capture_output=True, text=True, timeout=30)
+            first = (r.stderr or "").strip().splitlines()
+            detail = next((l.strip() for l in first if "Error" in l), " ".join(first[:2]))
+            record(f"{name}_esm_parse", r.returncode == 0, detail[:120])
+
+
 def reset_src() -> str:
     """resetUserUI 的函数体（断言"切账号时把上一轮状态清干净"）。"""
     js = read("app.js")
@@ -132,6 +160,7 @@ def main() -> int:
         test_ids_resolve()
         test_icons_resolve()
         test_braces_balanced()
+        test_es_modules_parse()
         test_wiring()
         test_pause_state_hygiene()
     except Exception as e:  # noqa: BLE001

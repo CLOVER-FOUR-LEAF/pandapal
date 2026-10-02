@@ -3884,7 +3884,7 @@ function bind() {
   paneEnter("#pane-register", "#register-btn");
   paneEnter("#forgot-step1", "#forgot-next-btn");
   paneEnter("#forgot-step2", "#forgot-reset-btn");
-  const msgInput = $("#msg-input");
+  // 复用上面粘贴上传那处取的 msgInput：同一个函数内不能重复声明 const
   if (msgInput) {
     msgInput.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
