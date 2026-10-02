@@ -711,8 +711,24 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   }
   #affair-detail .drawer-body { flex: 1; min-height: 0; overflow-y: auto; }
 
-  .chat-panel { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
-  #chat { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+.chat-panel { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; position: relative; }
+#chat { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+
+/* 暂停按钮：回答进行中浮在对话栏右下角，点它中止当前回答 */
+.pause-btn {
+  position: absolute; right: 16px; bottom: 78px; z-index: 6;
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12.5px; font-weight: 600;
+  padding: 7px 14px; border-radius: 999px;
+  color: var(--amber);
+  background: color-mix(in srgb, var(--card-2) 92%, transparent);
+  border: 1px solid rgba(240, 180, 95, .45);
+  box-shadow: var(--shadow-card);
+  -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
+  animation: rise .25s ease-out both;
+}
+.pause-btn:hover { background: var(--amber-light); }
+.pause-btn .ic { width: 14px; height: 14px; }
 }
 
 /* 星球速览：窄条入口卡，整卡可点进星球页 */
@@ -841,6 +857,14 @@ body[data-theme="dark"] .scene-hint {
   -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
   box-shadow: var(--shadow-pop);
   animation: rise .35s ease-out both;
+  transition: opacity .7s ease, transform .7s ease;
+}
+/* 问候气泡停留数秒后渐隐退场（动画 fill 会压住 transition，故先撤掉 animation） */
+#panda-bubble.bb-fade {
+  animation: none;
+  opacity: 0;
+  transform: translateY(6px);
+  pointer-events: none;
 }
 #panda-bubble::after {
   content: ""; position: absolute; left: 20px; bottom: -7px;

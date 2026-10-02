@@ -94,6 +94,8 @@ const state = {
   sceneReady: false,
   sceneTried: false,
   sendSeq: 0,
+  chatAbort: null,   // 进行中回答的 AbortController（暂停用）
+  chatPaused: false, // 本轮是不是被用户主动暂停
   needGraphRefresh: false,
   relayDir: "teacher2parent",
 };
@@ -914,7 +916,11 @@ function resetUserUI() {
   }
   setHidden("#node-drawer", true);
   setHidden("#affair-detail", true);
-  setHidden("#panda-bubble", true);
+  if (state.chatAbort) { try { state.chatAbort.abort(); } catch { /* 忽略 */ } }
+  state.chatAbort = null;
+  state.chatPaused = false;
+  setPauseVisible(false);
+  hideBubble($("#panda-bubble"));
   modeBadge("");
   chatStatus();
   const input = $("#msg-input");
@@ -1522,11 +1528,39 @@ function actionReceipt(ev) {
  * 6. 问候 + 历史
  * ========================================================================== */
 
+// 问候气泡：停留一小会儿后渐隐，别一直挡着场景
+const BUBBLE_HOLD_MS = 6000;
+const BUBBLE_FADE_MS = 700;
+let bubbleFadeTimer = 0;
+
+/** 立刻收起问候气泡（发消息、退出登录时用）。 */
+function hideBubble(bubble) {
+  clearTimeout(bubbleFadeTimer);
+  if (!bubble) return;
+  bubble.classList.remove("bb-fade");
+  bubble.classList.add("hidden");
+}
+
+/** 让气泡停留 holdMs 后渐隐，动画结束再真正隐藏。 */
+function scheduleBubbleFade(bubble) {
+  if (!bubble) return;
+  clearTimeout(bubbleFadeTimer);
+  bubble.classList.remove("hidden", "bb-fade");
+  bubbleFadeTimer = setTimeout(() => {
+    bubble.classList.add("bb-fade");
+    bubbleFadeTimer = setTimeout(() => {
+      bubble.classList.add("hidden");
+      bubble.classList.remove("bb-fade");
+    }, BUBBLE_FADE_MS);
+  }, BUBBLE_HOLD_MS);
+}
+
 async function loadGreeting() {
   const bubble = $("#panda-bubble");
   const span = el("span", "bb-text");
   if (bubble) {
-    bubble.classList.remove("hidden");
+    clearTimeout(bubbleFadeTimer);
+    bubble.classList.remove("hidden", "bb-fade");
     bubble.innerHTML = "";
     bubble.appendChild(span);
   }
@@ -1558,6 +1592,7 @@ async function loadGreeting() {
       bubble.appendChild(box);
     }
   }
+  scheduleBubbleFade(bubble);
   addMsg("ai", text);
 }
 
@@ -1834,10 +1869,30 @@ function addCard(card) {
 
 function unlockInput() {
   state.busy = false;
+  setPauseVisible(false);
   const btn = $("#send-btn");
   if (btn) btn.disabled = false;
   const input = $("#msg-input");
   if (input) input.placeholder = state.secret ? "悄悄话（家长视角看不到）…" : "跟熊猫管家说说今天…";
+}
+
+/** 暂停按钮：只在回答进行中显示。 */
+function setPauseVisible(on) {
+  const btn = $("#pause-btn");
+  if (!btn) return;
+  btn.classList.toggle("hidden", !on);
+}
+
+/** 用户中途叫停：中止这一轮的 SSE 读取，已生成的部分保留。 */
+function pauseChat() {
+  if (!state.busy) return;
+  state.chatPaused = true;
+  if (state.chatAbort) {
+    try { state.chatAbort.abort(); } catch { /* 已结束 */ }
+  }
+  addSys("回答已暂停");
+  chatStatus("已暂停");
+  toast("已暂停回答");
 }
 
 async function send(preset) {
@@ -1858,6 +1913,10 @@ async function send(preset) {
 
   const seq = ++state.sendSeq;
   state.busy = true;
+  state.chatPaused = false;
+  const abort = new AbortController();
+  state.chatAbort = abort;
+  setPauseVisible(true);
   const sendBtn = $("#send-btn");
   if (sendBtn) sendBtn.disabled = true;
   if (input) input.placeholder = "管家正在想…";
@@ -1865,8 +1924,7 @@ async function send(preset) {
   const secret = state.secret;
   if (input && preset === undefined) input.value = "";
   addMsg("me", text, secret);
-  const bubble = $("#panda-bubble");
-  if (bubble) bubble.classList.add("hidden");
+  hideBubble($("#panda-bubble"));
   s3("setPandaMood", "thinking");
   if (pandaSvg) setMood(pandaSvg, "thinking");
   chatStatus("正在想…", true);
@@ -1878,17 +1936,23 @@ async function send(preset) {
 
   const payload = secret ? `[[secret]]${text}` : text;
   try {
-    const resp = await api("/api/chat", jsonOpts({ name: state.name, message: payload }));
+    const resp = await api("/api/chat",
+      { ...jsonOpts({ name: state.name, message: payload }), signal: abort.signal });
     await readSSE(resp, ctx, dropTyping);
   } catch (e) {
     dropTyping();
-    if (!ctx.aiRaw && input && preset === undefined && !input.value) {
-      input.value = text; // 一个 token 都没回来：请求根本没生效，恢复草稿免得重打
+    if (state.chatPaused || e.name === "AbortError") {
+      // 用户主动暂停：保留已生成的内容，不报错、不恢复草稿
+    } else {
+      if (!ctx.aiRaw && input && preset === undefined && !input.value) {
+        input.value = text; // 一个 token 都没回来：请求根本没生效，恢复草稿免得重打
+      }
+      if (e.status === 429) addMsg("ai", "管家还在回上一条，稍等 1 秒再说～");
+      else addMsg("ai", `唔……${e.message}`);
+      s3("setPandaMood", "worried");
     }
-    if (e.status === 429) addMsg("ai", "管家还在回上一条，稍等 1 秒再说～");
-    else addMsg("ai", `唔……${e.message}`);
-    s3("setPandaMood", "worried");
   } finally {
+    if (state.chatAbort === abort) state.chatAbort = null;
     dropTyping();
     flushMd(ctx);
     if (ctx.aiBubble) ctx.aiBubble.classList.remove("streaming");
@@ -1897,7 +1961,7 @@ async function send(preset) {
       s3("setPandaMood", "idle");
       if (pandaSvg) setMood(pandaSvg, "normal");
       modeBadge("");
-      chatStatus();
+      if (!state.chatPaused) chatStatus();
       const inp = $("#msg-input");
       if (inp) inp.focus();
       if (state.needGraphRefresh) {
@@ -1921,7 +1985,15 @@ async function readSSE(resp, ctx, dropTyping) {
   const decoder = new TextDecoder();
   let buf = "";
   for (;;) {
-    const { done, value } = await reader.read();
+    let chunk;
+    try {
+      chunk = await reader.read();
+    } catch (e) {
+      // 用户暂停会 abort 掉底层连接，reader.read() 抛 AbortError：静默收尾
+      if (state.chatPaused || (e && e.name === "AbortError")) break;
+      throw e;
+    }
+    const { done, value } = chunk;
     if (done) break;
     if (ctx.seq !== state.sendSeq) {
       try { await reader.cancel(); } catch { /* 忽略 */ }
@@ -3085,6 +3157,7 @@ function bind() {
   on("#forgot-next-btn", forgotNext);
   on("#forgot-reset-btn", forgotReset);
   on("#send-btn", () => send());
+  on("#pause-btn", pauseChat);
   on("#role-toggle", toggleRole);
   on("#secret-btn", toggleSecret);
   on("#dream-btn", runDream);
