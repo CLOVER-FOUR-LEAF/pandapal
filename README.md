@@ -55,7 +55,7 @@ cp .env.example .env   # 然后填入你的 LLM_API_KEY 等
 | 注册（孩子/家长绑定）· 密保找回密码 · token 吊销 | `server/auth.py` + `/api/auth/register|question|reset` |
 | 记忆驱动开场问候 | `GET /api/greeting` |
 | 闲聊通道（人设+活跃记忆注入+历史尾部→流式回复） | `server/main.py` `_chat_stream` |
-| 意图分类（plan/chat）· FastTriage 免 LLM 快速路（零信号短闲聊直接 chat，命中任一办事信号词 veto 回 LLM，自带小情绪词典） | `server/router.py` |
+| 意图分类（plan/chat）· FastTriage 免 LLM 快速路（零信号短闲聊直接 chat，命中任一办事信号词 veto 回 LLM，自带小情绪词典）· 分类结果缓存（同一句话+同一份事务简报 300s 内不重问模型，保底结果不缓存） | `server/router.py` |
 | 任务拆解：LLM 输出 JSON DAG，校验去环重试 | `server/planner.py` |
 | 按依赖并行执行 + SSE 实时状态 | `server/executor.py` |
 | 结构化卡片合成 + 出卡前判官自检（"实质回应孩子了吗"，不过带意见重出一次，原卡保底） | `server/synth.py` + `server/main.py` `_supervise_card` |
@@ -63,11 +63,12 @@ cp .env.example .env   # 然后填入你的 LLM_API_KEY 等
 | 先问清楚再动手：需求缺关键信息（如"帮我写论文"没说写什么）→ planner 输出 `{"clarify": …}` 反问而非拿记忆硬猜；原请求挂 `Session.pending_clarify`，孩子下一句回复并回原请求重走完整管线 | `server/planner.py` `clarify` + `server/main.py` pending 合并 |
 | 长文稿管线（论文/报告/作文）：卡片只展示"查到的素材+提纲"，正文走 `paper_outline` 定结构 → 各节并行生成 → 拼 markdown（单节失败如实标缺） | `server/actions.py` `_write_paper` + `prompts.py` `PAPER_*` |
 | 交付物落盘：draft 文稿同时落成 `files/` 里的 .docx 真文件（python-docx 排版，失败退 .md），卡片一键下载、文件面板标「管家产出」徽章 | `server/actions.py` `_draft_to_file` + `GET /api/files/{id}/content?download=1` |
+| 文稿修订环："把结尾改改/帮我重写"对着 48h 内的稿子就地改写（`_REVISE_ASK` 锚点+新鲜度双门槛，不重走规划管道），同一 draft_id 更新、交付文件换新版；"把闹钟改到8点"这类话不劫持 | `server/main.py` 修订锚点 + `server/actions.py` `revise_draft` |
 | 文件式记忆读写：轮后 LLM 抽取→topics/daily/MEMORY；单写锁+原子写 | `server/memory.py` |
 | Dreaming 记忆整理：daily 跨天去重→五信号打分→反复出现的事晋升进 MEMORY.md（标 `[梦]` 出处可查）+ 梦日记落盘；每天一次、全确定性不调 LLM、悄悄话不触发 | `server/dream.py` |
 | 工具脚手架（声明式注册表，@tool 注册即接入 planner/executor/闲聊通道）：看时间 `now` / 本地赛事库 `race_lookup` / 交通参考 `transport_lookup` / wttr.in 天气 `weather` / 联网搜索 `web_search`（Tavily 兼容端点，未配置则必应网页解析兜底）/ 打开网页 `web_browse` | `server/tools.py` |
 | 闲聊直答的工具轮：启发式命中 → 调度器挑工具 → 多工具并行分发 → 结果注入 system → 流式回复（`tool` SSE 事件驱动前端工具条） | `server/main.py` `_tool_round` + `server/prompts.py` `TOOL_PICK` |
-| 记忆本页：主题分组+时间线+长期记忆 | `web/` + `GET /api/memory` |
+| 记忆本页：主题分组+时间线+长期记忆+梦日记（晋升过程可见） | `web/` + `GET /api/memory` |
 | 管家朗读（小米 MiMo TTS）：回复定型后合成语音，`voice` 事件落在 `done` 之后不拖慢正文；口播稿先洗成口语（去 markdown/emoji、日期时间口语化、限长收尾）；方案卡只念一句引导稿；对话音优先级高于问候/晨报，发新消息的瞬间就掐断 | `server/tts.py` + `server/voice.py` |
 | 语音识别双路径：浏览器 SpeechRecognition 优先（免上传逐字上屏），报服务级错误当场落 MiMo ASR 服务端兜底（录 PCM→WAV→`POST /api/stt`），Firefox/国内 Chrome 也能用 | `server/stt.py` + `web/app.js` `setupMic` |
 | 音色档案 `voice.json`：默认清纯甜美女声（voicedesign 按文字生成音色），可一键切内置音色；孩子直接跟管家说"换个温柔的声音"，由管家自行扩写成音色提示词并落档（确定性正则锚点，不动意图分类） | `server/prompts.py` `VOICE_DESIGN` + `POST /api/voice/preview` |
