@@ -222,6 +222,34 @@ def test_retrieve_skips_active_and_clamps() -> None:
     record("retrieve_active_in_active_block", "钢琴" in body_of(store.active_block()))
 
 
+def test_active_block_attention_gate() -> None:
+    """注意力门控：陈旧活跃主题不再每轮都注入；本轮相关才唤回，且唤回数有上限。"""
+    store = fresh_store()
+    older = (TODAY - timedelta(days=300)).isoformat()
+    put_topic(store, "陈年旧事", ["去年攒过一堆邮票"], updated=OLD_DAY, related=["集邮"])
+    put_topic(store, "旧航模", ["半年前喜欢过航模"], updated=OLD_DAY, related=["航模"])
+    put_topic(store, "旧钢琴", ["前年练过音阶"], updated=older, related=["练琴"])
+    put_topic(store, "今天的事", [f"{DAY} 刚说的要紧事"], updated=DAY)
+    memory._CACHE.clear()
+    s = MemoryStore(store.dir)
+
+    unrelated = body_of(s.active_block("今天天气怎么样"))
+    record("gate_stale_suppressed",
+           "陈年旧事" not in unrelated and "旧航模" not in unrelated and "旧钢琴" not in unrelated,
+           unrelated[:80].replace("\n", " "))
+    record("gate_fresh_kept", "今天的事" in unrelated, "新近主题无条件常驻")
+
+    woken = body_of(s.active_block("我还想集邮、玩航模、练琴"))
+    record("gate_relevant_woken", "陈年旧事" in woken and "旧航模" in woken,
+           woken[:80].replace("\n", " "))
+    record("gate_wake_capped", "旧钢琴" not in woken, "唤回封顶：第三件相关旧事不抢戏")
+
+    # 无 query 的调用方（问候/晨报）不受门控：活跃块是它们的全部记忆
+    ambient = body_of(s.active_block())
+    record("gate_no_query_keeps_all",
+           "陈年旧事" in ambient and "今天的事" in ambient, "全天候场景维持可见")
+
+
 def test_write_extraction() -> None:
     store = fresh_store()
     data = {
@@ -306,6 +334,7 @@ def main() -> int:
         test_active_block_budget_and_recency()
         test_retrieve_relevance()
         test_retrieve_skips_active_and_clamps()
+        test_active_block_attention_gate()
         test_write_extraction()
         test_longterm_capped()
         test_cache_freshness()

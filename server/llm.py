@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import threading
 import time
 from collections.abc import AsyncIterator
@@ -840,6 +841,52 @@ async def stream(
         # 别让孩子对着"流式调用失败"发愣（留痕在上面的候选循环里已经记过）
         raise LLMError("大模型这次没吐出内容（端点活着但流是空的）——稍等一下再问一次，或换个模型")
     raise LLMError(f"LLM 流式调用失败: {_err_text(last_err) or '所有候选端点均被熔断'}")
+
+
+_SECTION_RE = re.compile(r"【([^】\n]{1,10})】")
+
+
+def _partial_mark(s: str) -> int:
+    """尾部疑似半个【…】标记的起点（找不到返回 len）——"…。【家"这种
+    跨块的半截标记要留住，等下一块到齐再判，不能当正文吐出去。"""
+    i = s.rfind("【")
+    if i < 0:
+        return len(s)
+    tail = s[i:]
+    return len(s) if ("】" in tail or len(tail) > 12) else i
+
+
+async def stream_sections(
+    messages: list[dict],
+    *,
+    max_tokens: int = 1200,
+    temperature: float = 0.7,
+    caller: str = "unknown",
+) -> AsyncIterator[tuple[str | None, str]]:
+    """流式产出分节文本：逐 (节名, 片段) 回吐，节名是【…】标记里的原文。
+
+    家长端的转达/周报产出是给人读的整段话：走 JSON 就得等整段生成完才能解析，
+    家长盯着空面板十几秒；分节纯文本可以边生成边上屏。节名 None 表示首个标记
+    之前的序文——模型整篇没按格式分节时，全部内容也归到 None，调用方当主字段收下。
+    """
+    buf = ""
+    cur: str | None = None
+    async for chunk in stream(messages, max_tokens=max_tokens, temperature=temperature, caller=caller):
+        buf += chunk
+        while True:
+            m = _SECTION_RE.search(buf)
+            if not m:
+                break
+            if m.start():                 # 标记前的正文属于上一节
+                yield cur, buf[: m.start()]
+            cur = m.group(1).strip() or None
+            buf = buf[m.end():]
+        hold = _partial_mark(buf)
+        if hold:
+            yield cur, buf[:hold]
+        buf = buf[hold:]
+    if buf:
+        yield cur, buf
 
 
 def extract_json(text: str) -> dict:

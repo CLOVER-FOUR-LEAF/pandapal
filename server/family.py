@@ -27,7 +27,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from . import actions, auth, graph, llm, prompts, sessions, store
@@ -128,11 +128,114 @@ def _weekly_prompt(name: str, d: dict) -> str:
         facts=facts, due=due, memory_block=d["graph_block"] or "（暂无）")
 
 
+def _weekly_prompt_stream(name: str, d: dict) -> str:
+    """流式版周报 prompt：分节纯文本（正文可以边生成边上屏）。"""
+    moved = "\n".join(f"- {m['title']}（{m['stage']}，下一步该 {m['owner_next']}）：{'；'.join(m['events'])}"
+                      for m in d["moved"]) or "（本周没有推进的事务）"
+    facts = "\n".join(f"- {f['date']} [{f['node']}] {f['text']}" for f in d["facts"]) or "（本周没有新记下的事）"
+    due = "\n".join(f"- {x['title']}：{x['due']}（还有 {x['days']} 天）" for x in d["due"]) or "（两周内没有截止）"
+    return prompts.WEEKLY_STREAM.format(
+        name=name, since=d["since"], until=d["until"], moved=moved,
+        closed="、".join(d["closed"]) or "（无）", created="、".join(d["created"]) or "（无）",
+        facts=facts, due=due, memory_block=d["graph_block"] or "（暂无）")
+
+
+def _bullets(text: str, cap: int) -> list[str]:
+    """分节文本里的列表行 → 干净条目（去掉 "- "、序号，滤掉"（无）"这类占位）。"""
+    out = []
+    for line in (text or "").splitlines():
+        s = line.strip().lstrip("-—–·•*0123456789.、)） ").strip()
+        if not s or s in ("（无）", "无", "None", "none"):
+            continue
+        out.append(s)
+        if len(out) >= cap:
+            break
+    return out
+
+
+_WEEKLY_FIELDS = {"一句话": "headline", "总结": "headline", "总览": "headline",
+                  "进展": "highlights", "亮点": "highlights",
+                  "要盯": "watch", "留意": "watch",
+                  "周末": "suggestion", "建议": "suggestion",
+                  "夸夸": "praise", "表扬": "praise"}
+
+
+def _report_from_parts(parts: dict[str, str]) -> dict:
+    """分节文本 → 周报结构；缺 headline 或整篇没分节时抛错交给兜底。"""
+    head = (parts.get("headline") or "").strip()
+    headline = head.splitlines()[0].strip() if head else ""
+    if not headline:
+        raise ValueError("周报缺 headline")
+    return {
+        "headline": headline[:120],
+        "highlights": _bullets(parts.get("highlights", ""), 4),
+        "watch": _bullets(parts.get("watch", ""), 3),
+        "suggestion": " ".join((parts.get("suggestion") or "").split())[:120],
+        "praise": " ".join((parts.get("praise") or "").split())[:120],
+        "llm": True,
+    }
+
+
+async def _weekly_work(out: asyncio.Queue, sess, a, g, days: int) -> None:
+    """周报流式版：先出确定性统计的骨架，再让"一句话"边写边上屏。
+
+    分节解析失败（模型没按格式输出）就退回非流式 JSON 一次，最后还不行
+    才用统计数据说实话——家长看到的永远是有依据的东西。
+    """
+    try:
+        await out.put({"type": "phase", "text": "管家正在翻这一周的记录…"})
+        d = await asyncio.to_thread(_weekly_collect, a, g, days)
+        report = None
+        try:
+            parts: dict[str, str] = {}
+            async for name, chunk in llm.stream_sections(
+                    [{"role": "user", "content": _weekly_prompt_stream(sess.name, d)}],
+                    max_tokens=900, caller="weekly"):
+                field = _m()._field_of(name, _WEEKLY_FIELDS, "headline")
+                parts[field] = parts.get(field, "") + chunk
+                if field == "headline" and chunk:
+                    await out.put({"type": "token", "text": chunk})
+            report = _report_from_parts(parts)
+            if not (report["highlights"] or report["watch"] or report["suggestion"] or report["praise"]):
+                raise ValueError("整篇没有分节，退回 JSON 版")
+        except Exception as e:  # noqa: BLE001
+            print(f"[weekly] 流式不可用，退回 JSON 版：{e}")
+        if report is None:
+            try:
+                data = await llm.complete_json(
+                    [{"role": "user", "content": _weekly_prompt(sess.name, d)}],
+                    max_tokens=900, caller="weekly")
+                report = {
+                    "headline": str(data.get("headline") or "").strip(),
+                    "highlights": [str(x) for x in data.get("highlights") or [] if str(x).strip()][:4],
+                    "watch": [str(x) for x in data.get("watch") or [] if str(x).strip()][:3],
+                    "suggestion": str(data.get("suggestion") or "").strip(),
+                    "praise": str(data.get("praise") or "").strip(),
+                    "llm": True,
+                }
+                if not report["headline"]:
+                    raise ValueError("周报缺 headline")
+            except Exception as e:  # noqa: BLE001 周报写不出来也要给家长看到统计
+                print(f"[weekly] LLM 不可用，已降级：{e}")
+                report = _weekly_fallback(sess.name, d)
+        await out.put({"type": "done", "data": {
+            "name": sess.name, "since": d["since"], "until": d["until"],
+            "stats": d["stats"], "report": report}})
+    except Exception as e:  # noqa: BLE001
+        await out.put({"type": "error", "message": f"周报暂时生成不了：{e}"})
+    finally:
+        await out.put(None)
+
+
 @router.get("/api/parent/weekly")
-async def api_weekly(request: Request, name: str = "", days: int = 7):
+async def api_weekly(request: Request, name: str = "", days: int = 7, stream: int = 0):
     _, sess = await _m()._auth_session(request, "weekly", name)
     g, a, _ = _m()._stores(sess)
     days = max(1, min(int(days), 31))
+    if stream:
+        return StreamingResponse(
+            _m()._sse_stream(lambda out: _weekly_work(out, sess, a, g, days), "weekly"),
+            media_type="text/event-stream", headers=_m()._SSE_HEADERS)
     d = await asyncio.to_thread(_weekly_collect, a, g, days)
     try:
         data = await llm.complete_json(
@@ -180,8 +283,17 @@ def _claim(a: AffairStore, title: str) -> dict | None:
     return None
 
 
-async def _land_notice(sess, text: str, source: str) -> dict:
-    """一个孩子的落地：LLM 读通知+记忆 → 专属版文案 → 事务/清单/提醒真落盘。"""
+async def _land_notice(sess, text: str, source: str, emit=None) -> dict:
+    """一个孩子的落地：LLM 读通知+记忆 → 专属版文案 → 事务/清单/提醒真落盘。
+
+    emit 是流式版传入的事件回调（await emit(dict)）：文案解析完先上屏，之后
+    每建成一项清单/提醒就报一条 action——"已建清单 8 项"是干出来的，不是转圈
+    动画编的。批量下发（names）不传 emit，行为与原来完全一致。
+    """
+    async def say(ev: dict) -> None:
+        if emit is not None:
+            await emit(ev)
+
     g, a, _ = _m()._stores(sess)
     mem = await asyncio.to_thread(g.brief_block, limit=24)
     rec = (await asyncio.to_thread(g.recall, text, limit=3))["block"]
@@ -199,9 +311,14 @@ async def _land_notice(sess, text: str, source: str) -> dict:
     reminders = [r for r in data.get("reminders") or [] if isinstance(r, dict) and r.get("text")][:3]
     personal = [str(x).strip() for x in data.get("personal") or [] if str(x).strip()][:3]
     linked = [n["id"] for n in (await asyncio.to_thread(g.recall, text, limit=3))["nodes"][:3]]
+    summary = str(data.get("summary") or "").strip()[:120] or f"{source}发来的通知，管家已接手"
+    # 文案解析完先上屏：家长马上能读到专属版，事务/清单在下面继续建
+    await say({"type": "text", "title": title, "summary": summary,
+               "parent_text": str(data.get("parent_text") or "").strip(),
+               "child_text": str(data.get("child_text") or "").strip(),
+               "personal": personal})
 
     old = await asyncio.to_thread(_claim, a, title)
-    summary = str(data.get("summary") or "").strip()[:120] or f"{source}发来的通知，管家已接手"
     if old:
         affair = await asyncio.to_thread(a.update, old["id"], {"summary": summary, "due": due or old.get("due")},
                                          actor="butler", note=f"{source}又发了通知：{title}")
@@ -213,6 +330,8 @@ async def _land_notice(sess, text: str, source: str) -> dict:
             "progress": {"mode": "none", "value": 0}, "actor": "butler", "source": "notice",
         })
         created = True
+    await say({"type": "affair", "title": affair.get("title") or title, "created": created,
+               "id": affair.get("id")})
 
     results = []
     to_run = []
@@ -226,6 +345,8 @@ async def _land_notice(sess, text: str, source: str) -> dict:
     for act in to_run:
         res = await actions.run_action(sess.dir, affair, act)
         results.append(res)
+        await say({"type": "action", "kind": res.get("kind") or act.get("kind"),
+                   "ok": bool(res.get("ok")), "detail": res.get("detail")})
         if res.get("ok") and act["kind"] == "checklist":
             cid = (res.get("payload") or {}).get("checklist_id")
             if cid:  # 清单回挂事务，否则详情抽屉够不着
@@ -244,8 +365,27 @@ async def _land_notice(sess, text: str, source: str) -> dict:
     }
 
 
+async def _notice_work(out: asyncio.Queue, name: str, text: str, source: str) -> None:
+    """通知落地流式版（单个孩子）：阶段 → 专属版文案 → 事务 → 逐项清单/提醒。
+
+    每个事件背后都有真动作：文案是真解析出来的，action 是真写进档案的。
+    前端照单渲染，不需要假进度条。
+    """
+    try:
+        sess = await _m()._get_session(name)
+        await out.put({"type": "phase", "text": "管家正在读这份通知…"})
+        res = await _land_notice(sess, text, source, emit=out.put)
+        await out.put({"type": "done", "data": {"results": [res]}})
+    except HTTPException as e:
+        await out.put({"type": "error", "message": str(e.detail)})
+    except Exception as e:  # noqa: BLE001
+        await out.put({"type": "error", "message": f"这份通知没落地成功：{e}"})
+    finally:
+        await out.put(None)
+
+
 @router.post("/api/notice")
-async def api_notice(request: Request, req: NoticeReq):
+async def api_notice(request: Request, req: NoticeReq, stream: int = 0):
     user = _m()._user(request)
     _m()._need(user, "notice")
     if req.names:
@@ -262,6 +402,11 @@ async def api_notice(request: Request, req: NoticeReq):
             names = [auth.resolve_child(user, req.name)]
         except PermissionError as e:
             raise HTTPException(403, str(e))
+    if stream and not req.names:
+        text, src = req.text.strip(), req.source.strip() or "老师"
+        return StreamingResponse(
+            _m()._sse_stream(lambda out: _notice_work(out, names[0], text, src), "notice"),
+            media_type="text/event-stream", headers=_m()._SSE_HEADERS)
     sem = asyncio.Semaphore(4)
 
     async def one(n: str) -> dict:

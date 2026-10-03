@@ -47,6 +47,16 @@ _RETRIEVE_TOPIC_CHARS = 320  # 单条检索主题正文预算
 _RETRIEVE_DAILY_CHARS = 260  # 单条检索日记正文预算
 _MIN_RELEVANCE = 0.34        # 检索相关度门槛：低于它的"弱命中"注入只会制造噪音
 
+# ---------- 活跃块注意力门控 ----------
+# "一直在注意一些事情"的根源：所有 status=active 的主题不分新旧每轮都注入，
+# 几周前没收尾的事常驻系统提示，模型自然反复往旧话题上拐。改成两层：
+#   fresh：档案最近动过（≤_ACTIVE_FRESH_DAYS）→ 无条件注入，这是"眼下真在跟进"
+#   stale：更老的活跃档案 → 必须和本轮这句话够相关（同一套 _relevance 评分）
+#           才唤回，唤回数量也封顶——唤醒是例外，常驻是权利不是默认
+_ACTIVE_FRESH_DAYS = 9       # 多少天内动过的档案算"眼下在跟进"
+_ACTIVE_TOPIC_CAP = 4        # 常驻关注点上限：活跃块是背景，不是待办清单
+_STALE_WAKE_CAP = 2          # 陈旧活跃档案单轮最多唤回两条
+
 # 读缓存 TTL：主题档案被手改 / 被外部工具写入时也能被感知
 _CACHE_TTL = 5.0
 
@@ -371,12 +381,12 @@ class MemoryStore:
     def active_block(self, query: str | None = None) -> str:
         """活跃关注点块：MEMORY.md + 活跃主题正文 + 最近日记。每轮必注入，实现"一直知道"。
 
-        query 参数仅为兼容旧调用方（executor/planner/synth 仍传事件原文）；
-        本实现里相关性检索归 retrieve()，活跃块只看新近度，不区分话题。
+        传了 query（孩子本轮的话）时启用注意力门控：新近档案常驻、与本轮相关的排前，
+        陈旧活跃档案只有够相关才唤回；不传 query（问候/晨报等"全天候"场景）
+        维持纯新近度排序——那些路径里活跃块就是唯一的记忆来源。
 
-        体积受 _ACTIVE_MAX_CHARS 约束；活跃主题按新近度排序（新的在前），超预算的主题
-        被折叠或让位，保证"最近在聊的事"一定进得去；第一条永远注入，避免预算吃紧时
-        整个记忆块消失。最近日记末尾附带，新会话第一句就能接上"昨天说的事"。
+        体积受 _ACTIVE_MAX_CHARS 约束；第一条永远注入，避免预算吃紧时整个记忆块消失。
+        最近日记末尾附带，新会话第一句就能接上"昨天说的事"。
         """
         view = self._view()
         parts, total = [], 0
@@ -392,8 +402,24 @@ class MemoryStore:
 
         put(clamp_lines(view["memory_md"], _MEMORY_BLOCK_CHARS))
         actives = [t for t in view["topics"].values() if t["status"] == "active" and t["body"]]
-        actives.sort(key=lambda t: (t["last_day"], t["name"], len(t["body"])), reverse=True)
-        for t in actives:
+        today = date.today()
+        q_grams = self._bigrams(query or "")
+        if query:
+            def _rel(t: dict) -> bool:
+                return bool(q_grams) and self._relevance(query, q_grams, t) >= _MIN_RELEVANCE
+            fresh = [t for t in actives if (today - t["last_day"]).days <= _ACTIVE_FRESH_DAYS]
+            # 本轮正在说的事排最前（相关度），其余按新近度；预算/条数都给"眼下"让位
+            fresh.sort(key=lambda t: (_rel(t), t["last_day"]), reverse=True)
+            wake = sorted((t for t in actives
+                           if (today - t["last_day"]).days > _ACTIVE_FRESH_DAYS and _rel(t)),
+                          key=lambda t: t["last_day"], reverse=True)
+            chosen = fresh[:_ACTIVE_TOPIC_CAP] + wake[:_STALE_WAKE_CAP]
+        else:
+            # 无 query 的"全天候"调用方（问候/晨报/传话筒）：活跃块就是它们的全部记忆，
+            # 维持新近度排序不做话题门控，但同样封顶——十几条活跃全塞进去谁也看不清
+            actives.sort(key=lambda t: (t["last_day"], t["name"], len(t["body"])), reverse=True)
+            chosen = actives[: _ACTIVE_TOPIC_CAP + _STALE_WAKE_CAP]
+        for t in chosen:
             body = clamp_lines(t["body"], _TOPIC_BLOCK_CHARS)
             if not body:
                 continue

@@ -22,6 +22,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 os.environ["PANDA_DATA_DIR"] = tempfile.mkdtemp(prefix="panda_admin_")
+# 掩码断言需要非空密钥；使用固定假值，不依赖开发机 .env 或真实凭证。
+os.environ["LLM_API_KEY"] = "sk-admin-test-only-placeholder"
 for _m in [m for m in sys.modules if m == "server" or m.startswith("server.")]:
     del sys.modules[_m]
 

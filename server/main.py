@@ -235,6 +235,49 @@ def _sse(event: dict) -> str:
 _SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
 
 
+async def _sse_stream(work, phase: str = ""):
+    """把"往队列丢事件的长活"配心跳包成 SSE 生成器（传话筒/周报/通知/梦想共用）。
+
+    work 是一个 async 函数，签名 work(out: asyncio.Queue)：往队列丢事件字典、
+    最后丢一个 None 收口；抛异常由 work 自己转成 error 事件（别让连接悬着）。
+    节拍既是前端的"还在办"信号，也顶住反向代理把静默 SSE 流按空闲超时掐断。
+    """
+    out: asyncio.Queue = asyncio.Queue()
+    t0 = time.monotonic()
+
+    async def _beat() -> None:
+        try:
+            while True:
+                await asyncio.sleep(_BEAT_S)
+                await out.put({"type": "beat", "phase": phase,
+                               "elapsed": int(time.monotonic() - t0)})
+        except asyncio.CancelledError:
+            pass
+
+    task = asyncio.create_task(work(out))
+    beat = asyncio.create_task(_beat())
+    try:
+        while True:
+            event = await out.get()
+            if event is None:
+                break
+            yield _sse(event)
+    finally:
+        beat.cancel()
+        if not task.done():
+            task.cancel()
+
+
+def _field_of(name: str | None, table: dict[str, str], default: str) -> str:
+    """分节标记名 → 字段名（模糊包含匹配；认不出来归到主字段，整篇不丢）。"""
+    if not name:
+        return default
+    for key, field in table.items():
+        if key in name or name in key:
+            return field
+    return default
+
+
 def _rules(*parts: str) -> str:
     """把若干条追加规则拼成 system 追加段（跳过空串）。"""
     return "\n\n".join(p for p in parts if p)
@@ -1576,7 +1619,20 @@ async def _chat_stream(sess, raw_message: str, ctx: dict, resume: ResumeReq | No
         finally:
             await queue.put(None)
 
+    t0 = time.monotonic()
+
+    async def _beat() -> None:
+        # 规划/执行/汇总之间动辄十几秒没有事件：节拍既是前端的"还在办"信号，
+        # 也顶住反向代理/网关把静默 SSE 流按空闲超时掐断（nginx 默认 60s）。
+        try:
+            while True:
+                await asyncio.sleep(_BEAT_S)
+                await emit({"type": "beat", "elapsed": int(time.monotonic() - t0)})
+        except asyncio.CancelledError:
+            pass
+
     task = asyncio.create_task(runner())
+    beat = asyncio.create_task(_beat())
     try:
         while True:
             event = await queue.get()
@@ -1584,6 +1640,7 @@ async def _chat_stream(sess, raw_message: str, ctx: dict, resume: ResumeReq | No
                 break
             yield _sse(event)
     finally:
+        beat.cancel()
         if not task.done():
             task.cancel()
 
@@ -1715,7 +1772,7 @@ async def _triage(sess, a_store, message: str, hit: dict, emit,
     返回本轮回复的纯文本（进历史和记忆沉淀）。事务按 existing_id / 标题去重，不重复建单。
     """
     mem, brief = await asyncio.to_thread(
-        lambda: (sess.store.active_block(), _affairs_brief(a_store, limit=8)))
+        lambda: (sess.store.active_block(message), _affairs_brief(a_store, limit=8)))
     mem = mem or "（暂无记忆）"
     if hit.get("block"):
         mem = f"{mem}\n\n和这次相关的记忆：\n{hit['block']}"
@@ -1832,6 +1889,7 @@ _SYNTH_BUDGET = 75.0   # 汇总：实测最慢 52.6s，留余量
 _DIRECT_BUDGET = 25.0  # 直出：实测 ~5s
 _SUPERVISE_BUDGET = 12.0   # 卡片判官：一句话判"回应上没有"，不该比出卡更久
 _RETRY_BUDGET = 30.0       # 判不过的重出预算：比完整汇总短，失败还能退回原卡
+_BEAT_S = 12.0            # SSE 保活节拍间隔：长于 token 间隔、短于常见网关空闲超时
 
 
 async def _supervise_card(sess, message: str, card: dict) -> str:
@@ -2072,8 +2130,16 @@ async def api_chat(request: Request, req: ChatReq):
                 await q.put(None)
 
         _bg(asyncio.create_task(_settle()))
+        # 收尾阶段（记忆沉淀 LLM / 语音合成）同样有事件真空：继续按节拍保活，
+        # 否则网关可能在 done 之后把流按静默断开，丢掉后面的 memory/voice 事件
+        t_settle = time.monotonic()
         while True:
-            chunk = await q.get()
+            try:
+                chunk = await asyncio.wait_for(q.get(), timeout=_BEAT_S)
+            except asyncio.TimeoutError:
+                yield _sse({"type": "beat", "phase": "settle",
+                            "elapsed": int(time.monotonic() - t_settle)})
+                continue
             if chunk is None:
                 break
             yield chunk
@@ -2483,10 +2549,84 @@ async def _do_relay(sess, direction: str, text: str) -> dict:
             "advice": str(data.get("advice", ""))}
 
 
+_RELAY_FIELDS = {
+    "teacher2parent": ({"家长": "parent_text", "孩子": "child_text", "建议": "advice"}, "parent_text"),
+    "child2teacher": ({"消息": "message", "悄悄话": "advice", "建议": "advice"}, "message"),
+}
+
+
+async def _relay_work(out: asyncio.Queue, sess, direction: str, text: str) -> None:
+    """传话筒流式版：分节文本边生成边上屏，收尾给结构化结果。
+
+    与 _do_relay 同一份隐私边界：记忆只来自图谱层（brief_block/recall 已剔除
+    private）。主字段（家长版/消息）的 token 逐块上屏；孩子版/建议先攒着，
+    收尾随 done 一起给——列切换比打字机效果更稳。
+    """
+    try:
+        g, _, _ = _stores(sess)
+        await out.put({"type": "phase", "text": "管家正在读这段话…"})
+        mem = await asyncio.to_thread(g.brief_block, limit=24)
+        rec = (await asyncio.to_thread(g.recall, text, limit=3))["block"]
+        if rec:
+            mem = f"{mem}\n\n和这段话相关的记忆：\n{rec}" if mem else rec
+        table, main = _RELAY_FIELDS.get(direction, _RELAY_FIELDS["teacher2parent"])
+        tpl = prompts.RELAY_T2P_STREAM if direction == "teacher2parent" else prompts.RELAY_C2T_STREAM
+        prompt = tpl.format(name=sess.name, text=text, memory_block=mem or "（暂无记忆）")
+        parts: dict[str, str] = {}
+        emitted = False
+        try:
+            async for name, chunk in llm.stream_sections(
+                    [{"role": "user", "content": prompt}], max_tokens=700,
+                    temperature=0.5, caller="relay"):
+                field = _field_of(name, table, main)
+                parts[field] = parts.get(field, "") + chunk
+                if field == main and chunk:
+                    emitted = True
+                    await out.put({"type": "token", "text": chunk})
+        except Exception:  # noqa: BLE001
+            # 一个字都没吐出来时才有得救：降级成整段纯文本，别让按钮整个报错。
+            # 已经吐过 token 再重发会把内容流两遍（孩子面前回复重复比报错难看）。
+            if emitted:
+                raise
+            raw = (await llm.complete(
+                [{"role": "user", "content":
+                  prompt + "\n\n（注意：不要输出分节标记，直接把整理好的那段话写出来，两三句话即可。）"}],
+                max_tokens=500, temperature=0.4, caller="relay")).strip()
+            if not raw:
+                raise llm.LLMError("模型没有给出内容")
+            await out.put({"type": "token", "text": raw})
+            parts = {main: raw}
+        data = {f: v.strip() for f, v in parts.items()}
+        if not data.get(main):
+            # 主字段空但其它节有内容：退而求其次，取最长的一段当正文，不白等一场
+            alt = max((v for v in data.values() if v), key=len, default="")
+            if not alt:
+                raise llm.LLMError("模型没有给出内容")
+            data[main] = alt
+            if not emitted:
+                await out.put({"type": "token", "text": alt})
+        payload = {"direction": direction}
+        if direction == "teacher2parent":
+            payload.update({"parent_text": data.get("parent_text", ""),
+                            "advice": data.get("advice", ""),
+                            "child_text": data.get("child_text", "")})
+        else:
+            payload.update({"message": data.get("message", ""),
+                            "advice": data.get("advice", "")})
+        await out.put({"type": "done", "data": payload})
+    except Exception as e:  # noqa: BLE001
+        await out.put({"type": "error", "message": f"翻译失败：{e}"})
+    finally:
+        await out.put(None)
+
+
 @app.post("/api/relay")
-async def api_relay(request: Request, req: RelayReq):
+async def api_relay(request: Request, req: RelayReq, stream: int = 0):
     user, sess = await _auth_session(request, "relay", req.name)
     _need_llm_quota(request, user["username"])
+    if stream:
+        return StreamingResponse(_sse_stream(lambda out: _relay_work(out, sess, req.direction, req.text), "relay"),
+                                 media_type="text/event-stream", headers=_SSE_HEADERS)
     return await _do_relay(sess, req.direction, req.text)
 
 
@@ -2537,12 +2677,22 @@ def _growth_stats(g: graph.GraphStore, view: str) -> dict:
 
 
 @app.get("/api/growth")
-async def api_growth(request: Request, name: str = "", view: str = "child"):
+async def api_growth(request: Request, name: str = "", view: str = "child", comment: int = 1):
+    """五领域雷达。
+
+    数据（节点分布打分）是本地的、毫秒级；那句点评要走一次 LLM，实测量级是秒。
+    两者混在一个响应里，前端就得为了等一句点评把整张雷达图空着——演示时评委
+    盯着"正在汇总成长证据…"八到十秒，是全场最尴尬的一段等待。
+    所以拆开：默认只回数据，附图立即出；前端拿到数据后再单独取点评（comment=0 可跳过）。
+    """
     user, sess = await _auth_session(request, "growth", name)
     if user["role"] == "parent":
         view = "parent"  # 服务端强制：家长看不到悄悄话节点
     g, _, m = _stores(sess)
     data = await asyncio.to_thread(_growth_stats, g, "parent" if view == "parent" else "child")
+    if not comment:
+        data["comment"] = ""
+        return data
     # 一句点评：LLM 可用就生成，失败就省略（数据本身已经够看）
     try:
         dims_txt = "，".join(f"{d['name']} {d['score']}" for d in data["dimensions"])
@@ -2558,35 +2708,97 @@ async def api_growth(request: Request, name: str = "", view: str = "child"):
     return data
 
 
-@app.post("/api/dream")
-async def api_dream(request: Request, req: DreamReq):
-    """「说说我的梦想」：孩子说梦想 → 接住并落成记忆；没说 → 主动邀请。"""
-    user, sess = await _auth_session(request, "dream", req.name)
-    _need_llm_quota(request, user["username"])
-    g, a, _ = _stores(sess)
+async def _dream_reply(sess, g, text: str) -> tuple[str, bool]:
+    """梦想频道的正文生成（邀请或回应）。返回 (回复, 是否 LLM 生成)。
+
+    邀请语降级：LLM 连不上时用本地数据说实话，不伪造生成。
+    """
     mem_block = await asyncio.to_thread(sess.store.active_block) or "（还没有记忆，慢慢了解中）"
     graph_brief = await asyncio.to_thread(g.brief_block, limit=20)
     if graph_brief:
         mem_block = f"{mem_block}\n\n{graph_brief}"
-    text = req.text.strip()
     try:
         tpl = prompts.DREAM if text else prompts.DREAM_INVITE
         reply = (await llm.complete(
             [{"role": "user", "content": tpl.format(name=sess.name, text=text or "（还没说）",
                                                     memory_block=mem_block)}],
             max_tokens=700, caller="dream")).strip()
-    except llm.LLMError as e:
+    except llm.LLMError:
         if text:
-            raise HTTPException(502, f"管家的大脑暂时连不上啦：{e}")
-        # 邀请语降级：用本地数据说实话
+            raise
         tops = sorted((await asyncio.to_thread(g.load))["nodes"],
                       key=lambda n: -int(n.get("weight") or 1))
         hot = tops[0]["label"] if tops else ""
-        reply = (f"我注意到你最近一直在惦记「{hot}」，这里面藏着你的梦想吗？跟我说说～"
-                 if hot else "今天第一次见，来说说你的梦想吧，我帮你记着。")
-        return {"text": reply, "llm": False}
-    out = {"text": reply, "llm": True}
-    if text:
+        return ((f"我注意到你最近一直在惦记「{hot}」，这里面藏着你的梦想吗？跟我说说～"
+                 if hot else "今天第一次见，来说说你的梦想吧，我帮你记着。"), False)
+    return reply, True
+
+
+async def _dream_work(out: asyncio.Queue, sess, g, text: str) -> None:
+    """梦想频道流式版：正文逐字上屏，落记忆的过程走节拍保活。
+
+    梦想是"孩子说、管家接住"的对话，等十几秒才整段弹出最伤——边说边显示，
+    记忆沉淀（LLM 抽取，好几秒）期间有 beat 顶着，前端不会看起来卡死。
+    """
+    try:
+        await out.put({"type": "phase", "text": "管家正在翻你的记忆…"})
+        mem_block = await asyncio.to_thread(sess.store.active_block) or "（还没有记忆，慢慢了解中）"
+        graph_brief = await asyncio.to_thread(g.brief_block, limit=20)
+        if graph_brief:
+            mem_block = f"{mem_block}\n\n{graph_brief}"
+        tpl = prompts.DREAM if text else prompts.DREAM_INVITE
+        prompt = tpl.format(name=sess.name, text=text or "（还没说）", memory_block=mem_block)
+        reply, emitted = "", False
+        try:
+            async for chunk in llm.stream([{"role": "user", "content": prompt}],
+                                          max_tokens=700, caller="dream"):
+                if chunk:
+                    reply += chunk
+                    emitted = True
+                    await out.put({"type": "token", "text": chunk})
+        except Exception:  # noqa: BLE001
+            if emitted:
+                raise
+            # 一个字都没吐：走非流式兜底（含邀请语的本地降级），别让孩子对着空面板
+            reply, llm_ok = await _dream_reply(sess, g, text)
+            await out.put({"type": "token", "text": reply})
+            await out.put({"type": "done", "data": {"text": reply, "llm": llm_ok}})
+            return
+        reply = reply.strip()
+        if not reply:
+            raise llm.LLMError("模型没有给出内容")
+        if not text:
+            await out.put({"type": "done", "data": {"text": reply, "llm": True}})
+            return
+        await out.put({"type": "phase", "text": "管家正在把梦想记进记忆星球…"})
+        gdata = await _settle_memory(sess, f"我的梦想：{text}", reply)
+        if gdata and (gdata.get("added_nodes") or gdata.get("added_edges") or gdata.get("updated")):
+            await out.put({"type": "memory", **gdata})
+        await out.put({"type": "done", "data": {"text": reply, "llm": True}})
+    except llm.LLMError as e:
+        await out.put({"type": "error", "message": f"管家的大脑暂时连不上啦：{e}"})
+    except Exception as e:  # noqa: BLE001
+        await out.put({"type": "error", "message": f"梦想频道暂时打不开：{e}"})
+    finally:
+        await out.put(None)
+
+
+@app.post("/api/dream")
+async def api_dream(request: Request, req: DreamReq, stream: int = 0):
+    """「说说我的梦想」：孩子说梦想 → 接住并落成记忆；没说 → 主动邀请。"""
+    user, sess = await _auth_session(request, "dream", req.name)
+    _need_llm_quota(request, user["username"])
+    g, a, _ = _stores(sess)
+    text = req.text.strip()
+    if stream:
+        return StreamingResponse(_sse_stream(lambda out: _dream_work(out, sess, g, text), "dream"),
+                                 media_type="text/event-stream", headers=_SSE_HEADERS)
+    try:
+        reply, llm_ok = await _dream_reply(sess, g, text)
+    except llm.LLMError as e:
+        raise HTTPException(502, f"管家的大脑暂时连不上啦：{e}")
+    out = {"text": reply, "llm": llm_ok}
+    if text and llm_ok:
         gdata = await _settle_memory(sess, f"我的梦想：{text}", reply)
         if gdata and (gdata.get("added_nodes") or gdata.get("added_edges") or gdata.get("updated")):
             out["memory"] = gdata
