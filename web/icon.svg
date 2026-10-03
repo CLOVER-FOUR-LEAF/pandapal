@@ -31,7 +31,7 @@
     <circle cx="424" cy="96" r="2.4" opacity=".55"/>
     <circle cx="448" cy="352" r="2.6" opacity=".5"/>
     <circle cx="70" cy="380" r="2" opacity=".45"/>
-    <path d="M410 168l4 10 10 4-10 4-4 10-4-10-10-4 10-4z" fill="#fbbf24" opacity=".85"/>
+    <path d="M414 404l4 10 10 4-10 4-4 10-4-10-10-4 10-4z" fill="#fbbf24" opacity=".85"/>
   </g>
 
   <!-- 熊猫头：与 panda.js 的管家形象同一套造型，等比放大 -->
@@ -61,8 +61,8 @@
     <ellipse cx="115.5" cy="113" rx="2.4" ry="1.2" fill="#fff" opacity=".45"/>
     <path d="M108 126q5 6 10 0q5 6 10 0" stroke="#1c1a18" stroke-width="2.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
 
-    <!-- 耳边一片竹叶 -->
-    <path d="M178 30c12-14 28-18 40-14-8 12-24 18-40 14z" fill="#34d399"/>
-    <path d="M180 29c12-6 24-10 34-11" stroke="#10b981" stroke-width="1.6" fill="none" stroke-linecap="round"/>
+    <!-- 头顶一片竹叶（放在 maskable 安全区内） -->
+    <path d="M122 33c6-16 20-24 34-22-4 14-18 22-34 22z" fill="#34d399"/>
+    <path d="M123 32c9-8 20-14 30-18" stroke="#10b981" stroke-width="1.6" fill="none" stroke-linecap="round"/>
   </g>
 </svg>
