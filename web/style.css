@@ -738,10 +738,10 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   body { overflow: hidden; }
   #main-view {
     display: grid;
-    /* 两侧边栏加宽：左栏（晨报/事务/星球速览）与右栏（对话）都更舒展，
-       窄桌面用 vw 跟着缩，宽屏到 410/540 封顶，中间 3D 场景始终留 1fr。
-       原先 310~350 / 390~460 在 1440 以上就顶到上限，两侧显得局促。 */
-    grid-template-columns: clamp(300px, 25vw, 410px) minmax(0, 1fr) clamp(380px, 32vw, 540px);
+    /* 两侧边栏加宽：左栏（晨报/事务/星球速览）与右栏（对话）都更舒展。
+       下限贴着"窄桌面不挤中间"，上限抬到 440/580——原先 310~350 / 390~460
+       在 1280 就撞下限、1440 以上撞上限，等于两头都被 clamp 夹住，看不出变化。 */
+    grid-template-columns: clamp(330px, 25vw, 440px) minmax(0, 1fr) clamp(420px, 33vw, 580px);
     grid-template-rows: var(--topbar-h) minmax(0, 1fr);
     grid-template-areas:
       "topbar topbar topbar"
