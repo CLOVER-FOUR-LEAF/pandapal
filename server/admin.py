@@ -155,7 +155,8 @@ _SETTINGS_GROUPS = [
     ("tts", "语音合成 TTS（管家朗读）",
      ["TTS_API_KEY", "TTS_BASE_URL", "TTS_MODEL", "TTS_MODEL_DESIGN", "TTS_VOICE",
       "TTS_ENABLED", "TTS_DEFAULT_MODE", "TTS_DEFAULT_STYLE", "TTS_FORMAT",
-      "TTS_MAX_CHARS", "TTS_CARD_MAX_CHARS"]),
+      "TTS_MAX_CHARS", "TTS_CARD_MAX_CHARS",
+      "TTS_SPEAK_GREETING", "TTS_SPEAK_BRIEFING", "TTS_SPEAK_CARD"]),
 ]
 
 
@@ -166,6 +167,9 @@ _CHOICES = {
     "LLM_REASONING_EFFORT": [["", "不传（非推理模型）"], ["low", "low"], ["high", "high"], ["max", "max"]],
     "LLM_VISION": [["auto", "auto（先试，失败降级）"], ["on", "on（强制看图）"], ["off", "off（不带图）"]],
     "TTS_ENABLED": [["1", "开启"], ["0", "关闭"]],
+    "TTS_SPEAK_GREETING": [["1", "开启"], ["0", "关闭"]],
+    "TTS_SPEAK_BRIEFING": [["1", "开启"], ["0", "关闭"]],
+    "TTS_SPEAK_CARD": [["1", "开启"], ["0", "关闭"]],
     "TTS_DEFAULT_MODE": [["design", "design（音色设计）"], ["builtin", "builtin（内置音色）"]],
     "TTS_FORMAT": [["mp3", "mp3"], ["wav", "wav"]],
 }

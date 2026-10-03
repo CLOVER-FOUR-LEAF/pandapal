@@ -135,6 +135,21 @@ def _as_int(v, default: int) -> int:
     return n if n > 0 else default
 
 
+def _one_of(*allowed: str):
+    """枚举值归一化：只认白名单里的（大小写不敏感），其余抛错。
+
+    抛错是故意的——apply_settings 会跳过非法值并保留基线，比悄悄存一个
+    "MP4" 进去、然后 TTS 那边拿着它去请求、最后报一个看不懂的错要好。
+    主要兜 settings.json 被手改的场景（API 写入在 admin 层还有一道校验）。
+    """
+    def norm(v):
+        s = str(v).strip().lower()
+        if s not in allowed:
+            raise ValueError(f"只能是 {'/'.join(allowed)}，收到 {v!r}")
+        return s
+    return norm
+
+
 # 可在后台编辑的键 → （本模块属性名, 归一化函数, 是否密钥）。不在表里的键一律不收。
 SETTINGS_KEYS: dict[str, tuple[str, object, bool]] = {
     "LLM_PROTOCOL": ("LLM_PROTOCOL", lambda v: str(v).strip().lower(), False),
@@ -159,11 +174,15 @@ SETTINGS_KEYS: dict[str, tuple[str, object, bool]] = {
     "TTS_VOICE": ("TTS_VOICE", lambda v: str(v).strip(), False),
     # 开关必须归一成 bool：存成字符串 "0" 时 `if config.TTS_ENABLED` 永远为真，后台关不掉
     "TTS_ENABLED": ("TTS_ENABLED", lambda v: _as_bool(v), False),
-    "TTS_DEFAULT_MODE": ("TTS_DEFAULT_MODE", lambda v: str(v).strip().lower(), False),
+    "TTS_DEFAULT_MODE": ("TTS_DEFAULT_MODE", _one_of("design", "builtin"), False),
     "TTS_DEFAULT_STYLE": ("TTS_DEFAULT_STYLE", lambda v: str(v).strip(), False),
-    "TTS_FORMAT": ("TTS_FORMAT", lambda v: str(v).strip().lower(), False),
+    "TTS_FORMAT": ("TTS_FORMAT", _one_of("mp3", "wav"), False),
     "TTS_MAX_CHARS": ("TTS_MAX_CHARS", lambda v: _as_int(v, 400), False),
     "TTS_CARD_MAX_CHARS": ("TTS_CARD_MAX_CHARS", lambda v: _as_int(v, 120), False),
+    # 三个口播开关：后台最常想拨的就是这几项（缓存上限/试音文案仍留在 .env）
+    "TTS_SPEAK_GREETING": ("TTS_SPEAK_GREETING", lambda v: _as_bool(v), False),
+    "TTS_SPEAK_BRIEFING": ("TTS_SPEAK_BRIEFING", lambda v: _as_bool(v), False),
+    "TTS_SPEAK_CARD": ("TTS_SPEAK_CARD", lambda v: _as_bool(v), False),
 }
 
 
