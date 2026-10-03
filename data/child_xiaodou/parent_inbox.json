@@ -25,9 +25,9 @@
       "affair_id": "xikesong",
       "title": "西安西客松参赛：需要家长帮忙确认的事",
       "detail": "管家已把行程与清单准备好，请家长确认交通与报名相关事项。",
-      "status": "pending",
+      "status": "approved",
       "created": "2026-10-02T21:57:18",
-      "decided_at": null,
+      "decided_at": "2026-10-03T13:01:43",
       "reply": "",
       "action": ""
     }
