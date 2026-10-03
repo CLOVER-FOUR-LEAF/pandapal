@@ -17,6 +17,7 @@ import re
 import shutil
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -631,6 +632,57 @@ async def _run(client: httpx.AsyncClient) -> None:
            and tools.describe("transport_lookup", {"from_city": "威海", "to_city": "西安"})
            == "查交通「威海→西安」",
            tools.describe("transport_lookup", {"from_city": "威海", "to_city": "西安"}))
+
+    # _tool_round 并行分发：两个工具并发跑，总耗时取 max 而非 sum；
+    # running 事件先全亮，单工具失败不连累另一个
+    real_dispatch, real_cj = tools.dispatch, llm.complete_json
+
+    async def fake_dispatch(name, args, ctx):
+        await asyncio.sleep(0.08)
+        if name == "weather":
+            return "晴天 20℃"
+        return "现在 10:30"
+
+    async def pick_two(messages, **kw):
+        return {"calls": [{"tool": "weather", "args": {}},
+                          {"tool": "now", "args": {}}]}
+
+    async def _emit(e: dict) -> None:
+        evs.append(e)
+
+    tools.dispatch, llm.complete_json = fake_dispatch, pick_two
+    try:
+        evs: list[dict] = []
+        t0 = time.monotonic()
+        out = await _main._tool_round(sess, "西安明天天气和现在几点了", _emit)
+        dt = time.monotonic() - t0
+    finally:
+        tools.dispatch, llm.complete_json = real_dispatch, real_cj
+    record("tool_round_parallel",
+           dt < 0.15 and "晴天" in out and "10:30" in out
+           and sum(1 for e in evs if e.get("status") == "done") == 2,
+           f"dt={dt:.2f}s out={out[:40]}")
+
+    async def pick_with_bad(messages, **kw):
+        return {"calls": [{"tool": "weather", "args": {}},
+                          {"tool": "now", "args": {}}]}
+
+    async def one_fails(name, args, ctx):
+        if name == "weather":
+            raise RuntimeError("天气接口挂了")
+        return "现在 10:30"
+
+    tools.dispatch, llm.complete_json = one_fails, pick_with_bad
+    try:
+        evs = []
+        out = await _main._tool_round(sess, "西安明天天气和现在几点了", _emit)
+    finally:
+        tools.dispatch, llm.complete_json = real_dispatch, real_cj
+    record("tool_round_partial_fail",
+           "10:30" in out and "没成功" in out
+           and any(e.get("status") == "error" for e in evs)
+           and any(e.get("status") == "done" for e in evs),
+           f"out={out[:60]}")
 
 
     # 10. 扩展端点：增长雷达 / 梦想 / 传话筒 / PATCH / 时间轴切片 / 日志分页 / 流式晨报问候

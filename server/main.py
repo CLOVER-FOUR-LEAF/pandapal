@@ -1136,7 +1136,7 @@ async def _tool_round(sess, message: str, emit) -> str:
     if not calls:
         return ""
     ctx = tools.ToolCtx(store=sess.store, event=message)
-    blocks = []
+    picked: list[tuple[str, str, dict]] = []
     for c in calls[:_TOOL_MAX_CALLS]:
         name = str(c.get("tool") or "")
         args = c.get("args") if isinstance(c.get("args"), dict) else {}
@@ -1145,16 +1145,30 @@ async def _tool_round(sess, message: str, emit) -> str:
             continue
         label = tools.describe(name, args)
         await emit({"type": "tool", "tool": name, "label": label, "status": "running"})
+        picked.append((name, label, args))
+    if not picked:
+        return ""
+
+    async def _one(name: str, args: dict):
         try:
             out = await tools.dispatch(name, args, ctx)
             if out is None:
                 raise RuntimeError("工具不可用")
+            return out, None
+        except Exception as e:  # noqa: BLE001 单个工具失败要让孩子看得见，但别中断回复
+            return None, e
+
+    # 工具彼此独立（天气+搜索、时间+交通），串行就是白等一个工具的延迟
+    results = await asyncio.gather(*(_one(n, a) for n, _, a in picked))
+    blocks = []
+    for (name, label, _), (out, err) in zip(picked, results):
+        if err is None:
             await emit({"type": "tool", "tool": name, "label": label, "status": "done"})
             blocks.append(f"【{label}】\n{out}")
-        except Exception as e:  # noqa: BLE001 单个工具失败要让孩子看得见，但别中断回复
-            print(f"[tools] {name} 调用失败：{e}")
+        else:
+            print(f"[tools] {name} 调用失败：{err}")
             await emit({"type": "tool", "tool": name, "label": label, "status": "error"})
-            blocks.append(f"【{label}】查询没成功：{e}——回答时如实告诉孩子没查到")
+            blocks.append(f"【{label}】查询没成功：{err}——回答时如实告诉孩子没查到")
     return "\n\n".join(blocks)
 
 
