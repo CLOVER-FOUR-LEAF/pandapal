@@ -448,6 +448,34 @@ async def main() -> None:
         finally:
             llm.complete = saved_complete
 
+    # ---- stream_sections：分节解析（跨块半截标记不漏进正文；无标记整篇归主字段）----
+    real_stream = llm.stream
+
+    async def _sections_stub(messages, **kw):
+        for part in ["序文。", "【家长", "版】", "孩子挺好。", "【孩子版】", "你很棒！"]:
+            yield part
+
+    llm.stream = _sections_stub
+    try:
+        got = [(n, c) async for n, c in llm.stream_sections(
+            [{"role": "user", "content": "x"}], caller="test")]
+        text = "".join(c for _, c in got)
+        record("stream_sections_split",
+               got[0] == (None, "序文。")
+               and ("家长版", "孩子挺好。") in got and ("孩子版", "你很棒！") in got
+               and "【" not in text and "】" not in text,
+               f"got={got}")
+
+        async def _nomark_stub(messages, **kw):
+            for part in ["今天", "天气不错"]:
+                yield part
+
+        llm.stream = _nomark_stub
+        text2 = "".join([c async for _, c in llm.stream_sections([], caller="test")])
+        record("stream_sections_nomark", text2 == "今天天气不错", f"text={text2}")
+    finally:
+        llm.stream = real_stream
+
     fails = [r for r in RESULTS if not r[1]]
     print(f"\n{'=' * 60}\n{len(RESULTS) - len(fails)}/{len(RESULTS)} 通过")
     if fails:

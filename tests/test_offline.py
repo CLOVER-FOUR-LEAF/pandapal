@@ -806,6 +806,26 @@ async def _run(client: httpx.AsyncClient) -> None:
     record("relay", r.status_code == 200 and ("message" in rj or "parent_text" in rj),
            str(rj)[:60])
 
+    # 传话筒流式版：phase → token* → done（结构化结果收在 done.data；
+    # 假流不带分节标记，整篇应落到主字段——降级路径也要能用）
+    rev = await post_sse(client, "/api/relay?stream=1",
+                         {"name": NAME, "direction": "child2teacher", "text": "老师我想再想想"})
+    rtypes = _types(rev)
+    rdone = next((e for e in rev if e["type"] == "done"), {})
+    record("relay_stream",
+           rtypes and rtypes[0] == "phase" and "token" in rtypes and rtypes[-1] == "done"
+           and (rdone.get("data") or {}).get("message"),
+           f"events={rtypes} data={str(rdone.get('data'))[:50]}")
+
+    # 梦想流式版：token* → done（邀请路径不落记忆，llm 标记照旧）
+    drev = await post_sse(client, "/api/dream?stream=1", {"name": NAME, "text": ""})
+    dtypes = _types(drev)
+    ddone = next((e for e in drev if e["type"] == "done"), {})
+    record("dream_stream",
+           "token" in dtypes and dtypes[-1] == "done"
+           and (ddone.get("data") or {}).get("llm") is True,
+           f"events={dtypes}")
+
     # PATCH：局部更新事务（旧契约 §2.6），只改 stage，正文不动
     before = await get_json(client, f"/api/affairs/{aid}{q}")
     r = await client.patch(f"/api/affairs/{aid}", json={
