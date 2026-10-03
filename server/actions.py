@@ -15,12 +15,13 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import re
 import uuid
 from datetime import date
 from pathlib import Path
 
-from . import llm, prompts
+from . import files, llm, prompts, tools
 from .affairs import AffairStore, ics_text
 from .memory import MemoryStore
 from .store import lock_for, read_json, slug, write_json
@@ -210,35 +211,221 @@ def _do_ics(affair: dict) -> dict:
 
 
 async def _do_draft(child_dir: Path, affair: dict, action: dict) -> dict:
-    """代办文书：LLM 真写一份文稿 → 落盘 drafts.json → payload 带回全文。
+    """代办文书：LLM 真写一份文稿 → 落盘 drafts.json → 再落一份可下载文件。
 
     action 字段：request=孩子原话（必填素材）、context=刚查到的方案/卡片文本、
     title=可选指定题目。文稿全文进 payload，前端直接出文稿卡（"给我一个结果"）。
+
+    交付物双落盘是"说一件事、给我一个能拿走的结果"：drafts.json 管对话里的
+    卡片回读，files/ 里的文件管下载打印（复制粘贴丢格式，孩子交作业要 Word）。
+    文件写挂了不连累文稿本身——卡照样出，只是没有下载按钮（诚实降级）。
     """
     request = str(action.get("request") or action.get("text") or affair.get("title") or "").strip()
     context = str(action.get("context") or "").strip() or "（无前置素材，靠记忆与常识写）"
     mem_store = MemoryStore(child_dir)
     mem = await asyncio.to_thread(mem_store.active_block)
-    data = await llm.complete_json(
-        [
-            {"role": "system", "content": "你是文书起草模块，只输出 JSON。"},
-            {"role": "user", "content": prompts.DRAFT.format(
-                name=mem_store.child_name,
-                request=request or "写一份文稿",
-                context=context,
-                memory_block=mem or "（暂无记忆）",
-            )},
-        ],
-        max_tokens=1600,
-        caller="draft",
-    )
-    title = str(data.get("title") or action.get("title") or "文稿").strip()[:40]
-    body = str(data.get("body") or data.get("text") or "").strip()
+    if _LONG_FORM.search(request):
+        # 论文/报告这类长文稿一次调用写不好：提纲 → 各节并行写 → 拼成 markdown。
+        # 产物是"能交差的成稿"，不是"怎么写"的建议——这是 draft 的完整形态。
+        title, body = await _write_paper(mem_store, request, context, mem)
+    else:
+        data = await llm.complete_json(
+            [
+                {"role": "system", "content": "你是文书起草模块，只输出 JSON。"},
+                {"role": "user", "content": prompts.DRAFT.format(
+                    name=mem_store.child_name,
+                    request=request or "写一份文稿",
+                    context=context,
+                    memory_block=mem or "（暂无记忆）",
+                )},
+            ],
+            max_tokens=2400,
+            caller="draft",
+        )
+        title = str(data.get("title") or action.get("title") or "文稿").strip()[:40]
+        body = str(data.get("body") or data.get("text") or "").strip()
     if not body:
         raise ValueError("文稿正文为空")
+    try:
+        file_item = await asyncio.to_thread(_draft_to_file, child_dir, title, body)
+    except Exception:  # noqa: BLE001 交付文件是加分项，不是文稿成立的前提
+        file_item = None
     draft = await asyncio.to_thread(
-        AffairStore(child_dir).add_draft, title, body, affair.get("id"))
+        AffairStore(child_dir).add_draft, title, body, affair.get("id"),
+        file_item.get("id") if file_item else None)
     return _result(
         "draft", True, f"文稿写好了：《{title}》，点开看看",
         {"draft_id": draft["id"], "title": title, "body": body,
-         "affair_id": affair.get("id"), "created": draft.get("created")})
+         "affair_id": affair.get("id"), "created": draft.get("created"),
+         **({"file_id": file_item["id"], "file_name": file_item.get("name"),
+             "file_ext": file_item.get("ext")} if file_item else {})})
+
+
+async def revise_draft(child_dir: Path, a_store: AffairStore, draft: dict,
+                       instruction: str) -> dict:
+    """对着已有文稿就地改写：把孩子的修改意见落实到整篇，输出改后的完整文稿。
+
+    不重建事务、不走规划——"把结尾改改"是对上一份稿子的指令，不是新需求。
+    旧交付文件替换掉（files/ 里不留同名两版让人分不清哪个是新的）。
+    """
+    title = str(draft.get("title") or "文稿").strip()[:40]
+    old_body = str(draft.get("body") or "").strip()
+    if not old_body:
+        raise ValueError("这份文稿没有内容，没法改")
+    mem_store = MemoryStore(child_dir)
+    mem = await asyncio.to_thread(mem_store.active_block)
+    new_body = str(await llm.complete(
+        [
+            {"role": "system", "content": "你是文书修改模块，只输出改后的完整文稿。"},
+            {"role": "user", "content": prompts.DRAFT_REVISE.format(
+                name=mem_store.child_name,
+                title=title,
+                body=old_body[:6000],
+                instruction=str(instruction or "").strip()[:200],
+                memory_block=mem or "（暂无记忆）",
+            )},
+        ],
+        max_tokens=2500,
+        caller="draft_revise",
+    ) or "").strip()
+    if not new_body:
+        raise ValueError("改出来是空的")
+    try:
+        file_item = await asyncio.to_thread(_draft_to_file, child_dir, title, new_body)
+    except Exception:  # noqa: BLE001 交付文件是加分项，不是文稿成立的前提
+        file_item = None
+    updated = await asyncio.to_thread(
+        a_store.add_draft, title, new_body, draft.get("affair_id"),
+        file_item.get("id") if file_item else None)
+    old_file = str(draft.get("file_id") or "")
+    if file_item and old_file and old_file != file_item["id"]:
+        try:
+            await asyncio.to_thread(files.FileStore(child_dir).delete, old_file)
+        except Exception:  # noqa: BLE001 删旧失败只留冗余，不影响新版
+            pass
+    return _result(
+        "draft", True, f"《{title}》改好了，新版在上面，不满意接着说",
+        {"draft_id": updated["id"], "title": title, "body": new_body,
+         "affair_id": draft.get("affair_id"), "created": updated.get("created"),
+         "revised": True,
+         **({"file_id": file_item["id"], "file_name": file_item.get("name"),
+             "file_ext": file_item.get("ext")} if file_item else {})})
+
+
+# 长文稿锚点：命中这些词的需求，单发调用写出来只会是"写作建议"——必须分段生成
+_LONG_FORM = re.compile(r"论文|报告|作文|文章|总结|综述|文档|材料|小论文|研究")
+
+# 长文稿的分节上限：再多节并写下去，孩子等不起、token 也烧得没边
+_PAPER_MAX_SECTIONS = 6
+
+
+async def _write_paper(mem_store: MemoryStore, request: str, context: str,
+                       mem: str) -> tuple[str, str]:
+    """长文稿两段式生成：提纲定结构 → 各节并行写真内容 → 拼成 markdown 正文。
+
+    一节写挂了不整篇作废——那节如实标"没写出来"，比交一篇缺块还装齐的诚实。
+    """
+    outline = await llm.complete_json(
+        [
+            {"role": "system", "content": "你是文书提纲模块，只输出 JSON。"},
+            {"role": "user", "content": prompts.PAPER_OUTLINE.format(
+                name=mem_store.child_name,
+                request=request,
+                context=context or "（无前置素材）",
+                memory_block=mem or "（暂无记忆）",
+                now=tools.now_text(),
+            )},
+        ],
+        max_tokens=900,
+        caller="paper_outline",
+    )
+    title = str(outline.get("title") or "文稿").strip()[:40]
+    sections = [s for s in (outline.get("sections") or [])
+                if isinstance(s, dict) and str(s.get("heading") or "").strip()]
+    if not sections:
+        raise ValueError("提纲为空")
+    sections = sections[:_PAPER_MAX_SECTIONS]
+
+    async def _sec(sec: dict) -> str:
+        return await llm.complete(
+            [
+                {"role": "system", "content": "你是文书写作模块，只写这一节的正文。"},
+                {"role": "user", "content": prompts.PAPER_SECTION.format(
+                    name=mem_store.child_name,
+                    title=title,
+                    heading=str(sec["heading"])[:30],
+                    request=request,
+                    points="；".join(str(p) for p in (sec.get("points") or [])[:4]) or "（无要点）",
+                    context=context or "（无前置素材）",
+                    memory_block=mem or "（暂无记忆）",
+                    now=tools.now_text(),
+                )},
+            ],
+            max_tokens=1200,
+            caller="paper",
+        )
+
+    parts = await asyncio.gather(*(_sec(s) for s in sections), return_exceptions=True)
+    chunks = [f"# {title}"]
+    for sec, part in zip(sections, parts):
+        chunks.append(f"\n\n## {str(sec['heading']).strip()[:30]}\n")
+        if isinstance(part, str) and part.strip():
+            chunks.append(part.strip())
+        else:
+            chunks.append("（这一节没写出来，留着自己补。）")
+    return title or "文稿", "".join(chunks).strip()
+
+
+# markdown 行内标记：进 Word 的是给孩子打印/上交的东西，** 和 ` 不能留在字面上
+_MD_INLINE = re.compile(r"[*`_]+")
+
+
+def _md_clean(text: str) -> str:
+    return _MD_INLINE.sub("", str(text or "")).strip()
+
+
+def _draft_docx(title: str, body: str) -> bytes:
+    """文稿正文 → .docx 字节：LLM 写的是 markdown 风文本，
+    标题/列表/引用映射成 Word 样式，其余按普通段落走（如实排版，不重写内容）。
+    """
+    import docx  # python-docx：读附件依赖它，写文稿顺带可写（零新增依赖）
+
+    doc = docx.Document()
+    doc.add_heading(_md_clean(title) or "文稿", level=0)
+    for raw in body.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        m = re.match(r"^(#{1,6})\s+(.*)", line)
+        if m:
+            doc.add_heading(_md_clean(m.group(2)) or " ", level=min(len(m.group(1)), 4))
+            continue
+        m = re.match(r"^[-*·•]\s+(.*)", line)
+        if m:
+            doc.add_paragraph(_md_clean(m.group(1)), style="List Bullet")
+            continue
+        m = re.match(r"^\d+[.、)]\s*(.*)", line)
+        if m:
+            doc.add_paragraph(_md_clean(m.group(1)), style="List Number")
+            continue
+        m = re.match(r"^>\s*(.*)", line)
+        if m:
+            doc.add_paragraph(_md_clean(m.group(1)), style="Intense Quote")
+            continue
+        doc.add_paragraph(_md_clean(line))
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
+def _draft_to_file(child_dir: Path, title: str, body: str) -> dict:
+    """文稿落成 files/ 里一份可下载文件：.docx 优先（打印/交作业的场景），
+    python-docx 出岔子退 .md——下载入口始终有，格式降级如实反映在扩展名上。"""
+    store = files.FileStore(child_dir)
+    try:
+        return store.save(_draft_docx(title, body), f"{title}.docx",
+                          "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                          origin="generated")
+    except Exception:
+        return store.save(body.encode("utf-8"), f"{title}.md",
+                          "text/markdown", origin="generated")

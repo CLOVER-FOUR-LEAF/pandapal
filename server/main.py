@@ -47,8 +47,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, Field
 
-from . import (actions, affairs, asr, auth, config, executor, files, graph, llm, memory, planner,
-               prompts, router, sessions, store, suggest, synth, tools, tts, voice)
+from . import (actions, affairs, auth, config, dream, executor, files, graph, llm, memory,
+               planner, prompts, router, sessions, store, stt, suggest, synth, tools, tts, voice)
 
 
 @asynccontextmanager
@@ -56,7 +56,6 @@ async def _lifespan(_app: FastAPI):
     yield
     await llm.close_shared_clients()
     await tts.close_clients()
-    await asr.close_clients()
 
 
 mimetypes.add_type("application/manifest+json", ".webmanifest")  # PWA 清单，默认会被当成 octet-stream
@@ -88,10 +87,10 @@ async def _security_headers(request: Request, call_next):
         size = int(length)
         if request.url.path == "/api/files":
             cap = config.UPLOAD_MAX_BYTES + 64 * 1024  # 留 multipart 边界与字段开销
-        elif request.url.path == "/api/asr":
-            # 语音识别的体积就是那段录音本身：60 秒 16k wav ≈ 1.9MB，
-            # 套 256KB 的 JSON 闸门会让每一段正常录音都 413（"录了但识别不了"）
-            cap = config.ASR_MAX_BYTES + 64 * 1024
+        elif request.url.path == "/api/stt":
+            # 语音识别的体积就是那段录音本身：16k 单声道 wav ≈ 32KB/s，一段 10 秒的话
+            # 就 320KB；套 256KB 的 JSON 闸门会让正常录音一律 413（"录了但识别不了"）
+            cap = stt.MAX_BYTES + 64 * 1024
         else:
             cap = 256_000
         if size > cap:
@@ -505,26 +504,7 @@ def _upload_throttle(key: str) -> bool:
     return ok
 
 
-_ASR_HITS: dict[str, list[float]] = {}
 
-
-def _asr_throttle(key: str) -> bool:
-    """语音识别按账号限频：每次都要上传音频并调上游，和附件上传同一类打点。
-
-    窗口与额度走 config（ASR_MAX_PER_WINDOW），默认比上传宽——语音输入是
-    高频交互动作，卡太紧会让"说一半被限流"变成新的体验坑。
-    """
-    now = time.monotonic()
-    hits = [t for t in _ASR_HITS.get(key, []) if now - t < config.ASR_WINDOW_S]
-    ok = len(hits) < config.ASR_MAX_PER_WINDOW
-    if ok:
-        hits.append(now)
-    _ASR_HITS[key] = hits
-    if len(_ASR_HITS) > 500:
-        for k in [k for k, v in _ASR_HITS.items()
-                  if not v or now - v[-1] >= config.ASR_WINDOW_S]:
-            _ASR_HITS.pop(k, None)
-    return ok
 
 
 # 所有会调 LLM 的接口共用一份额度：按账号 + 按 IP 双桶。
@@ -1166,7 +1146,7 @@ async def _tool_round(sess, message: str, emit) -> str:
     if not calls:
         return ""
     ctx = tools.ToolCtx(store=sess.store, event=message)
-    blocks = []
+    picked: list[tuple[str, str, dict]] = []
     for c in calls[:_TOOL_MAX_CALLS]:
         name = str(c.get("tool") or "")
         args = c.get("args") if isinstance(c.get("args"), dict) else {}
@@ -1175,16 +1155,30 @@ async def _tool_round(sess, message: str, emit) -> str:
             continue
         label = tools.describe(name, args)
         await emit({"type": "tool", "tool": name, "label": label, "status": "running"})
+        picked.append((name, label, args))
+    if not picked:
+        return ""
+
+    async def _one(name: str, args: dict):
         try:
             out = await tools.dispatch(name, args, ctx)
             if out is None:
                 raise RuntimeError("工具不可用")
+            return out, None
+        except Exception as e:  # noqa: BLE001 单个工具失败要让孩子看得见，但别中断回复
+            return None, e
+
+    # 工具彼此独立（天气+搜索、时间+交通），串行就是白等一个工具的延迟
+    results = await asyncio.gather(*(_one(n, a) for n, _, a in picked))
+    blocks = []
+    for (name, label, _), (out, err) in zip(picked, results):
+        if err is None:
             await emit({"type": "tool", "tool": name, "label": label, "status": "done"})
             blocks.append(f"【{label}】\n{out}")
-        except Exception as e:  # noqa: BLE001 单个工具失败要让孩子看得见，但别中断回复
-            print(f"[tools] {name} 调用失败：{e}")
+        else:
+            print(f"[tools] {name} 调用失败：{err}")
             await emit({"type": "tool", "tool": name, "label": label, "status": "error"})
-            blocks.append(f"【{label}】查询没成功：{e}——回答时如实告诉孩子没查到")
+            blocks.append(f"【{label}】查询没成功：{err}——回答时如实告诉孩子没查到")
     return "\n\n".join(blocks)
 
 
@@ -1322,10 +1316,38 @@ async def _chat_stream(sess, raw_message: str, ctx: dict, resume: ResumeReq | No
         raw_message = SECRET_PREFIX + message if is_secret else message
 
     async def work():
-        nonlocal reply_text
+        nonlocal reply_text, message
         # 附件先回执：前端不必等 mode 就能把文件卡画出来（大图上传后尤其明显）
         if attachments:
             await emit({"type": "files", "files": [_file_public(sess, a) for a in attachments]})
+        # 上轮管家问了"先问清楚"的问题：孩子的这句回复不是新需求，
+        # 是补全——并回原请求再走完整管线（悄悄话轮不合并，pending 留给下一轮）
+        if sess.pending_clarify and not is_secret and not resume:
+            pend, sess.pending_clarify = sess.pending_clarify, None
+            message = f"{pend['orig']}（孩子补充说明：{message}）"
+        # 文稿修订："把结尾改改"是对上一份稿子的指令——就地重写交付，
+        # 不拿修订请求去规划新事务（那样只会又写出一份不相干的稿子）。
+        # 锚点 = 修订话术 + 档案里有 48h 内的新鲜草稿，缺一个都不进来。
+        if (not is_secret and not resume and len(message) <= 60
+                and _REVISE_ASK.search(message)):
+            try:
+                latest_draft = (await asyncio.to_thread(a_store.drafts) or [None])[0]
+            except Exception:  # noqa: BLE001 拿不到草稿就当普通消息走
+                latest_draft = None
+            if latest_draft and _draft_fresh(latest_draft):
+                last_turn["intent"] = "chat"
+                await emit({"type": "mode", "mode": "chat", "mood": "normal"})
+                try:
+                    res = await actions.revise_draft(
+                        sess.dir, a_store, latest_draft, message)
+                except Exception as e:  # noqa: BLE001 改写失败给回执，不当全场错误
+                    res = {"kind": "draft", "ok": False,
+                           "detail": f"这次没改成：{e}，换个说法再让我试？",
+                           "payload": {}}
+                await emit({"type": "action", **res})
+                reply_text = res["detail"]
+                await emit({"type": "token", "text": res["detail"]})
+                return
         if resume:
             # 续写不分类、不建事务：带着原问题和半截回答直接接着往下说
             last_turn["intent"] = "chat"
@@ -1415,6 +1437,25 @@ async def _chat_stream(sess, raw_message: str, ctx: dict, resume: ResumeReq | No
                 plan = await plan_task
             except planner.PlanError:
                 plan = None
+            if plan and plan.get("clarify"):
+                # 管家判断"缺了做不对的关键信息"（如没说要写什么主题）：先问不硬做。
+                # 原请求挂进 pending_clarify，孩子下一条回复会并回来重走完整管线。
+                q = str(plan["clarify"])
+                if not is_secret:
+                    sess.pending_clarify = {"orig": message}
+                if affair:
+                    try:
+                        await asyncio.to_thread(
+                            a_store.update, affair["id"],
+                            {"summary": "等孩子补充说明"},
+                            actor="butler", note="先问清楚再动手")
+                    except Exception:  # noqa: BLE001 事务摘要更新不上不影响提问本身
+                        pass
+                reply_text = q
+                await emit({"type": "token", "text": q})
+                return
+            # 写作类请求：卡片展示"管家查到的素材和提纲"，成品是随后交付的文稿文件
+            write_rule = prompts.WRITE_CARD_RULE if _DRAFT_ASK.search(message) else ""
             if plan:
                 ptitle = (plan.get("title") or "").strip()[:18]
                 if created and affair and ptitle and ptitle not in _GENERIC_TITLES:
@@ -1448,17 +1489,44 @@ async def _chat_stream(sess, raw_message: str, ctx: dict, resume: ResumeReq | No
                     # 直接走单次直出（它不依赖节点结果）
                     card = await _card_with_fallback(
                         sess.store, message, use_synth=False, title=plan["title"],
-                        attach_ctx=_attach_digest(_file_store(sess), attachments))
+                        attach_ctx=_attach_digest(_file_store(sess), attachments),
+                        extra_rule=write_rule)
                 else:
                     card = await _card_with_fallback(
                         sess.store, message, results=results, title=plan["title"],
                         pairs=[(n["title"], results.get(n["id"], "")) for n in ok_nodes],
-                        attach_ctx=_attach_digest(_file_store(sess), attachments))
+                        attach_ctx=_attach_digest(_file_store(sess), attachments),
+                        extra_rule=write_rule)
             else:
                 await emit({"type": "phase", "phase": "synthesizing"})
                 card = await _card_with_fallback(
                     sess.store, message, use_synth=False,
-                    attach_ctx=_attach_digest(_file_store(sess), attachments))
+                    attach_ctx=_attach_digest(_file_store(sess), attachments),
+                    extra_rule=write_rule)
+            # 出卡前自检：判官说"没回应上"就带意见重出一次（有真实节点结果的
+            # 重跑汇总，没有的重跑直出）；原卡保底——重出失败不退化成没卡
+            hint = await _supervise_card(sess, message, card)
+            if hint:
+                await emit({"type": "phase", "phase": "checking"})
+                retry_rule = (write_rule
+                              + f"\n- 上一版没实质回应孩子的话（{hint}），这一版修正它")
+                try:
+                    ok_nodes = ([n for n in plan["nodes"]
+                                 if statuses.get(n["id"]) != "error"]
+                                if plan else [])
+                    if ok_nodes:
+                        card2 = await asyncio.wait_for(
+                            synth.synthesize(sess.store, message, results,
+                                             _attach_digest(_file_store(sess), attachments),
+                                             retry_rule), _RETRY_BUDGET)
+                    else:
+                        card2 = await asyncio.wait_for(
+                            synth.direct_card(sess.store, message,
+                                              _attach_digest(_file_store(sess), attachments),
+                                              retry_rule), _DIRECT_BUDGET)
+                    card = card2
+                except Exception:  # noqa: BLE001
+                    pass
             reply_text = synth.card_to_text(card)
 
             # ③ 实际去执行：加提醒 / 生成清单 / 请家长确认。
@@ -1595,6 +1663,10 @@ async def _chat_settle(sess, ctx: dict):
                     gdata["secret"] = True
                 if gdata.get("added_nodes") or gdata.get("added_edges") or gdata.get("updated"):
                     await out.put(_sse({"type": "memory", **gdata}))
+            # 做梦：沉淀落盘后、轮后空闲时整理记忆——daily 里反复出现的事
+            # 晋升进 MEMORY.md。悄悄话轮不触发（私密内容连"整理"都不沾）
+            if not is_secret:
+                _bg(asyncio.create_task(_dream_guarded(sess)))
 
         # 按这一轮的实际情况换一批快捷话题（确定性规则，不额外调 LLM）
         if not is_secret:
@@ -1608,11 +1680,23 @@ async def _chat_settle(sess, ctx: dict):
     finally:
         # 记忆链路的结束标记；异常照旧往上抛给 guarded 的 _settle 兜底
         await out.put(None)
-    for _ in range(2):
+    # 数的是两个结束标记，不是两个元素——队列里还混着 memory/suggest/affair
+    # 事件占位；按"取两个"数的话语音事件（TTS 要几秒才到）几乎必然被丢，
+    # 表现为"试音有声、回复没声"。
+    pending = 2
+    while pending:
         chunk = await out.get()
         if chunk is None:
+            pending -= 1
             continue
         yield chunk
+
+
+async def _dream_guarded(sess) -> None:
+    try:
+        await dream.maybe_dream(sess.store)
+    except Exception as e:  # noqa: BLE001 做梦是锦上添花，不许惊动对话
+        print(f"[dream] 整理失败：{e}")
 
 
 def _now_text() -> str:
@@ -1741,11 +1825,33 @@ def _clean_affair_title(message: str) -> str:
 
 _SYNTH_BUDGET = 75.0   # 汇总：实测最慢 52.6s，留余量
 _DIRECT_BUDGET = 25.0  # 直出：实测 ~5s
+_SUPERVISE_BUDGET = 12.0   # 卡片判官：一句话判"回应上没有"，不该比出卡更久
+_RETRY_BUDGET = 30.0       # 判不过的重出预算：比完整汇总短，失败还能退回原卡
+
+
+async def _supervise_card(sess, message: str, card: dict) -> str:
+    """轻量自检（参考 OpenPanda supervise.go 的 done/continue 判官）：
+
+    三档降级保"有卡片"，不保"卡片对题"——判官看一眼"实质回应孩子的话了吗"。
+    返回 "" 放行；非空是判官给的一句话修改意见，调用方带它重出一次。
+    判官超时/倒下返回 ""——自检是增益不是门禁，绝不为它扣住卡片。
+    """
+    try:
+        verdict = await asyncio.wait_for(llm.complete_json(
+            [{"role": "user", "content": prompts.CARD_JUDGE.format(
+                name=sess.name, message=message,
+                card=synth.card_to_text(card)[:1500])}],
+            max_tokens=300, caller="supervise"), _SUPERVISE_BUDGET)
+    except Exception:  # noqa: BLE001
+        return ""
+    if str(verdict.get("verdict") or "") == "continue":
+        return str(verdict.get("hint") or "没实质回应孩子的需求")[:120]
+    return ""
 
 
 async def _card_with_fallback(store, message: str, *, results: dict | None = None,
                               title: str = "", pairs=(), use_synth: bool = True,
-                              attach_ctx: str = "") -> dict:
+                              attach_ctx: str = "", extra_rule: str = "") -> dict:
     """出卡片的三档降级：汇总 → 单次直出 → 纯本地摊结果。
 
     为什么要有第三档：synth 实测平均 35s、最慢 52.6s，已经贴着单次调用超时
@@ -1761,7 +1867,8 @@ async def _card_with_fallback(store, message: str, *, results: dict | None = Non
     if use_synth:
         try:
             return await asyncio.wait_for(
-                synth.synthesize(store, message, results or {}, attach_ctx), _SYNTH_BUDGET)
+                synth.synthesize(store, message, results or {}, attach_ctx,
+                                 extra_rule), _SYNTH_BUDGET)
         except Exception as e:  # noqa: BLE001 含 TimeoutError；CancelledError 不在此列，照常上抛
             print(f"[card] 汇总失败，降级：{e!r}")
         if results:
@@ -1769,7 +1876,8 @@ async def _card_with_fallback(store, message: str, *, results: dict | None = Non
             # 刚查到的车次/时间对不上的内容。直接摊真结果，降级不降真。
             return synth.assemble_from_results(title, list(pairs))
     try:
-        return await asyncio.wait_for(synth.direct_card(store, message, attach_ctx), _DIRECT_BUDGET)
+        return await asyncio.wait_for(
+            synth.direct_card(store, message, attach_ctx, extra_rule), _DIRECT_BUDGET)
     except Exception as e:  # noqa: BLE001
         print(f"[card] 直出也失败，用本地兜底：{e!r}")
     return synth.assemble_from_results(title, list(pairs))
@@ -1825,6 +1933,26 @@ async def _open_affair(sess, a_store, message: str, hit: dict) -> tuple[dict | N
 _DRAFT_ASK = re.compile(
     r"帮我写|帮我拟|帮我起草|给我写|起草|写一[封份篇个段则]|写份|写篇|写个|拟一[封份篇个]"
     r"|发言稿|演讲稿|申请书|推荐信|自我介绍|自荐信|请假条|主持稿|竞选稿|致辞|感言|承诺书")
+
+# 文稿修订锚点："把结尾改改/帮我改一下这篇"——对着已有稿子就地改写。
+# 刻意收窄：把/帮…改成/得/写/换/删 + 文档部位词（结尾/标题/第几节），
+# 裸"删掉/改到8点"这类对提醒/闹钟说的话不进来（_draft_fresh 再把一道关）。
+_REVISE_ASK = re.compile(
+    r"把.{0,12}(改成|改得|改改|改写|换掉|换成|重写|润色|精简|删了|删掉)"
+    r"|帮我(改|修|重写|润色)|改改|改一下|修改一下|重新写|重写|润色|扩写|缩写"
+    r"|(标题|题目|结尾|开头|那段话?|这节|这段|这章|内容|稿子|文稿|文章|论文|第.{1,3}[段节章])"
+    r".{0,8}(改|换|删|加|重写|长一?点|短一?点|有趣|生动|简单点)"
+    r"|改得|改短|改长|改有趣|改简单|改生动")
+
+
+def _draft_fresh(draft: dict) -> bool:
+    """修订只锚定"刚写的"那版：两天前的稿子孩子多半已经交差，
+    这时的"帮我改改"更可能是在说别的东西——放下去让正常分类接住。"""
+    try:
+        created = datetime.fromisoformat(str(draft.get("created") or ""))
+        return abs((datetime.now() - created).total_seconds()) <= 48 * 3600
+    except Exception:  # noqa: BLE001 时间戳坏掉的草稿不锚定
+        return False
 
 
 async def _execute_actions(sess, a_store, affair: dict, card: dict, message: str, emit) -> None:
@@ -2010,56 +2138,27 @@ async def api_voice_audio(request: Request, vid: str, name: str = ""):
                         headers={"Cache-Control": "private, max-age=300"})
 
 
-# ---------------------------------------------------------------- 语音识别（孩子的语音输入）
+@app.post("/api/stt")
+async def api_stt(request: Request, name: str = "", file: UploadFile = None):
+    """语音识别：浏览器 SpeechRecognition 不可用时的服务端兜底（MiMo ASR）。
 
-@app.get("/api/asr")
-async def api_asr_state(request: Request, name: str = ""):
-    """语音输入的可用状态：前端据此写按钮提示与最长录音秒数。
-
-    没配 Key 时如实回 available=false，前端把原因摆在按钮上——而不是像原来
-    那样把按钮整个删掉（删掉只会让人以为"这个产品没这功能"）。
+    Chrome 的识别走 Google 服务器（国内报 network）、Firefox 没有这个 API——
+    前端此时把录音转成 wav 传这里，任何支持 getUserMedia 的浏览器都能用。
     """
     await _auth_session(request, "chat", name)
-    return {
-        "available": asr.available(),
-        "max_seconds": config.ASR_MAX_SECONDS,
-        "language": asr.language(),
-        "languages": list(asr.LANGUAGES),
-    }
-
-
-@app.post("/api/asr")
-async def api_asr(request: Request, name: str = "", file: UploadFile = None):
-    """上传一段录音 → 识别文本（{"text": "..."}）。
-
-    识别放在服务端，是因为浏览器自带的 Web Speech API 依赖 Google 的语音服务，
-    国内一按就静默失败（详见 server/asr.py 顶部）。前端只负责录 + 编成 16k 单声道
-    wav，转写交给小米 MiMo（`mimo-v2.5-asr`）。
-    三道闸：鉴权（能力复用 chat，家长没有）、体积、按账号限频。
-    """
-    user, _sess = await _auth_session(request, "chat", name)
-    if not asr.available():
-        raise HTTPException(503, "语音识别还没开通：让管理员在后台「API 配置」里配一下 Key")
-    if not _asr_throttle(user["username"]):
-        raise HTTPException(429, "语音识别用得太密啦，歇一会儿再说")
+    if not stt.available():
+        raise HTTPException(503, "服务端没配语音 Key（TTS_API_KEY），识别不可用")
     if file is None or not file.filename:
-        raise HTTPException(400, "没有收到录音")
-    data = await _read_upload_limited(file, config.ASR_MAX_BYTES)
+        raise HTTPException(400, "没有收到音频")
+    data = await _read_upload_limited(file, stt.MAX_BYTES)
     if data is None:
-        raise HTTPException(413, f"这段录音太长啦，一次最多 {config.ASR_MAX_SECONDS} 秒")
+        raise HTTPException(413, "录音太长了，一句话说完再试")
     if not data:
-        raise HTTPException(400, "这段录音是空的，再说一遍试试")
-    if not asr.sniff_format(data):
-        raise HTTPException(415, "没认出来这是什么录音格式，换 Chrome / Edge 再试试")
+        raise HTTPException(400, "录音是空的")
     try:
-        text = await asr.transcribe(data)
-    except asr.ASRError as e:
-        # 上游原因（Key/额度/音频问题）已由 asr 留痕，/api/logs 与后台「测试识别」可查
-        if asr.account_blocked(e):
-            # 401/402/403 是"这个账号现在用不了识别"（Key 不对 / 没余额 / 没权限）：
-            # 跟孩子说"没听清"等于让他一遍遍重说一件永远失败的事，得把话说到管理员那儿
-            raise HTTPException(503, "语音识别还没开通：让管理员在后台「API 配置」里确认一下")
-        raise HTTPException(502, "这次没听清，再说一遍试试")
+        text = await stt.transcribe(data, file.content_type or "audio/wav")
+    except stt.STTError as e:
+        raise HTTPException(503, f"语音识别暂时不可用：{e}")
     return {"text": text}
 
 
@@ -2611,6 +2710,13 @@ async def api_logs(request: Request, limit: int = 50, offset: int = 0):
     """
     _need(_user(request), "logs")
     return await asyncio.to_thread(llm.read_logs, limit, offset)
+
+
+@app.get("/api/logs/verify")
+async def api_logs_verify(request: Request):
+    """校验留痕哈希链：任何一行被改/删/换序都能查出来。仅 admin。"""
+    _need(_user(request), "logs")
+    return await asyncio.to_thread(llm.verify_chain)
 
 
 @app.get("/api/health")

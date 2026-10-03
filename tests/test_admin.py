@@ -65,17 +65,11 @@ async def main() -> int:
         r = await c.get("/api/admin/settings", headers=h)
         groups = {g["key"]: g for g in r.json()["groups"]}
         tts_fields = {f["key"]: f for f in groups["tts"]["fields"]}
-        asr_fields = {f["key"]: f for f in groups["asr"]["fields"]}
-        record("settings_groups", set(groups) == {"llm", "search", "tts", "asr"}, str(set(groups)))
+        record("settings_groups", set(groups) == {"llm", "search", "tts"}, str(set(groups)))
         record("settings_tts_fields", "TTS_API_KEY" in tts_fields and tts_fields["TTS_API_KEY"]["secret"])
-        record("settings_asr_fields",
-               "ASR_API_KEY" in asr_fields and asr_fields["ASR_API_KEY"]["secret"]
-               and asr_fields["ASR_API_KEY"].get("help")
-               and asr_fields["ASR_LANGUAGE"].get("choices"), str(sorted(asr_fields)))
-        # 密钥字段一律不回明文（这一条与环境无关：没配时也不该有 value 字段）
         llm_key = {f["key"]: f for f in groups["llm"]["fields"]}["LLM_API_KEY"]
-        record("settings_secret_never_plaintext",
-               llm_key["secret"] and "value" not in llm_key)
+        record("settings_secret_masked", llm_key["secret"] and "value" not in llm_key
+               and "…" in llm_key.get("preview", ""), llm_key.get("preview", ""))
 
         # 写入 TTS key → settings.json 落盘 + config 热生效
         r = await c.put("/api/admin/settings", headers=h,
@@ -88,14 +82,6 @@ async def main() -> int:
         on_disk = json.loads((SANDBOX / "settings.json").read_text(encoding="utf-8"))
         record("settings_on_disk", on_disk.get("TTS_API_KEY") == "sk-tts-abc123")
         record("settings_no_clobber_env_key", config.LLM_API_KEY == config._BASELINE["LLM_API_KEY"])
-        # 刚写进去的密钥：回读必须是掩码预览，不能吐明文（依赖上面的写入，故与 .env 无关）
-        r = await c.get("/api/admin/settings", headers=h)
-        tts_key = {f["key"]: f for f in
-                   {g["key"]: g for g in r.json()["groups"]}["tts"]["fields"]}["TTS_API_KEY"]
-        record("settings_secret_masked",
-               "value" not in tts_key and "…" in tts_key.get("preview", "")
-               and "abc123" not in json.dumps(tts_key),
-               tts_key.get("preview", ""))
 
         # unset → 回落基线
         await c.put("/api/admin/settings", headers=h, json={"unset": ["LLM_BASE_URL"]})

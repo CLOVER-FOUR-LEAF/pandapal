@@ -55,23 +55,30 @@ cp .env.example .env   # 然后填入你的 LLM_API_KEY 等
 | 注册（孩子/家长绑定）· 密保找回密码 · token 吊销 | `server/auth.py` + `/api/auth/register|question|reset` |
 | 记忆驱动开场问候 | `GET /api/greeting` |
 | 闲聊通道（人设+活跃记忆注入+历史尾部→流式回复） | `server/main.py` `_chat_stream` |
-| 意图分类（plan/chat） | `server/router.py` |
+| 意图分类（plan/chat）· FastTriage 免 LLM 快速路（零信号短闲聊直接 chat，命中任一办事信号词 veto 回 LLM，自带小情绪词典）· 分类结果缓存（同一句话+同一份事务简报 300s 内不重问模型，保底结果不缓存） | `server/router.py` |
 | 任务拆解：LLM 输出 JSON DAG，校验去环重试 | `server/planner.py` |
 | 按依赖并行执行 + SSE 实时状态 | `server/executor.py` |
-| 结构化卡片合成 | `server/synth.py` |
+| 结构化卡片合成 + 出卡前判官自检（"实质回应孩子了吗"，不过带意见重出一次，原卡保底） | `server/synth.py` + `server/main.py` `_supervise_card` |
 | 代办文书（"帮我写份自我介绍/发言稿"→LLM 真写全文→文稿卡+落盘 `drafts.json` 挂回事务） | `server/actions.py` `draft` |
+| 先问清楚再动手：需求缺关键信息（如"帮我写论文"没说写什么）→ planner 输出 `{"clarify": …}` 反问而非拿记忆硬猜；原请求挂 `Session.pending_clarify`，孩子下一句回复并回原请求重走完整管线 | `server/planner.py` `clarify` + `server/main.py` pending 合并 |
+| 长文稿管线（论文/报告/作文）：卡片只展示"查到的素材+提纲"，正文走 `paper_outline` 定结构 → 各节并行生成 → 拼 markdown（单节失败如实标缺） | `server/actions.py` `_write_paper` + `prompts.py` `PAPER_*` |
+| 交付物落盘：draft 文稿同时落成 `files/` 里的 .docx 真文件（python-docx 排版，失败退 .md），卡片一键下载、文件面板标「管家产出」徽章 | `server/actions.py` `_draft_to_file` + `GET /api/files/{id}/content?download=1` |
+| 文稿修订环："把结尾改改/帮我重写"对着 48h 内的稿子就地改写（`_REVISE_ASK` 锚点+新鲜度双门槛，不重走规划管道），同一 draft_id 更新、交付文件换新版；"把闹钟改到8点"这类话不劫持 | `server/main.py` 修订锚点 + `server/actions.py` `revise_draft` |
 | 文件式记忆读写：轮后 LLM 抽取→topics/daily/MEMORY；单写锁+原子写 | `server/memory.py` |
+| Dreaming 记忆整理：daily 跨天去重→五信号打分→反复出现的事晋升进 MEMORY.md（标 `[梦]` 出处可查）+ 梦日记落盘；每天一次、全确定性不调 LLM、悄悄话不触发 | `server/dream.py` |
 | 工具脚手架（声明式注册表，@tool 注册即接入 planner/executor/闲聊通道）：看时间 `now` / 本地赛事库 `race_lookup` / 交通参考 `transport_lookup` / wttr.in 天气 `weather` / 联网搜索 `web_search`（Tavily 兼容端点，未配置则必应网页解析兜底）/ 打开网页 `web_browse` | `server/tools.py` |
-| 闲聊直答的工具轮：启发式命中 → 调度器挑工具 → 结果注入 system → 流式回复（`tool` SSE 事件驱动前端工具条） | `server/main.py` `_tool_round` + `server/prompts.py` `TOOL_PICK` |
-| 记忆本页：主题分组+时间线+长期记忆 | `web/` + `GET /api/memory` |
+| 闲聊直答的工具轮：启发式命中 → 调度器挑工具 → 多工具并行分发 → 结果注入 system → 流式回复（`tool` SSE 事件驱动前端工具条） | `server/main.py` `_tool_round` + `server/prompts.py` `TOOL_PICK` |
+| 记忆本页：主题分组+时间线+长期记忆+梦日记（晋升过程可见） | `web/` + `GET /api/memory` |
 | 管家朗读（小米 MiMo TTS）：回复定型后合成语音，`voice` 事件落在 `done` 之后不拖慢正文；口播稿先洗成口语（去 markdown/emoji、日期时间口语化、限长收尾）；方案卡只念一句引导稿；对话音优先级高于问候/晨报，发新消息的瞬间就掐断 | `server/tts.py` + `server/voice.py` |
+| 语音识别双路径：浏览器 SpeechRecognition 优先（免上传逐字上屏），报服务级错误当场落 MiMo ASR 服务端兜底（录 PCM→WAV→`POST /api/stt`），Firefox/国内 Chrome 也能用 | `server/stt.py` + `web/app.js` `setupMic` |
 | 音色档案 `voice.json`：默认清纯甜美女声（voicedesign 按文字生成音色），可一键切内置音色；孩子直接跟管家说"换个温柔的声音"，由管家自行扩写成音色提示词并落档（确定性正则锚点，不动意图分类） | `server/prompts.py` `VOICE_DESIGN` + `POST /api/voice/preview` |
+| LLM 可靠性三层：错误分级退避重试（429 换 Key、5xx/断网指数退避）、双口径熔断器（Key 级 401/403/429 与端点级 5xx/网络分开记账）、异构兜底端点（`LLM_API_KEY3`+`LLM_BASE_URL2` 可切另一家服务商）；流式只在未吐 token 前重试防回复重复；`prompt_cache_key` 前缀指纹省重复前缀、非空截断尾部明示"说继续我接着讲" | `server/llm.py` |
+| 调用留痕防篡改：`llm_calls.jsonl` 每行带前一行 sha256 哈希链，`GET /api/logs/verify` 逐行校验改/删/换序 | `server/llm.py` `verify_chain` |
 | 家长周报（本周事务进展+新变化统计→LLM 写成一页纸；悄悄话只计数不进 prompt；LLM 挂了只报统计） | `server/family.py` `GET /api/parent/weekly` |
 | 通知落地「一份通知，千家千版」：学校/机构通知 → 按孩子记忆出专属版 + 自动建事务/清单/提醒；admin 可批量下发 | `server/family.py` `POST /api/notice` |
 | 童年备忘录导出：整份档案打包 zip 交还孩子（家长 403） | `server/family.py` `GET /api/export` |
 | PWA：可添加到主屏幕；断网时档案类数据用缓存撑起，AI 端点不缓存（缓存键按 token 隔离） | `web/sw.js` + `web/manifest.webmanifest` |
 | 多模态附件：上传图片/PDF/Word/Excel/PPT/文本（拖拽、点选或粘贴），图片走视觉、扫描件 PDF 渲染成图、文档抽取正文进上下文；附件跨轮可追问、可管理 | `server/files.py` + `POST /api/files` |
-| 语音输入（小米 MiMo ASR）：浏览器只录音并就地编成 16k 单声道 wav，转写走服务端 `mimo-v2.5-asr` → 文本回填输入框（不清掉已打的字）。**不再用浏览器自带 Web Speech**——Chrome 那条路把音频送到 Google，国内直连不通，旧实现一按就静默失败；现在能不能用只取决于服务端配没配 Key，与浏览器/网络无关，且每类失败都给得出人话原因（没权限/没设备/https 缺失/没开通/没听清）。排查入口：后台「API 配置 → 测试识别」一键 TTS 念一句→ASR 听回来，上游原文直接显示 | `server/asr.py` + `POST /api/asr` + `web/app.js` `micStart` |
 
 **降级不降真**：DAG 规划失败 → 单 LLM 直出卡片（跳过拆解展示，绝不跳过生成）；节点失败 → 标记后继续；联网工具失败/没搜到 → 如实告诉孩子"没查到"，不编造结果。
 
@@ -79,8 +86,9 @@ cp .env.example .env   # 然后填入你的 LLM_API_KEY 等
 
 - 模型：由 `.env` 中 `LLM_MODEL` 指定（当前用 `grok-4.7`，走 OpenAI 兼容端点；兼容任意 OpenAI 协议端点，也支持 Anthropic Messages 协议）
 - 调用方式：`server/llm.py` 统一封装双协议客户端；一轮规划型对话是 分类→拆解→执行→整理 四段，闲聊可能多一轮联网工具调用，加上轮后的记忆抽取，最多七八次调用
+- 可靠性：瞬时错误（断网/超时/5xx）同候选指数退避重试；429 优先换 Key；连续失败熔断 30s 跳过死端点；`LLM_API_KEY3`+`LLM_BASE_URL2`/`LLM_MODEL2`/`LLM_PROTOCOL2` 可配异构兜底服务商，主端点整体停服也能活。留痕里逐次尝试可见，并记录 provider 回报的真实 token 用量与截断标记
 - 单轮耗时提示：`planner` 与 `synth` 是最重的两段（各自几十秒），界面会在这两段显示「正在拆解要办的事…」「快好了，正在整理成方案…」，属正常等待
-- **赞助商 API 使用清单**：LLM API（见 `.env`，OpenAI 兼容/Anthropic 兼容）、语音合成 [小米 MiMo TTS](https://mimo.mi.com/docs/zh-CN/quick-start/usage-guide/audio/speech-synthesis-v2.5)（`TTS_API_KEY`，可在 admin 后台「API 配置」里改、立即生效；Key 限时免费；留空则整条语音链路静默跳过）、语音识别 [小米 MiMo ASR](https://mimo.mi.com/docs/zh-CN/quick-start/usage-guide/audio/Speech-Recognition)（`mimo-v2.5-asr`；`ASR_API_KEY` 留空即复用 `TTS_API_KEY`，同一平台同一把 Key；`ASR_ENABLED=0` 或没 Key 时孩子端的语音键点击会如实说明"还没开通"）、天气 [wttr.in](https://wttr.in)（免费无需 Key）、联网搜索（配置 `SEARCH_API_KEY`+`SEARCH_BASE_URL` 走 Tavily 兼容端点；未配置时用必应网页结果解析，无需 Key）
+- **赞助商 API 使用清单**：LLM API（见 `.env`，OpenAI 兼容/Anthropic 兼容）、语音合成 [小米 MiMo TTS](https://mimo.mi.com/docs/zh-CN/quick-start/usage-guide/audio/speech-synthesis-v2.5)（`TTS_API_KEY`，可在 admin 后台「API 配置」里改、立即生效；Key 限时免费；留空则整条语音链路静默跳过）、天气 [wttr.in](https://wttr.in)（免费无需 Key）、联网搜索（配置 `SEARCH_API_KEY`+`SEARCH_BASE_URL` 走 Tavily 兼容端点；未配置时用必应网页结果解析，无需 Key）
 
 ## 六、项目结构
 
@@ -107,23 +115,21 @@ cp .env.example .env   # 然后填入你的 LLM_API_KEY 等
 # 家庭侧服务离线自检：周报/通知落地/批量下发/导出 + 悄悄话不进 prompt + 越权 403
 .venv/bin/python tests/test_family.py
 
+# LLM 可靠性层自检：错误分级/退避/熔断/兜底/usage 记账（全离线 mock）
+.venv/bin/python tests/test_llm_resilience.py
+
 # 前端静态一致性：id/图标/括号配平，暂停键与断网条等关键钩子是否接上
 .venv/bin/python tests/test_web_static.py
 
 # 暂停键布局实测：本机 Chrome 无头模式量桌面/窄屏下输入栏按钮的矩形
 .venv/bin/python tests/test_pause_layout.py
 
-# 语音识别：容器魔数/请求体契约/上游失败分类/端点鉴权体积限频（离线，不花 Key）
-.venv/bin/python tests/test_asr.py
-
-# 语音输入的真浏览器实测：无头 Chrome + 假麦克风，自动登录→录音→停止→等识别结果进输入框
-.venv/bin/python tests/test_asr_web.py
-
-# 语音识别真链路自检（需真 Key，会花一点额度）：项目自己的 TTS 念一句 → ASR 听回来
-.venv/bin/python tests/test_asr_live.py
-
-# 续写指令路由：暂停后点「继续」发来的话必须走闲聊直答，不能误建事务
+# 续写指令路由 + FastTriage 快速路：暂停后点「继续」必须走闲聊，
+# 零信号短闲聊不花 LLM 第一跳，办事信号 veto 回 LLM
 .venv/bin/python tests/test_router.py
+
+# Dreaming 记忆整理：跨天重复事实晋升 MEMORY.md、梦日记、幂等、空档案
+.venv/bin/python tests/test_dream.py
 
 # 多模态附件：类型识别/内容抽取/配额/提示注入围栏/两种协议的图片消息/上传接口
 .venv/bin/python tests/test_files.py

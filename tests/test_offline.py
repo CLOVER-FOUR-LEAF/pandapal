@@ -17,6 +17,7 @@ import re
 import shutil
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -36,7 +37,7 @@ for _m in [m for m in sys.modules if m == "server" or m.startswith("server.")]:
 
 import httpx  # noqa: E402
 
-from server import config, llm, planner, tools  # noqa: E402
+from server import config, llm, planner, stt, tools  # noqa: E402
 from server import executor, main as _main, sessions as _sess_mod  # noqa: E402
 from server.main import app  # noqa: E402
 
@@ -59,6 +60,9 @@ def _last_user(messages: list[dict]) -> str:
 
 
 async def fake_complete(messages, *, max_tokens=1200, temperature=0.7, caller="unknown"):
+    if caller == "draft_revise":
+        return ("# 我的巡线小车调试记\n\n## 研究背景\n（改后：更有趣的开头）\n\n"
+                "## 结尾\n这次我终于学会了坚持！")
     return {"greeting": "早！昨晚睡得怎么样？", "briefing": "我盯着几件事，最要紧的是比赛。"}.get(
         caller, f"{caller} 的离线回复")
 
@@ -75,6 +79,11 @@ async def fake_complete_json(messages, *, max_tokens=1200, caller="unknown"):
             return {"intent": "new_affair", "mood": "happy", "affair_id": None, "reason": "离线"}
         return {"intent": "chat", "mood": "normal", "affair_id": None, "reason": "离线"}
     if caller == "planner":
+        # 只看"孩子的话："之后的真实消息（prompt 模板本身带着这些字样）：
+        # 写作类缺主题 → 先问不硬做；已带补充说明的原请求则正常出计划
+        said = content.rsplit("孩子的话：", 1)[-1]
+        if "论文" in said and "补充说明" not in said:
+            return {"clarify": "想写哪个主题呀？比如机器人课的小车，还是别的？"}
         return {"title": "离线筹备计划", "nodes": [
             {"id": "n1", "title": "想想第一步", "tool": "llm",
              "args": {"task": "列出第一步"}, "depends_on": []},
@@ -88,6 +97,15 @@ async def fake_complete_json(messages, *, max_tokens=1200, caller="unknown"):
         ]}
     if caller == "draft":
         return {"title": "离线自我介绍", "body": "大家好，我是小豆，每周六上午都上机器人课。"}
+    if caller == "supervise":
+        # 判官默认放行：主流断言不掺"重出一版"的随机性
+        return {"verdict": "done"}
+    if caller == "paper_outline":
+        return {"title": "我的巡线小车调试记", "sections": [
+            {"heading": "研究背景", "points": ["为什么想记录"]},
+            {"heading": "调试过程", "points": ["改参数", "记结果"]},
+            {"heading": "结论与感想", "points": ["更稳了"]},
+        ]}
     if caller == "extract_graph":
         # 模板本身含 [[secret]] 字样，必须只看"孩子："那一行里的用户原话
         secret = "[[secret]]" in content.rsplit("孩子：", 1)[-1]
@@ -169,11 +187,52 @@ async def main() -> int:
                                      timeout=30) as client:
             await _run(client)
     finally:
-        _restore(saved)
+        _restore(saved)   # log_call 真身回来，_audit_checks 用它写真实链
+        try:
+            _audit_checks()
+        except Exception as e:  # noqa: BLE001
+            record("audit_checks", False, repr(e))
         _cleanup()
     passed = sum(1 for _, ok, _ in RESULTS if ok)
     print(f"\n{passed}/{len(RESULTS)} 通过")
     return 0 if passed == len(RESULTS) else 1
+
+
+def _audit_checks() -> None:
+    """哈希链回归（在 _restore 之后跑，log_call 已是真身）：
+    写 3 行 → verify 全对；篡改中间一行 → 指认出具体行号。"""
+    p = llm.LOG_DIR / "llm_calls.jsonl"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    old = p.read_text(encoding="utf-8") if p.exists() else None
+    llm._CHAIN_LINE = None
+    try:
+        p.write_text("", encoding="utf-8")
+        for c in ("audit1", "audit2", "audit3"):
+            llm.log_call(c, True, 1.0)
+        v = llm.verify_chain()
+        record("audit_chain_ok", v["ok"] and v["total"] == 3, str(v))
+        recs = [json.loads(line) for line in
+                p.read_text(encoding="utf-8").splitlines()]
+        record("audit_chain_field", all(r.get("chain") for r in recs)
+               and recs[1]["chain"] != recs[2]["chain"], "")
+        # 篡改第二行的 ok 字段 → 验出在第 2 行
+        recs[1]["ok"] = False
+        lines = [json.dumps(r, ensure_ascii=False) for r in recs]
+        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        v2 = llm.verify_chain()
+        record("audit_tamper_detected",
+               not v2["ok"] and v2["bad_at"] == 1, str(v2))
+        # 删掉一行 → 链断处同样被指认
+        p.write_text("\n".join(lines[:1] + lines[2:]) + "\n", encoding="utf-8")
+        v3 = llm.verify_chain()
+        record("audit_delete_detected",
+               not v3["ok"] and v3["bad_at"] == 1, str(v3))
+    finally:
+        llm._CHAIN_LINE = None
+        if old is not None:
+            p.write_text(old, encoding="utf-8")
+        else:
+            p.unlink(missing_ok=True)
 
 
 async def _run(client: httpx.AsyncClient) -> None:
@@ -285,9 +344,90 @@ async def _run(client: httpx.AsyncClient) -> None:
             if (CHILD_DIR / "drafts.json").exists() else {}
         record("draft_persisted",
                any(d.get("id") == dpl["draft_id"] for d in dfile.get("drafts", [])))
+        # 交付物文件：draft 同时把稿子落成 files/ 里的真文件，可下载、清单里标 generated
+        record("draft_file", bool(dpl.get("file_id")), f"file_id={dpl.get('file_id')}")
+        if dpl.get("file_id"):
+            fl = await get_json(client, f"/api/files{q}")
+            gen = [f for f in fl.get("files", []) if f.get("id") == dpl["file_id"]]
+            record("draft_file_listed",
+                   len(gen) == 1 and gen[0].get("origin") == "generated",
+                   f"listed={len(gen)} origin={gen[0].get('origin') if gen else '无'}")
+            dl = await client.get(f"/api/files/{dpl['file_id']}/content{q}&download=1")
+            record("draft_file_download",
+                   dl.status_code == 200 and len(dl.content) > 200,
+                   f"status={dl.status_code} bytes={len(dl.content)}")
+            rec = next((d for d in dfile.get("drafts", []) if d.get("id") == dpl["draft_id"]), {})
+            record("draft_file_linked", rec.get("file_id") == dpl["file_id"])
+        else:
+            for n in ("draft_file_listed", "draft_file_download", "draft_file_linked"):
+                record(n, False, "draft 未产出文件")
     else:
-        for n in ("drafts_list", "draft_detail", "draft_linked", "draft_persisted"):
+        for n in ("drafts_list", "draft_detail", "draft_linked", "draft_persisted",
+                  "draft_file", "draft_file_listed", "draft_file_download", "draft_file_linked"):
             record(n, False, "无 draft action")
+
+    # 4c. 写作澄清 → 补全 → 长文稿交付：
+    #   "帮我写论文"没说写啥 → 管家先问（token 问题、无卡片），不拿记忆硬猜；
+    #   孩子补一句主题 → 回复并回原请求重走管线 → 分段成稿 → 落成 .docx 可下载
+    cevs = await post_sse(client, "/api/chat",
+                          {"name": NAME, "message": "帮我写一篇比赛小论文"})
+    ctypes = _types(cevs)
+    ctext = "".join(e.get("text", "") for e in cevs if e.get("type") == "token")
+    record("clarify_ask",
+           "card" not in ctypes and "主题" in ctext,
+           f"types={ctypes} q={ctext[:40]}")
+    revs = await post_sse(client, "/api/chat",
+                          {"name": NAME, "message": "就写机器人课的巡线小车"})
+    pact = next((e for e in revs
+                 if e.get("type") == "action" and e.get("kind") == "draft"), None)
+    ppl = (pact or {}).get("payload") or {}
+    record("clarify_resume",
+           bool(pact) and pact.get("ok") is True and bool(ppl.get("body")),
+           f"ok={pact.get('ok') if pact else '无'} title={ppl.get('title')}")
+    record("paper_sections",
+           ppl.get("body", "").count("\n## ") >= 2,
+           f"sections={ppl.get('body', '').count('## ')}")
+    if ppl.get("file_id"):
+        dl = await client.get(f"/api/files/{ppl['file_id']}/content{q}&download=1")
+        record("paper_file_download",
+               dl.status_code == 200 and len(dl.content) > 500,
+               f"status={dl.status_code} bytes={len(dl.content)}")
+    else:
+        record("paper_file_download", False, "长文稿未产出文件")
+
+    # 4d. 文稿修订：档案里有新鲜草稿 → "把结尾改改"就地重写交付，
+    #   不重建事务不走规划；同一 draft_id 更新、旧交付文件被新版替换
+    old_fid = ppl.get("file_id")
+    revs = await post_sse(client, "/api/chat",
+                          {"name": NAME, "message": "把结尾改得更有趣一点"})
+    ract = next((e for e in revs
+                 if e.get("type") == "action" and e.get("kind") == "draft"), None)
+    rpl = (ract or {}).get("payload") or {}
+    record("revise_deliver",
+           bool(ract) and ract.get("ok") is True
+           and "改后" in rpl.get("body", "") and rpl.get("revised") is True,
+           f"ok={ract.get('ok') if ract else '无'} revised={rpl.get('revised')}")
+    record("revise_same_draft",
+           bool(rpl.get("draft_id")) and rpl.get("draft_id") == ppl.get("draft_id"),
+           f"old={ppl.get('draft_id')} new={rpl.get('draft_id')}")
+    record("revise_no_plan",
+           "card" not in _types(revs) and "plan" not in _types(revs),
+           f"types={_types(revs)}")
+    if old_fid and rpl.get("file_id"):
+        old_dl = await client.get(f"/api/files/{old_fid}/content{q}")
+        record("revise_old_file_gone",
+               old_dl.status_code == 404 and rpl["file_id"] != old_fid,
+               f"old_status={old_dl.status_code} new_fid={rpl['file_id'][:8]}")
+    else:
+        record("revise_old_file_gone", False, "无新旧 file_id 可对比")
+
+    # 4e. 反锚定：长得像修订但说的是别的东西（闹钟/提醒）不劫持
+    evs_nh = await post_sse(client, "/api/chat",
+                            {"name": NAME, "message": "把闹钟改到8点"})
+    record("revise_no_hijack",
+           not any(e.get("type") == "action" and e.get("kind") == "draft"
+                   for e in evs_nh),
+           f"types={_types(evs_nh)}")
 
     # 5. 悄悄话：private 节点只在 child 视角可见（含 view=非parent 不泄露的白名单校验）
     sevs = await post_sse(client, "/api/chat",
@@ -435,7 +575,46 @@ async def _run(client: httpx.AsyncClient) -> None:
            f"codes={codes.count(200)}x200 tail={codes[-1]}")
     client.headers.pop("Authorization", None)
 
-    # 9. executor 祖先作用域：并行分支的产物不掺进别的 LLM 节点的上下文
+    # 9. 回复语音不丢：suggest/memory 先入队时 voice 事件也必须下发。
+    # 回归 _chat_settle 的收口——之前按"取两个元素"数（for _ in range(2)），
+    # TTS 要几秒才到，语音事件几乎总排在结束标记之后被丢（试音有声、回复没声）。
+    r = await post(client, "/api/auth/login",
+                   {"username": "admin", "password": "admin123"})
+    client.headers["Authorization"] = f"Bearer {r.json()['token']}"
+    real_speak_event = _main._speak_event
+
+    async def fake_speak_event(*a, **k):
+        await asyncio.sleep(0.05)   # 保证落在 suggest/memory 之后：复现丢包场景
+        return {"url": "/api/voice/x.mp3", "text": "离线语音", "format": "mp3"}
+
+    _main._speak_event = fake_speak_event
+    try:
+        evs = await post_sse(client, "/api/chat",
+                             {"name": NAME, "message": "再说一次你好"})
+    finally:
+        _main._speak_event = real_speak_event
+    record("voice_event_not_dropped", "voice" in _types(evs), f"types={_types(evs)}")
+
+    # 10. /api/stt：服务端语音识别兜底（Chrome 国内 / Firefox 走这条）
+    real_avail, real_tr = stt.available, stt.transcribe
+    stt.available = lambda: True
+
+    async def fake_transcribe(data, mime, **kw):
+        return "识别出的话"
+
+    stt.transcribe = fake_transcribe
+    try:
+        r = await client.post(f"/api/stt{q}",
+                              files={"file": ("mic.wav", b"RIFFfake", "audio/wav")})
+        record("stt_endpoint", r.status_code == 200 and r.json().get("text") == "识别出的话",
+               f"status={r.status_code}")
+    finally:
+        stt.available, stt.transcribe = real_avail, real_tr
+    r = await client.post(f"/api/stt{q}",
+                          files={"file": ("mic.wav", b"x", "audio/wav")})
+    record("stt_no_key_503", r.status_code == 503, f"status={r.status_code}")
+
+    # 11. executor 祖先作用域：并行分支的产物不掺进别的 LLM 节点的上下文
     sess = await _sess_mod.login(NAME)
     seen: dict[str, str] = {}
 
@@ -535,6 +714,80 @@ async def _run(client: httpx.AsyncClient) -> None:
            == "查交通「威海→西安」",
            tools.describe("transport_lookup", {"from_city": "威海", "to_city": "西安"}))
 
+    # _tool_round 并行分发：两个工具并发跑，总耗时取 max 而非 sum；
+    # running 事件先全亮，单工具失败不连累另一个
+    real_dispatch, real_cj = tools.dispatch, llm.complete_json
+
+    async def fake_dispatch(name, args, ctx):
+        await asyncio.sleep(0.08)
+        if name == "weather":
+            return "晴天 20℃"
+        return "现在 10:30"
+
+    async def pick_two(messages, **kw):
+        return {"calls": [{"tool": "weather", "args": {}},
+                          {"tool": "now", "args": {}}]}
+
+    async def _emit(e: dict) -> None:
+        evs.append(e)
+
+    tools.dispatch, llm.complete_json = fake_dispatch, pick_two
+    try:
+        evs: list[dict] = []
+        t0 = time.monotonic()
+        out = await _main._tool_round(sess, "西安明天天气和现在几点了", _emit)
+        dt = time.monotonic() - t0
+    finally:
+        tools.dispatch, llm.complete_json = real_dispatch, real_cj
+    record("tool_round_parallel",
+           dt < 0.15 and "晴天" in out and "10:30" in out
+           and sum(1 for e in evs if e.get("status") == "done") == 2,
+           f"dt={dt:.2f}s out={out[:40]}")
+
+    async def pick_with_bad(messages, **kw):
+        return {"calls": [{"tool": "weather", "args": {}},
+                          {"tool": "now", "args": {}}]}
+
+    async def one_fails(name, args, ctx):
+        if name == "weather":
+            raise RuntimeError("天气接口挂了")
+        return "现在 10:30"
+
+    tools.dispatch, llm.complete_json = one_fails, pick_with_bad
+    try:
+        evs = []
+        out = await _main._tool_round(sess, "西安明天天气和现在几点了", _emit)
+    finally:
+        tools.dispatch, llm.complete_json = real_dispatch, real_cj
+    record("tool_round_partial_fail",
+           "10:30" in out and "没成功" in out
+           and any(e.get("status") == "error" for e in evs)
+           and any(e.get("status") == "done" for e in evs),
+           f"out={out[:60]}")
+
+    # 卡片判官三态：done 放行、continue 带意见、判官倒下也放行（自检不是门禁）
+    real_cj2 = llm.complete_json
+    card_fake = {"title": "t", "emoji": "x",
+                 "sections": [{"heading": "h", "items": ["i"]}]}
+    try:
+        async def judge_done(m, **k):
+            return {"verdict": "done"}
+        async def judge_cont(m, **k):
+            return {"verdict": "continue", "hint": "没回应主题"}
+        async def judge_dead(m, **k):
+            raise RuntimeError("判官倒了")
+        llm.complete_json = judge_done
+        record("supervise_done_pass",
+               await _main._supervise_card(sess, "帮我准备", card_fake) == "")
+        llm.complete_json = judge_cont
+        record("supervise_continue_hint",
+               "没回应主题" in await _main._supervise_card(sess, "帮我准备", card_fake))
+        llm.complete_json = judge_dead
+        record("supervise_dead_pass",
+               await _main._supervise_card(sess, "帮我准备", card_fake) == "")
+    finally:
+        llm.complete_json = real_cj2
+
 
     # 10. 扩展端点：增长雷达 / 梦想 / 传话筒 / PATCH / 时间轴切片 / 日志分页 / 流式晨报问候
     client.headers["Authorization"] = f"Bearer {token}"  # 前面的用例把 header 换成过家长，切回 admin
@@ -580,6 +833,11 @@ async def _run(client: httpx.AsyncClient) -> None:
            f"total={lg.get('total')} limit={lg.get('limit')}")
     lg2 = await get_json(client, "/api/logs?limit=999999")
     record("logs_limit_clamped", lg2.get("limit") == 200, f"limit={lg2.get('limit')}")
+    # 哈希链校验端点：log_call 此时是假身（不落盘），空文件也应返回合法结构
+    vfy = await get_json(client, "/api/logs/verify")
+    record("logs_verify_endpoint",
+           isinstance(vfy.get("ok"), bool) and isinstance(vfy.get("total"), int),
+           f"verify={vfy}")
 
     # 流式晨报/问候：token* → done（done 带本地数据）；LLM 假身只会吐两个 token
     gev = await get_sse(client, f"/api/greeting{q}&stream=1")

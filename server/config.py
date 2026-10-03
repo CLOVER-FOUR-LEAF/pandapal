@@ -35,6 +35,15 @@ LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-chat")
 # 推理型模型（deepseek-flash/v4-pro 等）可用的推理档位：low|high|max；留空则不传参
 LLM_REASONING_EFFORT = os.getenv("LLM_REASONING_EFFORT", "")
 
+# 异构兜底端点：配上 LLM_API_KEY3 才启用。备用 Key（LLM_API_KEY2）和主 Key
+# 共享同一个服务商——防得住限流、防不住服务商整体抖动；兜底端点允许指向
+# 另一家服务商/另一个模型，主端点连不上时自动切换。URL/模型/协议留空时
+# 分别回落到主端点的值（只换 Key 也是合法兜底）。
+LLM_API_KEY3 = os.getenv("LLM_API_KEY3", "")
+LLM_BASE_URL2 = os.getenv("LLM_BASE_URL2", "").rstrip("/")
+LLM_MODEL2 = os.getenv("LLM_MODEL2", "")
+LLM_PROTOCOL2 = os.getenv("LLM_PROTOCOL2", "").strip().lower()
+
 # 视觉能力开关：auto（默认）表示"先当能看图，被 provider 拒绝后自动降级并如实告诉孩子"；
 # off 表示明确知道当前模型看不了图（如 deepseek-chat），一开始就不带图、直接说清楚，
 # 省掉一次必然失败的请求；on 表示强制按视觉模型处理。
@@ -70,6 +79,9 @@ TTS_DEFAULT_STYLE = os.getenv("TTS_DEFAULT_STYLE", "") or (
     "像刚下课后跟熟悉的小朋友说话。语速稍快一点，语气轻快、亲切、有一点雀跃，"
     "但不撒娇也不做作。咬字清晰，句尾自然收住，不要拖长音。")
 TTS_DEFAULT_TAGS = os.getenv("TTS_DEFAULT_TAGS", "")
+# 语音识别模型（麦克风走服务端兜底时用）：与合成同一端点同一把 Key。
+# 留空回落 stt.DEF_MODEL_ASR（mimo-v2.5-asr）。
+TTS_MODEL_ASR = os.getenv("TTS_MODEL_ASR", "")
 # 输出容器：mp3 体积约为 wav 的 1/10（24kHz 单声道 wav 每秒 48KB），本地场景够用；
 # 真遇到某个浏览器解不了，填 wav 即可（官方 API 的默认值）。
 TTS_FORMAT = os.getenv("TTS_FORMAT", "mp3").lower()
@@ -93,31 +105,6 @@ TTS_PREVIEW_MAX_CHARS = int(os.getenv("TTS_PREVIEW_MAX_CHARS", "40"))
 # 单次语音合成超时（秒）。比 LLM 短得多：TTS 正常 1-8 秒出结果，
 # 超时基本等于网关抽风，早失败好过把 SSE 吊在那儿。
 TTS_TIMEOUT = float(os.getenv("TTS_TIMEOUT", "30"))
-
-# ---------------------------------------------------------------- 语音识别 ASR
-# 孩子的"语音输入"：浏览器只负责录音，转写交服务端（小米 MiMo Speech Recognition）。
-# 原来是纯前端 Web Speech API——Chrome 那条路把音频送到 Google，国内直连不通，
-# 一按就静默失败（详见 server/asr.py 顶部说明）。改走服务端后，识别能力只跟
-# "有没有配 Key"有关，跟浏览器和网络环境都无关。
-#
-# Key 与 TTS 同平台（都是小米 MiMo）：没单独配 ASR_API_KEY 时直接复用 TTS_API_KEY，
-# 也就是"TTS 能出声，语音输入就能用"，少一个要填的框。
-ASR_API_KEY = os.getenv("ASR_API_KEY", "")
-ASR_BASE_URL = os.getenv("ASR_BASE_URL", "").rstrip("/")
-ASR_MODEL = os.getenv("ASR_MODEL", "")
-# auto | zh | en；孩子说的是中文，默认 zh 识别更稳（后台可改）
-ASR_LANGUAGE = os.getenv("ASR_LANGUAGE", "zh").lower()
-ASR_ENABLED = os.getenv("ASR_ENABLED", "1") not in ("0", "false", "False", "")
-# 单段录音上限（秒）。前端到点自动停，服务端只按体积兜底：16k 单声道 wav 每秒
-# 约 32KB，60 秒 ≈ 1.9MB——真正起作用的是"孩子一口气说不了一分钟"。
-ASR_MAX_SECONDS = int(os.getenv("ASR_MAX_SECONDS", "60"))
-# 请求体上限：给 60 秒 16k wav 留足余量，同时不给"传大文件刷上游"留口子
-ASR_MAX_BYTES = int(os.getenv("ASR_MAX_MB", "4")) * 1024 * 1024
-# 单次识别超时。ASR 是秒级返回，30 秒还没回基本等于网关抽风，早失败好过吊住输入框
-ASR_TIMEOUT = float(os.getenv("ASR_TIMEOUT", "30"))
-# 按账号限频：每次识别都要上传音频 + 调上游，和附件上传同一类打点
-ASR_MAX_PER_WINDOW = int(os.getenv("ASR_MAX_PER_WINDOW", "40"))
-ASR_WINDOW_S = 600
 
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8000"))
@@ -151,12 +138,32 @@ def _as_int(v, default: int) -> int:
     return n if n > 0 else default
 
 
+def _one_of(*allowed: str):
+    """枚举值归一化：只认白名单里的（大小写不敏感），其余抛错。
+
+    抛错是故意的——apply_settings 会跳过非法值并保留基线，比悄悄存一个
+    "MP4" 进去、然后 TTS 那边拿着它去请求、最后报一个看不懂的错要好。
+    主要兜 settings.json 被手改的场景（API 写入在 admin 层还有一道校验）。
+    """
+    def norm(v):
+        s = str(v).strip().lower()
+        if s not in allowed:
+            raise ValueError(f"只能是 {'/'.join(allowed)}，收到 {v!r}")
+        return s
+    return norm
+
+
 # 可在后台编辑的键 → （本模块属性名, 归一化函数, 是否密钥）。不在表里的键一律不收。
 SETTINGS_KEYS: dict[str, tuple[str, object, bool]] = {
     "LLM_PROTOCOL": ("LLM_PROTOCOL", lambda v: str(v).strip().lower(), False),
     "LLM_BASE_URL": ("LLM_BASE_URL", lambda v: str(v).strip().rstrip("/"), False),
     "LLM_API_KEY": ("LLM_API_KEY", lambda v: str(v).strip(), True),
     "LLM_API_KEY2": ("LLM_API_KEY2", lambda v: str(v).strip(), True),
+    # 异构兜底：LLM_API_KEY3 配上才启用；URL/模型/协议留空回落主端点的值
+    "LLM_API_KEY3": ("LLM_API_KEY3", lambda v: str(v).strip(), True),
+    "LLM_BASE_URL2": ("LLM_BASE_URL2", lambda v: str(v).strip().rstrip("/"), False),
+    "LLM_MODEL2": ("LLM_MODEL2", lambda v: str(v).strip(), False),
+    "LLM_PROTOCOL2": ("LLM_PROTOCOL2", lambda v: str(v).strip().lower(), False),
     "LLM_MODEL": ("LLM_MODEL", lambda v: str(v).strip(), False),
     "LLM_REASONING_EFFORT": ("LLM_REASONING_EFFORT", lambda v: str(v).strip().lower(), False),
     # 视觉能力：auto/on/off，后台可以直接切（用非视觉模型时提前关掉，省一次注定失败的请求）
@@ -167,20 +174,19 @@ SETTINGS_KEYS: dict[str, tuple[str, object, bool]] = {
     "TTS_BASE_URL": ("TTS_BASE_URL", lambda v: str(v).strip().rstrip("/"), False),
     "TTS_MODEL": ("TTS_MODEL", lambda v: str(v).strip(), False),
     "TTS_MODEL_DESIGN": ("TTS_MODEL_DESIGN", lambda v: str(v).strip(), False),
+    "TTS_MODEL_ASR": ("TTS_MODEL_ASR", lambda v: str(v).strip(), False),
     "TTS_VOICE": ("TTS_VOICE", lambda v: str(v).strip(), False),
     # 开关必须归一成 bool：存成字符串 "0" 时 `if config.TTS_ENABLED` 永远为真，后台关不掉
     "TTS_ENABLED": ("TTS_ENABLED", lambda v: _as_bool(v), False),
-    "TTS_DEFAULT_MODE": ("TTS_DEFAULT_MODE", lambda v: str(v).strip().lower(), False),
+    "TTS_DEFAULT_MODE": ("TTS_DEFAULT_MODE", _one_of("design", "builtin"), False),
     "TTS_DEFAULT_STYLE": ("TTS_DEFAULT_STYLE", lambda v: str(v).strip(), False),
-    "TTS_FORMAT": ("TTS_FORMAT", lambda v: str(v).strip().lower(), False),
+    "TTS_FORMAT": ("TTS_FORMAT", _one_of("mp3", "wav"), False),
     "TTS_MAX_CHARS": ("TTS_MAX_CHARS", lambda v: _as_int(v, 400), False),
     "TTS_CARD_MAX_CHARS": ("TTS_CARD_MAX_CHARS", lambda v: _as_int(v, 120), False),
-    # 语音识别（孩子的语音输入）。ASR_API_KEY 留空 = 复用 TTS_API_KEY，见 asr.api_key()
-    "ASR_API_KEY": ("ASR_API_KEY", lambda v: str(v).strip(), True),
-    "ASR_BASE_URL": ("ASR_BASE_URL", lambda v: str(v).strip().rstrip("/"), False),
-    "ASR_MODEL": ("ASR_MODEL", lambda v: str(v).strip(), False),
-    "ASR_LANGUAGE": ("ASR_LANGUAGE", lambda v: str(v).strip().lower(), False),
-    "ASR_ENABLED": ("ASR_ENABLED", lambda v: _as_bool(v), False),
+    # 三个口播开关：后台最常想拨的就是这几项（缓存上限/试音文案仍留在 .env）
+    "TTS_SPEAK_GREETING": ("TTS_SPEAK_GREETING", lambda v: _as_bool(v), False),
+    "TTS_SPEAK_BRIEFING": ("TTS_SPEAK_BRIEFING", lambda v: _as_bool(v), False),
+    "TTS_SPEAK_CARD": ("TTS_SPEAK_CARD", lambda v: _as_bool(v), False),
 }
 
 

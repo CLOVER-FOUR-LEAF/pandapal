@@ -528,11 +528,14 @@ class AffairStore:
         return data
 
     def drafts(self, affair_id: str | None = None) -> list[dict]:
-        """全部文稿，新的在前；给 affair_id 时只取挂在该事务上的。"""
+        """全部文稿，新的在前；给 affair_id 时只取挂在该事务上的。
+        同秒创建的两份稿：后落盘的那份才是"最新"——升序排后反转，
+        不用 reverse=True（同键稳定排序会把先落盘的顶到最前）。"""
         items = [d for d in self._load_drafts()["drafts"] if isinstance(d, dict)]
         if affair_id:
             items = [d for d in items if str(d.get("affair_id")) == str(affair_id)]
-        return sorted(items, key=lambda d: str(d.get("created") or ""), reverse=True)
+        return list(reversed(
+            sorted(items, key=lambda d: str(d.get("created") or ""))))
 
     def draft(self, did: str) -> dict:
         """取一份文稿；不存在抛 KeyError。"""
@@ -542,8 +545,10 @@ class AffairStore:
         raise KeyError(did)
 
     @_locked
-    def add_draft(self, title: str, body: str, affair_id: str | None = None) -> dict:
-        """存一份文稿：同一事务下同标题视为同一份（重写更新正文，幂等）。"""
+    def add_draft(self, title: str, body: str, affair_id: str | None = None,
+                  file_id: str | None = None) -> dict:
+        """存一份文稿：同一事务下同标题视为同一份（重写更新正文，幂等）。
+        file_id 是这份稿子在 files/ 仓里对应的可下载文件（可为空）。"""
         root = self._load_drafts()
         title = str(title or "未命名文稿").strip()
         body = str(body or "")
@@ -551,6 +556,7 @@ class AffairStore:
             if (isinstance(d, dict) and str(d.get("affair_id") or "") == str(affair_id or "")
                     and str(d.get("title")) == title):
                 d["body"] = body
+                d["file_id"] = file_id or None
                 d["created"] = now_iso()
                 write_json(self.drafts_path, root)
                 return d
@@ -560,6 +566,7 @@ class AffairStore:
             "title": title,
             "body": body,
             "affair_id": str(affair_id) if affair_id else None,
+            "file_id": file_id or None,
             "created": now_iso(),
         }
         root["drafts"].append(draft)

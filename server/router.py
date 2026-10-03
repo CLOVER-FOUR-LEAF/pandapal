@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import re
+import time
 
 from . import llm, prompts
 
@@ -40,6 +42,70 @@ def looks_like_continuation(message: str) -> bool:
     return bool(text) and len(text) <= 12 and bool(_CONTINUE_RE.match(text))
 
 
+# ---- FastTriage：免 LLM 快速路 -------------------------------------------------
+# 分类是每条消息的第一跳（p50 ~2s、p90 6.8s、失败率 19%，还占着会话锁）。
+# 绝大多数孩子的话是纯闲聊——一个办事/转达/更新/讲解/待办信号词都不带；
+# 这种消息不需要 LLM 就知道该走 chat，省掉第一跳。
+# 保守原则：命中任一 hint 就 veto 回 LLM，宁可少快也不错快。
+
+# 所有需要 LLM 定夺的信号集合：任何一条命中都不许走快速路
+_ALL_HINTS = _NEW_HINTS + _UPDATE_HINTS + _RELAY_HINTS + _EXPLAIN_HINTS + _TODO_HINTS
+_FAST_MAX_LEN = 120  # 超长的消息信息量大，交给 LLM 看全文
+
+# 情绪是陪伴产品的第一性信号：快速路也带一只小词典，
+# 不至于把「今天好难过」标成 normal（负面情绪优先于正面）
+_MOOD_SAD = ("难过", "伤心", "委屈", "想哭", "哭了", "好烦", "讨厌", "无聊", "郁闷", "不开心")
+_MOOD_NERVOUS = ("紧张", "害怕", "好怕", "担心", "焦虑", "好慌", "慌")
+_MOOD_HAPPY = ("开心", "太棒了", "高兴", "太好了", "哈哈", "好玩", "喜欢", "耶")
+
+
+def _fast_mood(message: str) -> str:
+    for mood, hints in (("sad", _MOOD_SAD), ("nervous", _MOOD_NERVOUS),
+                        ("happy", _MOOD_HAPPY)):
+        if any(h in message for h in hints):
+            return mood
+    return "normal"
+
+
+def _fast_path(message: str) -> dict | None:
+    """零信号词的短闲聊 → 直接判 chat，不花一次 LLM 分类。"""
+    if len(message) > _FAST_MAX_LEN:
+        return None
+    if any(h in message for h in _ALL_HINTS):
+        return None
+    return {"intent": "chat", "mood": _fast_mood(message),
+            "affair_id": None, "reason": "快速通道"}
+
+
+# ---- 分类结果缓存 --------------------------------------------------------------
+# 同一句再发一遍（评委反复点同一演示输入、孩子重发），意图不该再花一次 LLM RTT。
+# key 带上事务简报：简报变了（事务增删）意图本来就可能变，不算同一条消息。
+# 只驻内存——重启丢缓存只是慢一点，不是错；mood 会随上下文漂移，TTL 给短点。
+_CLASSIFY_TTL = 300.0
+_CLASSIFY_MAX = 200
+_classify_cache: dict[str, tuple[float, dict]] = {}
+
+
+def _cache_get(key: str) -> dict | None:
+    hit = _classify_cache.get(key)
+    if not hit or time.time() - hit[0] >= _CLASSIFY_TTL:
+        return None
+    cached = dict(hit[1])
+    cached["reason"] = ((cached.get("reason") or "") + "（缓存）")[:80]
+    return cached
+
+
+def _cache_put(key: str, result: dict) -> None:
+    _classify_cache[key] = (time.time(), dict(result))
+    if len(_classify_cache) <= _CLASSIFY_MAX:
+        return
+    for k in [k for k, (ts, _) in _classify_cache.items()
+              if time.time() - ts >= _CLASSIFY_TTL]:
+        del _classify_cache[k]
+    while len(_classify_cache) > _CLASSIFY_MAX:  # dict 保序，弹出最老的
+        _classify_cache.pop(next(iter(_classify_cache)))
+
+
 def looks_like_todos(message: str) -> bool:
     """确定性兜底：拆成片段后，含待办词的片段 ≥2 个就视为多任务。LLM 漏判时用它纠偏。"""
     parts = [p for p in _TODO_SPLIT.split(message.lower()) if p.strip()]
@@ -67,6 +133,14 @@ async def classify(message: str, affairs_brief: str = "") -> dict:
     if looks_like_continuation(message):
         # 续写指令不需要分类：直接闲聊直答，省一次 LLM 调用，也不会误建事务
         return {"intent": "chat", "mood": "normal", "affair_id": None, "reason": "续写指令"}
+    fast = _fast_path(message)
+    if fast is not None:
+        return fast
+    key = hashlib.sha256(
+        f"{affairs_brief}\x00{message}".encode("utf-8")).hexdigest()[:24]
+    cached = _cache_get(key)
+    if cached is not None:
+        return cached
     try:
         data = await asyncio.wait_for(llm.complete_json(
             [{"role": "user", "content": prompts.ROUTER.format(
@@ -82,12 +156,15 @@ async def classify(message: str, affairs_brief: str = "") -> dict:
             intent = "todo"  # 一句话好几件待办却被判成闲聊/单事务：纠偏成拆解
         if intent in _VALID_INTENTS:
             aid = data.get("affair_id")
-            return {
+            result = {
                 "intent": intent,
                 "mood": mood if mood in _VALID_MOODS else "normal",
                 "affair_id": str(aid) if aid else None,
                 "reason": str(data.get("reason", ""))[:80],
             }
+            _cache_put(key, result)
+            return result
     except Exception:  # noqa: BLE001 分类失败不能拖垮对话
         pass
+    # 关键词保底不缓存：LLM 只是暂时不可用，别把降级结果钉在缓存里
     return _fallback(message)

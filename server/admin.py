@@ -31,7 +31,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from . import affairs, asr, auth, config, graph, llm, sessions, store, tts
+from . import affairs, auth, config, graph, llm, sessions, store, tts
 
 router = APIRouter()
 
@@ -70,7 +70,8 @@ def _collect_overview() -> dict:
         "children": {"total": len(children), "affairs": affairs_n, "graph_nodes": nodes_n},
         "llm": {
             "configured": bool(config.LLM_API_KEY),
-            "backup": bool(config.LLM_API_KEY2),
+            "backup": bool(config.LLM_API_KEY2 or config.LLM_API_KEY3),
+            "fallback": bool(config.LLM_API_KEY3),
             "protocol": config.LLM_PROTOCOL, "model": config.LLM_MODEL,
         },
         "search": {"configured": bool(config.SEARCH_API_KEY and config.SEARCH_BASE_URL)},
@@ -84,16 +85,6 @@ def _collect_overview() -> dict:
             "model_design": config.TTS_MODEL_DESIGN or tts.DEF_MODEL_DESIGN,
             "voice": config.TTS_VOICE or tts.DEF_VOICE,
             "mode": config.TTS_DEFAULT_MODE,
-        },
-        "asr": {
-            # 语音识别（孩子的语音输入）：留空 = 复用 TTS 的 Key，所以"配置好了"
-            # 要看两个键里任意一个有没有值；shared_key 让后台一眼看出它在蹭 TTS 的 Key。
-            "configured": bool(asr.api_key()),
-            "available": asr.available(),
-            "shared_key": not config.ASR_API_KEY.strip() and bool(config.TTS_API_KEY.strip()),
-            "base_url": config.ASR_BASE_URL or asr.DEF_BASE_URL,
-            "model": config.ASR_MODEL or asr.DEF_MODEL,
-            "language": asr.language(),
         },
         "logs": llm.read_logs(1, 0).get("total", 0),
         "overrides": sorted(overrides.keys()),
@@ -157,43 +148,46 @@ def _settings_payload() -> dict:
 # 后台「API 配置」页的分组（键必须在 config.SETTINGS_KEYS 里）
 _SETTINGS_GROUPS = [
     ("llm", "大模型 LLM", ["LLM_PROTOCOL", "LLM_BASE_URL", "LLM_API_KEY",
-                          "LLM_API_KEY2", "LLM_MODEL", "LLM_REASONING_EFFORT", "LLM_VISION"]),
+                          "LLM_API_KEY2", "LLM_API_KEY3", "LLM_BASE_URL2",
+                          "LLM_MODEL2", "LLM_PROTOCOL2", "LLM_MODEL",
+                          "LLM_REASONING_EFFORT", "LLM_VISION"]),
     ("search", "联网搜索", ["SEARCH_API_KEY", "SEARCH_BASE_URL"]),
     ("tts", "语音合成 TTS（管家朗读）",
-     ["TTS_API_KEY", "TTS_BASE_URL", "TTS_MODEL", "TTS_MODEL_DESIGN", "TTS_VOICE",
+     ["TTS_API_KEY", "TTS_BASE_URL", "TTS_MODEL", "TTS_MODEL_DESIGN", "TTS_MODEL_ASR", "TTS_VOICE",
       "TTS_ENABLED", "TTS_DEFAULT_MODE", "TTS_DEFAULT_STYLE", "TTS_FORMAT",
-      "TTS_MAX_CHARS", "TTS_CARD_MAX_CHARS"]),
-    ("asr", "语音识别 ASR（孩子的语音输入）",
-     ["ASR_API_KEY", "ASR_BASE_URL", "ASR_MODEL", "ASR_LANGUAGE", "ASR_ENABLED"]),
+      "TTS_MAX_CHARS", "TTS_CARD_MAX_CHARS",
+      "TTS_SPEAK_GREETING", "TTS_SPEAK_BRIEFING", "TTS_SPEAK_CARD"]),
 ]
 
 
 # 枚举型配置给下拉框，免得手敲出 "Design" "true" 这类服务端不认的值
 _CHOICES = {
     "LLM_PROTOCOL": [["openai", "OpenAI 兼容"], ["anthropic", "Anthropic"]],
+    "LLM_PROTOCOL2": [["", "同主端点"], ["openai", "OpenAI 兼容"], ["anthropic", "Anthropic"]],
     "LLM_REASONING_EFFORT": [["", "不传（非推理模型）"], ["low", "low"], ["high", "high"], ["max", "max"]],
     "LLM_VISION": [["auto", "auto（先试，失败降级）"], ["on", "on（强制看图）"], ["off", "off（不带图）"]],
     "TTS_ENABLED": [["1", "开启"], ["0", "关闭"]],
+    "TTS_SPEAK_GREETING": [["1", "开启"], ["0", "关闭"]],
+    "TTS_SPEAK_BRIEFING": [["1", "开启"], ["0", "关闭"]],
+    "TTS_SPEAK_CARD": [["1", "开启"], ["0", "关闭"]],
     "TTS_DEFAULT_MODE": [["design", "design（音色设计）"], ["builtin", "builtin（内置音色）"]],
     "TTS_FORMAT": [["mp3", "mp3"], ["wav", "wav"]],
-    "ASR_ENABLED": [["1", "开启"], ["0", "关闭"]],
-    "ASR_LANGUAGE": [["zh", "zh（中文，推荐）"], ["auto", "auto（自动检测）"], ["en", "en（英文）"]],
 }
 _HELP = {
+    "LLM_API_KEY2": "同端点的第二把 Key：主 Key 被限流/吊销时顶上",
+    "LLM_API_KEY3": "填上才启用异构兜底端点：主端点整体挂掉时切换，可配另一家服务商",
     "TTS_API_KEY": "填了 Key 才会出声；孩子端右上角的喇叭随之出现",
     "TTS_VOICE": "builtin 模式的内置音色：冰糖 / 茉莉 / 苏打 / 白桦",
     "TTS_DEFAULT_STYLE": "design 模式下就是喂给音色设计模型的描述",
-    "ASR_API_KEY": "留空 = 复用 TTS_API_KEY（同一个小米 MiMo 平台）；填了就以填的为准",
-    "ASR_LANGUAGE": "孩子说的是中文就选 zh，识别比 auto 更稳",
 }
 # 留空时实际会用的值：作为 placeholder 显示，管理员一眼看出"空着也能跑"
 _DEFAULT_HINT = {
+    "LLM_BASE_URL2": lambda: "留空 = 主端点地址",
+    "LLM_MODEL2": lambda: "留空 = 主端点模型",
     "TTS_BASE_URL": lambda: f"留空 = {tts.DEF_BASE_URL}",
     "TTS_MODEL": lambda: f"留空 = {tts.DEF_MODEL_BUILTIN}",
     "TTS_MODEL_DESIGN": lambda: f"留空 = {tts.DEF_MODEL_DESIGN}",
     "TTS_VOICE": lambda: f"留空 = {tts.DEF_VOICE}",
-    "ASR_BASE_URL": lambda: f"留空 = {asr.DEF_BASE_URL}",
-    "ASR_MODEL": lambda: f"留空 = {asr.DEF_MODEL}",
 }
 
 
@@ -292,48 +286,6 @@ async def api_admin_test_tts(request: Request, req: TTSTestReq):
     fmt = tts._fmt()
     return {"ok": True, "model": model, "format": fmt, "mime": tts.mime_for(f"x.{fmt}"),
             "audio": base64.b64encode(audio).decode(), "bytes": len(audio),
-            "ms": round((time.monotonic() - t0) * 1000)}
-
-
-# 识别自检说的一句固定话：字要够密（虚词多、音近字多），才测得动识别质量
-ASR_TEST_TEXT = "明天我想去上机器人课"
-
-
-class ASRTestReq(BaseModel):
-    text: str = Field(default="", max_length=40)
-
-
-@router.post("/api/admin/test/asr")
-async def api_admin_test_asr(request: Request, req: ASRTestReq):
-    """识别自检：先用 TTS 念一句，再把这段音频交给 ASR 听回来。
-
-    为什么要这个按钮：孩子端识别失败时只说一句"没听清"（对，但不解释），真正的原因
-    （Key 不对 / 账号没余额 / 模型名写错 / 网关被拦）只在日志里。后台就是来排查配置的，
-    所以这里把上游原文原样带回来——比如 402 Insufficient account balance 就该直接看到。
-    """
-    _admin(request)
-    if not asr.available():
-        return {"ok": False, "error": "ASR 不可用：没配 ASR_API_KEY（或 ASR_ENABLED=0）"}
-    if not tts.available():
-        return {"ok": False, "error": "本自检靠 TTS 造测试音频，先把 TTS_API_KEY 配好再试"}
-    import time
-    spoken = tts.to_speech_text(req.text or ASR_TEST_TEXT, 40)
-    if not spoken:
-        return {"ok": False, "error": "测试文本是空的"}
-    model, body = tts.build_body(spoken, {"mode": config.TTS_DEFAULT_MODE})
-    body["model"] = model
-    t0 = time.monotonic()
-    try:
-        audio = await tts.synthesize(body, caller="admin_test_asr")
-    except Exception as e:  # noqa: BLE001 造音频失败也要看到原文
-        return {"ok": False, "error": f"TTS 造测试音频失败：{str(e)[:240]}"}
-    try:
-        heard = await asr.transcribe(audio, caller="admin_test_asr")
-    except Exception as e:  # noqa: BLE001 识别失败：把上游原因直接给管理员
-        return {"ok": False, "error": f"识别失败：{str(e)[:240]}", "model": asr.model(),
-                "seconds": round(len(audio) / 16000, 1),
-                "ms": round((time.monotonic() - t0) * 1000)}
-    return {"ok": True, "spoken": spoken, "text": heard, "model": asr.model(),
             "ms": round((time.monotonic() - t0) * 1000)}
 
 

@@ -1,6 +1,0 @@
-$ python tests/test_asr_web.py
-PASS  web_probe_reported  ok=ok
-PASS  web_mic_records_and_fills_input  输入框='我明天想去遛熊猫'
-PASS  web_upload_is_16k_wav  容器=wav 字节=40364
-
-3/3 通过

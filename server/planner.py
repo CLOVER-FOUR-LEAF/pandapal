@@ -22,6 +22,12 @@ class PlanError(RuntimeError):
 
 
 def _validate(plan: dict) -> dict:
+    # 澄清优先于节点校验：模型判断"需求缺关键信息、硬做只会做错"时给的是
+    # 一句问孩子的话而不是 DAG——原样透传给调用方，不逼着它编一份计划
+    clarify = str(plan.get("clarify") or "").strip()
+    if clarify:
+        return {"clarify": clarify[:200],
+                "title": str(plan.get("title") or "先问清楚")}
     nodes = plan.get("nodes")
     if not isinstance(nodes, list) or not nodes:
         raise PlanError("plan.nodes 为空")

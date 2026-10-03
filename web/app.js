@@ -76,7 +76,7 @@ const ACTION_KIND = {
 };
 const MODE_LABEL = { plan: "规划链", todo: "拆解待办", affair: "事务更新", relay: "传话筒", explain: "讲给你听", chat: "" };
 // planner / synth 各要几十秒，没有阶段提示就像卡死——这里给一句人话顶着
-const PHASE_LABEL = { planning: "正在拆解要办的事…", executing: "正在一件件办…", synthesizing: "快好了，正在整理成方案…" };
+const PHASE_LABEL = { planning: "正在拆解要办的事…", executing: "正在一件件办…", synthesizing: "快好了，正在整理成方案…", checking: "管家在自查一遍…" };
 
 const KIND_ICON = { travel: "i-planet", goal: "i-growth", health: "i-heart", interest: "i-spark", study: "i-book", habit: "i-clock", event: "i-cal" };
 
@@ -116,14 +116,7 @@ const state = {
 };
 
 let pandaSvg = null;
-let micRec = null;      // MediaRecorder（正在录音时非空）
-let micStream = null;   // 麦克风流：用完必须停轨道，否则浏览器标签页一直亮着录音标
-let micTimer = null;    // 最长录音时长的自动停止定时器
-let micPending = false; // 已 stop()、正等 onstop 把最后一块数据交出来
-let micAbort = false;   // 退出登录/切账号时置位：丢掉这一段，不上传
-let micBusy = false;    // 正在识别上一句
-let micMax = 60;        // 单段录音上限（秒），由 GET /api/asr 下发
-let micAvail = true;    // 服务端有没有配好识别 Key（没配就如实说明，不假装能用）
+let micRec = null;      // 当前活跃的识别器 / 录音器：发送、退出登录时按得住（见 resetComposer）
 
 /* ==========================================================================
  * 1. DOM / 字符串 / 图标 / 日期工具
@@ -296,25 +289,96 @@ const jsonOpts = (body) => ({
 });
 const q = (name) => `name=${encodeURIComponent(name || "")}`;
 
+/** fetch 流式读取能力探测：Response.body.getReader 在老 Safari（<14.1）、
+ *  微信/钉钉等内嵌 WebView 里不存在——那里曾经整段 await resp.text()，
+ *  一条 SSE 流攒到全部结束才解析，表现就是"发完消息卡住、刷新才有字"。 */
+const FETCH_STREAM_OK = (() => {
+  try {
+    const b = typeof Response === "function" ? new Response("x").body : null;
+    return !!(b && typeof b.getReader === "function");
+  } catch { return false; }
+})();
+
+/**
+ * 打开一条 SSE 文本流，返回 async-iterable<string>（解码后的文本块）。
+ * 优先 fetch + ReadableStream；不支持时退化到 XHR：其 responseText 随数据
+ * 到达而增长，onprogress 里按已读偏移切增量——任何浏览器都是真流式。
+ * 错误语义与 api() 对齐：非 2xx 抛带 .status 的 Error；signal 中止抛 AbortError。
+ */
+async function* streamText(path, opts = {}) {
+  if (FETCH_STREAM_OK) {
+    const resp = await api(path, opts);
+    if (!resp.body || !resp.body.getReader) { yield await resp.text(); return; }
+    const reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) return;
+        yield dec.decode(value, { stream: true });
+      }
+    } finally {
+      // 上游 return（换会话丢弃旧流）时把底层连接也停掉，别让它挂着读到完
+      try { await reader.cancel(); } catch { /* 已结束 */ }
+    }
+  }
+  // —— XHR 增量读降级 ——
+  const xhr = new XMLHttpRequest();
+  const chunks = [];
+  let seen = 0, status = 0, ended = false, err = null, wake = null;
+  const poke = () => { const w = wake; wake = null; if (w) w(); };
+  const push = () => {
+    const s = xhr.responseText.slice(seen);
+    seen = xhr.responseText.length;
+    if (s) chunks.push(s);
+    poke();
+  };
+  xhr.open(opts.method || "GET", BASE + path);
+  Object.keys(opts.headers || {}).forEach((k) => xhr.setRequestHeader(k, opts.headers[k]));
+  if (state.token) xhr.setRequestHeader("Authorization", `Bearer ${state.token}`);
+  xhr.onprogress = () => { if (!status || (status >= 200 && status < 300)) push(); };
+  xhr.onload = () => {
+    if (status && (status < 200 || status >= 300)) {
+      let msg = "";
+      try { const d = JSON.parse(xhr.responseText); msg = d && (d.detail || d.message || d.error); } catch { /* 非 JSON */ }
+      if (!msg) {
+        if (status === 401) msg = "用户名或密码不对";
+        else if (status === 403) msg = "当前账号没有这个权限";
+        else if (status === 429) msg = "管家还在回上一条，稍等一下哦";
+        else if (status >= 500) msg = "管家后端打了个喷嚏，稍后再试";
+        else msg = "这一步没成功，换个说法再试试";
+      }
+      err = new Error(msg); err.status = status;
+    } else push();
+    ended = true; poke();
+  };
+  xhr.onreadystatechange = () => { if (xhr.readyState >= 2 && !status) status = xhr.status; };
+  xhr.onerror = () => { err = new Error("网络好像断了，检查连接再试试～"); ended = true; poke(); };
+  xhr.onabort = () => { const e = new Error("已中止"); e.name = "AbortError"; err = e; ended = true; poke(); };
+  const signal = opts.signal;
+  if (signal) {
+    if (signal.aborted) xhr.abort();
+    else signal.addEventListener("abort", () => xhr.abort(), { once: true });
+  }
+  xhr.send(opts.body || null);
+  for (;;) {
+    if (chunks.length) { yield chunks.shift(); continue; }
+    if (err) throw err;
+    if (ended) return;
+    await new Promise((r) => { wake = r; });
+  }
+}
+
 /**
  * 读 GET 的 SSE 文本流（晨报/问候的 `?stream=1`）：每来一段 token 回调 onToken，
  * 返回 done 事件的载荷（含看板/提醒等本地数据）。服务端不支持流时退化为整段 JSON。
+ * 底层走 streamText：没有 fetch 流式的浏览器里靠 XHR 增量读，照样逐字出。
  */
-async function readTextStream(resp, onToken, onEvent) {
-  if (!resp.body || !resp.body.getReader) {
-    const data = await resp.json().catch(() => ({}));
-    if (data.text) onToken(data.text);
-    if (data.voice) onEvent?.({ type: "voice", ...data.voice });
-    return data;
-  }
-  const reader = resp.body.getReader();
-  const decoder = new TextDecoder();
-  let buf = "";
-  let done = {};
-  for (;;) {
-    const { done: end, value } = await reader.read();
-    if (end) break;
-    buf += decoder.decode(value, { stream: true });
+async function readTextStream(path, onToken, onEvent, opts = {}) {
+  let buf = "", all = "", done = {};
+  for await (const text of streamText(path, opts)) {
+    all += text;
+    buf += text;
     let idx;
     while ((idx = buf.indexOf("\n\n")) >= 0) {
       const raw = buf.slice(0, idx).replace(/\r/g, "");
@@ -329,6 +393,18 @@ async function readTextStream(resp, onToken, onEvent) {
       else if (ev.type === "done") done = ev;
       else if (ev.type === "error") throw new Error(ev.message || "生成失败");
     }
+  }
+  // 服务端没流式时回的是整段 JSON：整个体连一个 "data:" 帧都不是
+  const t = all.trim();
+  if (t && !t.startsWith("data:")) {
+    try {
+      const data = JSON.parse(t);
+      if (data && typeof data === "object") {
+        if (data.text) onToken(data.text);
+        if (data.voice) onEvent?.({ type: "voice", ...data.voice });
+        return data;
+      }
+    } catch { /* 非 JSON 体 */ }
   }
   return done;
 }
@@ -1159,8 +1235,7 @@ async function loadBriefing() {
 
   try {
     // 流式：正文逐字出，done 事件再补看板/截止/建议（首屏不必等整段 LLM）
-    const resp = await api(`/api/briefing?${q(state.name)}&stream=1`);
-    const done = await readTextStream(resp, (tok) => {
+    const done = await readTextStream(`/api/briefing?${q(state.name)}&stream=1`, (tok) => {
       swapIn();
       full += tok;
       textEl.textContent = full;
@@ -1600,6 +1675,13 @@ function draftsBlock(aff) {
       }
     };
     det.appendChild(copyBtn);
+    if (d.file_id) {
+      const dlBtn = el("button", "btn-approve doc-copy");
+      dlBtn.type = "button";
+      append(dlBtn, icon("i-doc"), document.createTextNode("下载文件"));
+      dlBtn.onclick = () => downloadAttach({ id: d.file_id, name: `${d.title || "文稿"}.docx` });
+      det.appendChild(dlBtn);
+    }
     wrap.appendChild(det);
   });
   return wrap;
@@ -1695,8 +1777,7 @@ async function loadGreeting() {
   let data = {};
   try {
     // 流式：token 一到就上屏，比整段等完再 typewrite 更早出字
-    const resp = await api(`/api/greeting?${q(state.name)}&stream=1`);
-    data = await readTextStream(resp, (tok) => {
+    data = await readTextStream(`/api/greeting?${q(state.name)}&stream=1`, (tok) => {
       full += tok;
       if (span) span.textContent = full;
     }, onStreamEvent);
@@ -1920,6 +2001,8 @@ function recentFilesPanel() {
     row.appendChild(icon(attachIcon(f)));
     row.appendChild(el("span", "attach-name", f.name || "文件"));
     const bits = [attachKindCn(f.kind)];
+    // 管家产出的交付物（写好的文稿等）和我上传的东西不是一回事，徽章分开
+    if (f.origin === "generated") bits.push("管家产出");
     if (f.size_cn) bits.push(f.size_cn);
     if (f.has_text && f.chars) bits.push(`${f.chars} 字`);
     row.appendChild(el("span", "attach-meta", bits.join(" · ")));
@@ -2452,7 +2535,7 @@ function addActionRow(ev) {
   scrollBottom();
 }
 
-/** 代办文书卡：draft 动作的产出物，正文整段可读完、可复制。 */
+/** 代办文书卡：draft 动作的产出物，正文整段可读完、可复制、可下载成文件。 */
 function addDocCard(d) {
   const box = chatBox();
   if (!box || !d) return;
@@ -2478,6 +2561,14 @@ function addDocCard(d) {
     }
   };
   foot.appendChild(copyBtn);
+  // 服务端已把文稿落成 files/ 里的真文件（.docx，降级为 .md）：交作业/打印拿走即用
+  if (d.file_id) {
+    const dlBtn = el("button", "btn-approve doc-copy");
+    dlBtn.type = "button";
+    append(dlBtn, icon("i-doc"), document.createTextNode(`下载 ${d.file_ext || "文件"}`));
+    dlBtn.onclick = () => downloadAttach({ id: d.file_id, name: d.file_name || `${d.title || "文稿"}.${d.file_ext || "docx"}` });
+    foot.appendChild(dlBtn);
+  }
   if (d.created) {
     foot.appendChild(el("span", "doc-time", String(d.created).slice(0, 16).replace("T", " ")));
   }
@@ -2700,7 +2791,7 @@ async function sendInner(preset, opts = {}) {
   const ctx = { seq, typing: null, aiBubble: resume ? resume.bubble : null,
                 aiRaw: resume ? resume.raw : "", resumeBase: resume ? resume.raw : "",
                 question: resume ? resume.question : payload, tree: null, affairTouched: false,
-                userRow: null };
+                userRow: null, phaseText: "正在想…", lastEvAt: Date.now(), tick: null };
   if (!resume) {
     ctx.userRow = addMsg("me", text, secret, secret ? null : attach);
   }
@@ -2717,6 +2808,14 @@ async function sendInner(preset, opts = {}) {
 
   ctx.typing = addTyping();
   state.chatCtx = ctx; // 暂停时要按当前轮次的状态决定「继续」入口与看板刷新
+  // 等待计时：规划/执行/汇总之间会有十几秒无事件的真空，字幕报"已等 Ns"
+  // 是最便宜的活证——没它整段时间界面像卡死（服务端 beat 事件是另一道保险，
+  // 顺便顶住网关对静默流的空闲断开）。
+  ctx.tick = setInterval(() => {
+    if (!state.busy || ctx.seq !== state.sendSeq || !ctx.phaseText) return;
+    const quiet = Math.floor((Date.now() - (ctx.lastEvAt || Date.now())) / 1000);
+    if (quiet >= 8) chatStatus(`${ctx.phaseText} · ${quiet}s`, true);
+  }, 1000);
   const dropTyping = () => {
     if (ctx.typing) { ctx.typing.remove(); ctx.typing = null; }
   };
@@ -2727,8 +2826,7 @@ async function sendInner(preset, opts = {}) {
   // 续写：把被打断那一轮的原问题与半截回答带回去（服务端据此接着往下说）
   if (resume) body.resume = { question: resume.question, partial: resume.raw };
   try {
-    const resp = await api("/api/chat", { ...jsonOpts(body), signal: abort.signal });
-    await readSSE(resp, ctx, dropTyping);
+    await readSSE("/api/chat", { ...jsonOpts(body), signal: abort.signal }, ctx, dropTyping);
   } catch (e) {
     dropTyping();
     if (state.chatPaused || e.name === "AbortError") {
@@ -2761,6 +2859,7 @@ async function sendInner(preset, opts = {}) {
   } finally {
     if (state.chatAbort === abort) state.chatAbort = null;
     if (state.chatCtx === ctx) state.chatCtx = null;
+    if (ctx.tick) { clearInterval(ctx.tick); ctx.tick = null; }
     dropTyping();
     flushMd(ctx);
     if (ctx.aiBubble) ctx.aiBubble.classList.remove("streaming");
@@ -2782,34 +2881,15 @@ async function sendInner(preset, opts = {}) {
   }
 }
 
-async function readSSE(resp, ctx, dropTyping) {
-  if (!resp.body || !resp.body.getReader) {
-    const raw = await resp.text();
-    raw.split(/\r?\n/).forEach((line) => {
-      if (!line.startsWith("data:")) return;
-      try { handleEvent(JSON.parse(line.slice(5)), ctx, dropTyping); } catch { /* 坏行 */ }
-    });
-    return;
-  }
-  const reader = resp.body.getReader();
-  const decoder = new TextDecoder();
+async function readSSE(path, opts, ctx, dropTyping) {
   let buf = "";
-  for (;;) {
-    let chunk;
-    try {
-      chunk = await reader.read();
-    } catch (e) {
-      // 用户暂停会 abort 掉底层连接，reader.read() 抛 AbortError：静默收尾
-      if (state.chatPaused || (e && e.name === "AbortError")) break;
-      throw e;
-    }
-    const { done, value } = chunk;
-    if (done) break;
+  for await (const text of streamText(path, opts)) {
     if (ctx.seq !== state.sendSeq) {
-      try { await reader.cancel(); } catch { /* 忽略 */ }
-      break; // 已退出登录/换了新会话：中止读取，避免写进旧消息
+      // 已退出登录/换了新会话：中止读取，避免写进旧消息
+      // （for-await 的 return 会触发 streamText 里的连接清理）
+      return;
     }
-    buf += decoder.decode(value, { stream: true });
+    buf += text;
     let idx;
     while ((idx = buf.indexOf("\n\n")) >= 0) {
       const raw = buf.slice(0, idx).replace(/\r/g, "");
@@ -3078,7 +3158,13 @@ function toggleVoice() {
 function handleEvent(ev, ctx, dropTyping) {
   if (!ev || !ev.type) return;
   if (ctx && ctx.seq !== undefined && ctx.seq !== state.sendSeq) return; // 过期会话的事件丢弃
+  if (ctx && ev.type !== "beat") ctx.lastEvAt = Date.now(); // beat 只证明连接活着，不算"有进展"
   switch (ev.type) {
+    // 服务端保活节拍：规划/汇总之间十几秒无事件时证明流没死（见 _chat_stream）
+    case "beat":
+      if (ctx) ctx.lastBeatAt = Date.now();
+      break;
+
     case "files": {
       // 附件的权威元数据（含抽取结果）：把文件卡挂到本轮用户消息上
       const box = $("#chat");
@@ -3093,7 +3179,8 @@ function handleEvent(ev, ctx, dropTyping) {
     case "mode":
       dropTyping();
       modeBadge(MODE_LABEL[ev.mode] ?? ev.mode);
-      chatStatus(MODE_LABEL[ev.mode] ? `${MODE_LABEL[ev.mode]} · 进行中` : "回复中…", true);
+      ctx.phaseText = MODE_LABEL[ev.mode] ? `${MODE_LABEL[ev.mode]} · 进行中` : "回复中…";
+      chatStatus(ctx.phaseText, true);
       if (ev.mood) setMoodAll(ev.mood === "normal" ? (ev.mode === "plan" ? "working" : "speaking") : ev.mood);
       else if (ev.mode === "plan") setMoodAll("working");
       break;
@@ -3104,7 +3191,7 @@ function handleEvent(ev, ctx, dropTyping) {
 
     case "phase": {
       const txt = PHASE_LABEL[ev.phase];
-      if (txt) chatStatus(txt, true);
+      if (txt) { ctx.phaseText = txt; chatStatus(txt, true); }
       break;
     }
 
@@ -3125,7 +3212,8 @@ function handleEvent(ev, ctx, dropTyping) {
       dropTyping();
       s3("clearPlanSatellites");
       ctx.tree = addPlanTree(ev.title, ev.nodes || []);
-      chatStatus(PHASE_LABEL.executing, true);
+      ctx.phaseText = PHASE_LABEL.executing;
+      chatStatus(ctx.phaseText, true);
       s3("spawnPlanSatellites", (ev.nodes || []).map((n) => ({
         id: n.id, title: n.title, depends_on: n.depends_on || [],
       })));
@@ -3137,7 +3225,10 @@ function handleEvent(ev, ctx, dropTyping) {
       }
       updatePlanNode(ctx.tree, ev);
       s3("setPlanNode", ev.id, ev.status);
-      if (ev.status === "running" && ev.title) chatStatus(`正在办：${ev.title}`, true);
+      if (ev.status === "running" && ev.title) {
+        ctx.phaseText = `正在办：${ev.title}`;
+        chatStatus(ctx.phaseText, true);
+      }
       break;
 
     case "action":
@@ -3201,6 +3292,7 @@ function handleEvent(ev, ctx, dropTyping) {
     case "done":
       dropTyping();
       flushMd(ctx);
+      ctx.phaseText = null;
       if (ctx.aiBubble) ctx.aiBubble.classList.remove("streaming");
       unlockInput();
       s3("setPandaMood", "idle");
@@ -3226,6 +3318,7 @@ function handleEvent(ev, ctx, dropTyping) {
     case "error":
       dropTyping();
       flushMd(ctx);
+      ctx.phaseText = null;
       if (ctx.aiBubble) ctx.aiBubble.classList.remove("streaming");
       addMsg("ai", `唔……${ev.message || "出了点小问题，再试一次吧"}`);
       setMoodAll("worried");
@@ -4084,13 +4177,16 @@ async function loadLogs() {
     calls.forEach((c) => {
       const row = el("div", "log-row");
       const ok = c.ok;
+      // usage 是 provider 回报的真实计数（有就优先展示）；tokens 是本地估算，兜底用
+      const usageTxt = c.usage ? `${c.usage.in}/${c.usage.out} tok`
+        : c.tokens !== undefined ? `~${escapeHtml(c.tokens)} tok` : "";
       row.innerHTML =
         `<span class="ts">${escapeHtml(String(c.ts || "").slice(5))}</span>
          <span class="caller">${escapeHtml(c.caller || "")}</span>
-         <span>${escapeHtml(c.model || "")}${c.protocol ? `<span class="ts"> ·${escapeHtml(c.protocol)}</span>` : ""}</span>
+         <span title="${escapeHtml(c.endpoint || "")}">${escapeHtml(c.model || "")}${c.protocol ? `<span class="ts"> ·${escapeHtml(c.protocol)}</span>` : ""}</span>
          <span>${c.ms !== undefined ? `${escapeHtml(c.ms)}ms` : "—"}</span>
          <span>${ok
-           ? `<span class="ok">成功</span>${c.tokens !== undefined ? ` <span class="ts">${escapeHtml(c.tokens)} tok</span>` : ""}`
+           ? `<span class="ok">成功</span>${usageTxt ? ` <span class="ts">${usageTxt}</span>` : ""}${c.truncated ? ` <span class="bad">截断</span>` : ""}`
            : `<span class="bad">失败</span> <span class="err">${escapeHtml(c.err || "")}</span>`}</span>`;
       box.appendChild(row);
     });
@@ -4135,6 +4231,19 @@ async function loadMemory() {
         item.innerHTML = `<div class="daily-date">${escapeHtml(d.date || "")}</div>
           <div class="daily-content">${escapeHtml(d.content || "")}</div>`;
         dailyBox.appendChild(item);
+      });
+    }
+    const dreamsBox = $("#memory-dreams");
+    if (dreamsBox) {
+      dreamsBox.innerHTML = "";
+      const dreams = data.dreams || [];
+      if (!dreams.length) dreamsBox.appendChild(
+        el("p", "empty-hint", "管家还没做过梦——聊得多了，它会自己把反复出现的事整理成长期记忆。"));
+      dreams.forEach((d) => {
+        const item = el("div", "daily-item");
+        item.innerHTML = `<div class="daily-date">${escapeHtml(d.date || "")}</div>
+          <div class="daily-content">${escapeHtml(d.content || "")}</div>`;
+        dreamsBox.appendChild(item);
       });
     }
   } catch (e) {
@@ -4184,292 +4293,229 @@ async function renderChips(chips) {
   box.scrollLeft = 0;
 }
 
-/* ---- 语音输入：浏览器只负责录音，识别在服务端（小米 MiMo ASR） ----
- *
- * 为什么不再是 window.webkitSpeechRecognition：那条路在 Chrome/Edge 上是把音频
- * 送到 Google 的语音服务，国内直连不通，一按就 network / service-not-allowed；
- * Firefox / Safari 干脆没这个接口，旧代码会把按钮整个删掉——评委看到的就是
- * "点了没反应"或者"根本没这个功能"。改成 MediaRecorder 录音 + POST /api/asr 之后，
- * 能不能用只取决于"服务端配没配 Key"，跟浏览器和网络环境都无关。
- */
-
-/** 录音上行链路是否具备（安全上下文 + getUserMedia + MediaRecorder），不具备时给出人话原因。 */
-function micCapability() {
-  const Rec = window.MediaRecorder || window.webkitMediaRecorder;
-  if (!window.isSecureContext) {
-    return { ok: false, why: "麦克风只在 https 或 localhost 下才能用：请用 https 打开这个页面" };
-  }
-  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-    return { ok: false, why: "这个浏览器不给网页用麦克风，换 Chrome / Edge 试试" };
-  }
-  if (!Rec) return { ok: false, why: "这个浏览器不支持网页录音，换 Chrome / Edge 试试" };
-  return { ok: true, why: "" };
-}
-
-/** 录制容器：优先 opus/webm，其次 mp4/aac（Safari）。拿到什么容器都行——
- *  上传前统一解成 16k 单声道 wav，上游只认 wav/mp3。 */
-function pickMicMime() {
-  const Rec = window.MediaRecorder || window.webkitMediaRecorder;
-  if (!Rec || !Rec.isTypeSupported) return "";
-  const cands = ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus",
-                 "audio/mp4", "audio/mpeg"];
-  return cands.find((m) => Rec.isTypeSupported(m)) || "";
-}
-
-/** 解出 PCM。decodeAudioData 要一个 AudioContext，复用播放语音的那个。 */
-async function decodeAudioBlob(blob) {
-  const AC = window.AudioContext || window.webkitAudioContext;
-  const ctx = getAudioCtx() || (AC ? new AC() : null);
-  if (!ctx || !ctx.decodeAudioData) throw new Error("这个浏览器解不了录音");
-  return ctx.decodeAudioData(await blob.arrayBuffer());
-}
-
-/** 重采样到 16k 单声道。优先 OfflineAudioContext：它自带带限重采样（48k→16k
- *  直接抽取会混叠，糊掉辅音，识别率掉得比想象中多），顺手把多声道混成单声道。
- *  老浏览器没有这个接口时退回"取平均 + 线性插值"：精度差一点，但不会因此用不了。 */
-async function resampleToMono(buf, rate) {
-  const OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
-  if (OAC) {
-    try {
-      const off = new OAC(1, Math.max(1, Math.ceil(buf.duration * rate)), rate);
-      const src = off.createBufferSource();
-      src.buffer = buf;
-      src.connect(off.destination);
-      src.start();
-      return (await off.startRendering()).getChannelData(0);
-    } catch (e) {
-      console.warn("[mic] OfflineAudioContext 重采样失败，退回线性插值：", e && e.message);
-    }
-  }
-  let mono = buf.getChannelData(0);
-  if (buf.numberOfChannels > 1) {
-    mono = new Float32Array(buf.length);
-    for (let c = 0; c < buf.numberOfChannels; c++) {
-      const d = buf.getChannelData(c);
-      for (let i = 0; i < d.length; i++) mono[i] += d[i] / buf.numberOfChannels;
-    }
-  }
-  const ratio = buf.sampleRate / rate;
-  const n = Math.max(1, Math.floor(mono.length / ratio));
-  const out = new Float32Array(n);
-  for (let i = 0; i < n; i++) out[i] = mono[Math.floor(i * ratio)] || 0;
-  return out;
-}
-
-/** Float32 单声道 → 16bit PCM 的 WAV 字节。 */
-function encodeWav(pcm, rate) {
-  const view = new DataView(new ArrayBuffer(44 + pcm.length * 2));
-  const w = (o, s) => { for (let i = 0; i < s.length; i++) view.setUint8(o + i, s.charCodeAt(i)); };
-  w(0, "RIFF"); view.setUint32(4, 36 + pcm.length * 2, true); w(8, "WAVEfmt ");
-  view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
-  view.setUint32(24, rate, true); view.setUint32(28, rate * 2, true);
-  view.setUint16(32, 2, true); view.setUint16(34, 16, true);
-  w(36, "data"); view.setUint32(40, pcm.length * 2, true);
-  for (let i = 0; i < pcm.length; i++) {
-    const s = Math.max(-1, Math.min(1, pcm[i] || 0));
-    view.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
-  }
-  return new Blob([view.buffer], { type: "audio/wav" });
-}
-
-/** Blob（webm/mp4/ogg 都行）→ 16kHz 单声道 16bit WAV。
- *  自己转的原因：上游只收 wav/mp3，而 MediaRecorder 不产出这两种；让服务端依赖
- *  ffmpeg 不是我们想背的运维负担，而在浏览器里解码 + 重采样几毫秒就做完了，
- *  顺手把上行体积压到 32KB/s（60 秒约 1.9MB）。 */
-async function blobToWav(blob) {
-  const rate = 16000;
-  const buf = await decodeAudioBlob(blob);
-  return encodeWav(await resampleToMono(buf, rate), rate);
-}
-
+// SpeechRecognition 错误码 → 一句能看懂的话。原来 onerror 只静默 stop：
+// Chrome 的识别走 Google 服务器（国内网络下必报 network）、权限在系统层
+// 被拒时报 not-allowed——两者都是"点了没反应"，不说清楚只会以为按钮坏了。
 const MIC_ERR_TEXT = {
-  NotAllowedError: "麦克风权限没给：点地址栏左边的锁，允许麦克风再试一次",
-  PermissionDeniedError: "麦克风权限没给：点地址栏左边的锁，允许麦克风再试一次",
-  NotFoundError: "没找到麦克风，插一个或者换台设备试试",
-  DevicesNotFoundError: "没找到麦克风，插一个或者换台设备试试",
-  NotReadableError: "麦克风被别的程序占着（会议 / 录音软件），关掉再试",
-  TrackStartError: "麦克风被别的程序占着（会议 / 录音软件），关掉再试",
-  SecurityError: "浏览器拦了麦克风：请用 https 或 localhost 打开这个页面",
-  AbortError: "录音被打断了，再试一次",
+  "not-allowed": "麦克风没授权——在浏览器（或系统设置）里允许录音再试",
+  "service-not-allowed": "语音识别被系统禁用了（macOS 检查「Siri 与听写」）",
+  "network": "浏览器内置识别连不上（Chrome 走 Google 语音服务，国内不可用）",
+  "no-speech": "没听到声音，凑近点再说一次？",
+  "audio-capture": "找不到能用的麦克风",
+  "language-not-supported": "这个浏览器不支持中文语音识别",
 };
+// 报这些错说明这台浏览器的识别服务链路是死的（不是孩子没说好），本页内直接
+// 换服务端识别，不再白试
+const MIC_SR_DEAD = new Set(["network", "service-not-allowed", "language-not-supported"]);
+const MIC_MAX_MS = 60000;   // 单次录音硬顶：防一直挂着录
 
-function micErrorText(e) {
-  const name = (e && e.name) || "";
-  if (MIC_ERR_TEXT[name]) return MIC_ERR_TEXT[name];
-  const msg = (e && e.message) || "";
-  if (name === "NotSupportedError" || /decode|解不了/.test(msg)) {
-    return "这个浏览器解不了录音，换 Chrome / Edge 试试";
-  }
-  return msg || "语音识别没成功，再试一次";
-}
-
-/** 松开麦克风：停轨道 + 停定时器。用完必调，否则标签页上的录音标一直亮。 */
-function micRelease() {
-  if (micTimer) { clearTimeout(micTimer); micTimer = null; }
-  if (micStream) {
-    try { micStream.getTracks().forEach((t) => t.stop()); } catch { /* 忽略 */ }
-    micStream = null;
-  }
-}
-
-function micPaint(recording) {
-  const btn = $("#mic-btn");
-  if (!btn) return;
-  btn.classList.toggle("recording", !!recording);
-  btn.setAttribute("aria-pressed", recording ? "true" : "false");
-}
-
-/** 结束这一段录音（到点自动停和手动停都走这里）。abort=true 表示这段不要了。 */
-function micStop(abort) {
-  if (abort) micAbort = true;
-  const rec = micRec;
-  if (rec && rec.state === "recording") {
-    try {
-      micPending = true;
-      rec.stop();   // 数据在 onstop 里交出来，真正的上传在那边发起
-    } catch {
-      // stop() 失败（浏览器已经替你停了）：别把"待收尾"永远挂住，
-      // 否则 micStart 会一直以为上一段还没结束，语音键就此点不动了
-      micPending = false;
+// Float32 PCM 帧 → 16bit 单声道 WAV：MiMo ASR 只收 mp3/wav，
+// 用 Web Audio 拿到的原始 PCM 在浏览器里直接封 wav，服务端不用装 ffmpeg。
+function pcmToWav(chunks, rate) {
+  let n = 0;
+  for (const c of chunks) n += c.length;
+  const buf = new ArrayBuffer(44 + n * 2);
+  const v = new DataView(buf);
+  const w = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  w(0, "RIFF"); v.setUint32(4, 36 + n * 2, true); w(8, "WAVE");
+  w(12, "fmt "); v.setUint32(16, 16, true); v.setUint16(20, 1, true);
+  v.setUint16(22, 1, true); v.setUint32(24, rate, true);
+  v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  w(36, "data"); v.setUint32(40, n * 2, true);
+  let off = 44;
+  for (const c of chunks) {
+    for (let i = 0; i < c.length; i++, off += 2) {
+      const s = Math.max(-1, Math.min(1, c[i]));
+      v.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
     }
   }
-  micRelease();
-  micPaint(false);
+  return buf;
 }
 
-/** 退出登录 / 切账号：丢掉正在录的这段，不上传、不再回调。 */
-function micCancel() {
-  micAbort = true;
-  micStop(true);
-}
-
-/** 识别结果写进输入框：**接着**已有内容写，不再清掉孩子已经打的字（旧实现会整段覆盖）。 */
-function micFill(text) {
-  const input = $("#msg-input");
-  if (!input) return;
-  const cur = input.value.trim();
-  input.value = cur ? `${cur}${/[，。！？,.!?]$/.test(cur) ? "" : " "}${text}` : text;
-  input.focus();
-  toast("听清了，确认一下再发送", 2200);
-}
-
-async function micUpload(chunks, mime) {
-  if (!chunks || !chunks.length) { toast("没录到声音，凑近一点再说一遍"); return; }
-  let raw;
-  try {
-    raw = new Blob(chunks, mime ? { type: mime } : {});
-  } catch { raw = new Blob(chunks); }
-  if (raw.size < 1200) { toast("这段太短啦，说完再点一下语音键"); return; }
-  micBusy = true;
-  const btn = $("#mic-btn");
-  if (btn) btn.classList.add("mic-wait");
-  try {
-    // 少数浏览器（Safari）本来就录出 mp3：直接上行，省一次解码
-    const wav = /audio\/mpeg/.test(raw.type) ? raw : await blobToWav(raw);
-    const fd = new FormData();
-    fd.append("file", wav, /audio\/mpeg/.test(wav.type) ? "voice.mp3" : "voice.wav");
-    const r = await api(`/api/asr?${q(state.name || "")}`, { method: "POST", body: fd });
-    const d = await r.json().catch(() => ({}));
-    const text = String((d && d.text) || "").trim();
-    if (!text) { toast("没听清，再说一遍试试"); return; }
-    micFill(text);
-  } catch (e) {
-    console.warn("[mic] 识别失败：", e && e.name, e && e.message);
-    toast(micErrorText(e));
-  } finally {
-    micBusy = false;
-    if (btn) btn.classList.remove("mic-wait");
-  }
-}
-
-async function micStart() {
-  const cap = micCapability();
-  if (!cap.ok) { toast(cap.why); return; }
-  if (!micAvail) { toast("语音识别还没开通：先打字跟我说吧"); return; }
-  if (micPending || micBusy) { toast("稍等一下，上一句还在处理"); return; }
-  micAbort = false;
-  let stream;
-  try {
-    stream = await navigator.mediaDevices.getUserMedia({
-      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
-    });
-  } catch (e) {
-    console.warn("[mic] 拿不到麦克风：", e && e.name, e && e.message);
-    toast(micErrorText(e));
-    return;
-  }
-  micStream = stream;
-  const Rec = window.MediaRecorder || window.webkitMediaRecorder;
-  const mime = pickMicMime();
-  try {
-    micRec = mime ? new Rec(stream, { mimeType: mime }) : new Rec(stream);
-  } catch (e) {
-    console.warn("[mic] 建 MediaRecorder 失败：", e && e.name, e && e.message);
-    micRelease();
-    toast("这个浏览器录不了音，换 Chrome / Edge 试试");
-    return;
-  }
-  const chunks = [];
-  micRec.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
-  micRec.onerror = (e) => {
-    console.warn("[mic] 录音出错：", e && e.name, e && e.message);
-    micAbort = true;
-    micPending = false;
-    micStop(true);
-    toast("录音出错了，再试一次");
-  };
-  micRec.onstop = () => {
-    micPending = false;
-    micRelease();
-    micPaint(false);
-    if (micAbort) return;   // 退出登录/切账号期间录的这段直接丢
-    micUpload(chunks, mime);
-  };
-  try {
-    micRec.start();
-  } catch (e) {
-    console.warn("[mic] 录音起不来：", e && e.name, e && e.message);
-    micRelease();
-    toast("麦克风起不来，再试一次");
-    return;
-  }
-  micPaint(true);
-  toast(`我在听，说完再点一下（最多 ${micMax} 秒）`, 2400);
-  micTimer = setTimeout(() => {
-    toast("到时间啦，我先去识别", 1800);
-    micStop(false);
-  }, micMax * 1000);
-}
-
-/** 拉一次服务端识别状态：能不能用、单段最长多少秒。 */
-async function fetchAsrState() {
-  try {
-    const r = await api(`/api/asr?${q(state.name || "")}`);
-    const d = await r.json().catch(() => ({}));
-    micAvail = !!d.available;
-    micMax = Number(d.max_seconds) > 0 ? Number(d.max_seconds) : 60;
-  } catch {
-    // 探测失败不挡输入：真按了再让 /api/asr 回真实原因（403/503 都是人话）
-    micAvail = true;
-  }
-  const btn = $("#mic-btn");
-  if (btn && !micAvail) btn.title = "语音识别还没开通：让管理员在后台「API 配置」里配一下 Key";
-}
-
+/* 语音识别两条路：
+ *   A. 浏览器原生 SpeechRecognition —— 免上传、逐字上屏；但 Chrome 走 Google
+ *      服务器（国内必报 network）、Firefox 根本没有这个 API。
+ *   B. 服务端 ASR —— getUserMedia 录 PCM → WAV → POST /api/stt（MiMo），
+ *      任何支持 getUserMedia 的浏览器都能用。
+ * 策略：有 SR 先试 SR；SR 报服务级错误（MIC_SR_DEAD）说明这条路在这台浏览器
+ * 上就是死的——当场落到 B，不让孩子白点一次。权限拒绝（not-allowed）不落：
+ * B 走同一个麦克风权限，一样被拒。
+ * 授权框的事：SR.start() 不保证弹标准授权（Chrome 可能直接 network 挂掉），
+ * B 路径的 getUserMedia 一定会弹——所以走到 B 的人一定能看见权限申请。 */
 function setupMic() {
   const btn = $("#mic-btn");
   if (!btn) return;
-  const cap = micCapability();
-  // 不能用的原因写在 title 上、点击时如实说出来——而不是像旧代码那样删掉按钮：
-  // 删掉只会让人以为"这个产品没有语音输入"，说清楚才知道是浏览器/环境的问题。
-  btn.title = cap.ok ? "语音输入：点一下开始说，再点一下结束"
-                     : `语音输入暂时用不了：${cap.why}`;
-  setHidden("#mic-btn", (state.authRole || "child") === "parent"); // 家长不能发消息，自然也不能说
-  btn.onclick = () => {
-    if (micRec && micRec.state === "recording") { micStop(false); return; }
-    micStart();
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const canRec = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+  if (!SR && !canRec) { btn.remove(); return; }
+  btn.classList.remove("hidden");
+
+  let recording = false;
+  let starting = false;   // getUserMedia 等授权期间的占位：授权框开着时别重复起
+  let srDead = false;     // SR 报过服务级错误，本页会话内不再白试
+  let cur = null;         // 活跃识别器/录音器；旧实例晚到的回调不许碰新会话
+  const uiStop = () => {
+    recording = false;
+    btn.classList.remove("recording");
+    btn.setAttribute("aria-pressed", "false");
   };
-  fetchAsrState();
+  const uiStart = () => {
+    recording = true;
+    btn.classList.add("recording");
+    btn.setAttribute("aria-pressed", "true");
+  };
+  const setText = (text) => {
+    const input = $("#msg-input");
+    if (input) {
+      input.value = text;
+      input.focus();
+    }
+  };
+
+  // ---- 路径 B：录 PCM → WAV → 服务端识别 -------------------------------
+  const startServer = async () => {
+    if (!canRec) { toast("这个浏览器录不了音"); return; }
+    starting = true;
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (e) {
+      starting = false;
+      const name = e && e.name;
+      if (name === "NotAllowedError" || name === "SecurityError") {
+        // 分清是哪一层拒的：站点权限 denied 用户自己在地址栏左边就能改；
+        // 已 granted 还被拒 = 系统层/服务器策略头拦的（macOS 隐私设置、反代
+        // Permissions-Policy），浏览器里怎么点都没用——提示要对准那一层。
+        let p = "";
+        try { p = (await navigator.permissions.query({ name: "microphone" })).state; } catch { /* 不支持 */ }
+        toast(p === "granted"
+          ? "站点已允许但系统层没放行——去系统设置里给浏览器开麦克风权限"
+          : MIC_ERR_TEXT["not-allowed"]);
+      } else {
+        toast(name === "NotFoundError" ? MIC_ERR_TEXT["audio-capture"]
+              : `麦克风起不来（${name || "未知原因"}）`);
+      }
+      return;
+    }
+    let ctx = null;
+    try {
+      // 直接要 16kHz：识别用不上更高的，wav 体积也小一半；不认此参的浏览器回落默认
+      const AC = window.AudioContext || window.webkitAudioContext;
+      try { ctx = new AC({ sampleRate: 16000 }); } catch { ctx = new AC(); }
+    } catch { /* 没有 Web Audio */ }
+    if (!ctx) {
+      starting = false;
+      stream.getTracks().forEach((t) => t.stop());
+      toast("这个浏览器录不了音");
+      return;
+    }
+    const src = ctx.createMediaStreamSource(stream);
+    const proc = ctx.createScriptProcessor(4096, 1, 1);
+    const chunks = [];
+    proc.onaudioprocess = (e) => chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+    src.connect(proc);
+    proc.connect(ctx.destination);   // 有的浏览器不挂 destination 就不回调
+    const teardown = () => {
+      try { proc.onaudioprocess = null; proc.disconnect(); src.disconnect(); } catch { /* 已断 */ }
+      stream.getTracks().forEach((t) => t.stop());
+      ctx.close().catch(() => {});
+    };
+    const rec = {
+      _aborted: false,
+      async stop() {
+        if (this._aborted) return;   // abort() 后晚到的 stop()：丢弃不转写
+        teardown();
+        const wav = pcmToWav(chunks, ctx.sampleRate);
+        if (wav.byteLength <= 44) {   // 一帧没采到（误触即停）：别白跑一次识别
+          toast(MIC_ERR_TEXT["no-speech"]);
+          return;
+        }
+        toast("识别中…");
+        try {
+          const fd = new FormData();
+          fd.append("file", new Blob([wav], { type: "audio/wav" }), "mic.wav");
+          const r = await api(`/api/stt?${q(state.name || "")}`, { method: "POST", body: fd });
+          const d = await r.json().catch(() => ({}));
+          if (d.text) setText(d.text);
+          else toast("没听清，再说一次？");
+        } catch (e) {
+          toast(e.message || "识别失败，稍后再试");
+        }
+      },
+      abort() {   // 发送/退出登录：丢弃不转写，顺手清掉录音态
+        this._aborted = true;
+        teardown();
+        if (cur === rec) cur = null;
+        uiStop();
+      },
+    };
+    cur = rec;
+    micRec = rec;
+    starting = false;
+    uiStart();
+    setTimeout(() => { if (cur === rec && recording) btn.click(); }, MIC_MAX_MS);
+  };
+
+  // ---- 路径 A：浏览器原生 SpeechRecognition ----------------------------
+  const startSR = () => {
+    // 每次都起新实例：识别器出错/中止后可能停在"已启动"的内部状态，
+    // 拿同一个对象再 start() 会同步抛 InvalidStateError——"点了没反应"的来源之一。
+    const rec = new SR();
+    rec.lang = "zh-CN";
+    rec.interimResults = true;
+    rec.onresult = (e) => {
+      let text = "";
+      for (const r of e.results) text += r[0].transcript;
+      setText(text);
+    };
+    rec.onend = () => { if (cur === rec) { cur = null; uiStop(); } };
+    rec.onerror = (e) => {
+      if (cur !== rec) return;
+      cur = null;
+      uiStop();
+      const code = e && e.error;
+      const msg = MIC_ERR_TEXT[code];
+      if (MIC_SR_DEAD.has(code) || code === "not-allowed") {
+        // 内置识别这条路过不了：服务死（network/系统禁用）或权限线不同
+        // （Chrome 的 speechRecognition 内容与麦克风是两条权限——SR 报
+        // not-allowed 时 getUserMedia 完全可能是通的）。这次点击别浪费，
+        // 当场换成服务端识别接着录；B 真被拒时它自己会给出准确的提示。
+        srDead = true;
+        if (code !== "not-allowed") toast(`${msg}——改用管家服务端识别`);
+        startServer();
+      } else if (msg) {
+        toast(msg);  // aborted / bad-grammar 不在表里：主动收尾，不算错
+      }
+    };
+    cur = rec;
+    micRec = rec;         // 全局引用：发送/退出登录时按得住（见 resetComposer）
+    try {
+      rec.start();
+    } catch {
+      // start() 同步抛（实例状态坏）→ 同样按"SR 不可用"处理，落服务端识别
+      cur = null;
+      uiStop();
+      srDead = true;
+      startServer();
+    }
+  };
+
+  btn.onclick = async () => {
+    if (starting) return;
+    if (recording) {
+      const c = cur;
+      cur = null;
+      uiStop();           // 先清 UI 再停，识别器卡住时按钮也不一直红着
+      if (c) { try { await c.stop(); } catch { /* 停不下就算 */ } }
+      return;
+    }
+    if (SR && !srDead) {
+      uiStart();
+      startSR();
+    } else {
+      await startServer();
+    }
+  };
 }
 
 function toggleSecret() {

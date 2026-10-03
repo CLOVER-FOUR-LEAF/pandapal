@@ -27,11 +27,12 @@ def _normalize_card(data: dict) -> dict:
 
 
 async def synthesize(store: MemoryStore, event: str, results: dict[str, str],
-                     attach_ctx: str = "") -> dict:
+                     attach_ctx: str = "", extra_rule: str = "") -> dict:
     """正常路径：汇总节点结果出卡片。
 
     attach_ctx 是本轮附件摘要（文件名 + 抽取正文）：卡片只吃文本，
     孩子用图片/文档补需求时（"按这张课程表安排"），不带上卡片就会漏掉关键信息。
+    extra_rule 是调用方按本轮意图追加的卡片规则（如写作类"只放素材提纲"）。
     """
     results_text = "\n\n".join(f"【{nid}】{text}" for nid, text in results.items())
     name, mem = await asyncio.to_thread(lambda: (store.child_name, store.active_block(event)))
@@ -44,7 +45,7 @@ async def synthesize(store: MemoryStore, event: str, results: dict[str, str],
                 now=tools.now_text(),
                 memory_block=mem or "（暂无记忆）",
                 results=results_text,
-                action_rules=prompts.CARD_ACTION_RULES,
+                action_rules=prompts.CARD_ACTION_RULES + extra_rule,
             )},
         ],
         max_tokens=1800,  # 卡片 4-6 板块 × 2-4 条，1800 有 3 倍余量。
@@ -54,7 +55,8 @@ async def synthesize(store: MemoryStore, event: str, results: dict[str, str],
     return _normalize_card(data)
 
 
-async def direct_card(store: MemoryStore, event: str, attach_ctx: str = "") -> dict:
+async def direct_card(store: MemoryStore, event: str, attach_ctx: str = "",
+                      extra_rule: str = "") -> dict:
     """保底路径：跳过 DAG，单次调用直出卡片（仍是真实 LLM 生成）。"""
     name, mem = await asyncio.to_thread(lambda: (store.child_name, store.active_block(event)))
     data = await llm.complete_json(
@@ -65,7 +67,7 @@ async def direct_card(store: MemoryStore, event: str, attach_ctx: str = "") -> d
                 event=event + attach_ctx,
                 now=tools.now_text(),
                 memory_block=mem or "（暂无记忆）",
-                action_rules=prompts.CARD_ACTION_RULES,
+                action_rules=prompts.CARD_ACTION_RULES + extra_rule,
             )},
         ],
         max_tokens=3000,
@@ -99,10 +101,16 @@ def assemble_from_results(title: str, pairs: list[tuple[str, str]]) -> dict:
 
 
 def card_to_text(card: dict) -> str:
-    """卡片转纯文本，供记忆沉淀和历史使用。"""
-    parts = [card["title"]]
+    """卡片转 markdown 文本，供记忆沉淀和历史回放使用。
+
+    历史回放走前端 markdown 渲染：用小标题 + 列表排版，重开页面时仍像一张卡片，
+    不再是"。；"连成一整段的长文（tts.to_speech_text 会洗掉这些 markdown 记号）。
+    """
+    parts = [f"**{card['title']}**"]
     for s in card["sections"]:
-        parts.append(f"{s['heading']}：" + "；".join(s["items"]))
+        items = [str(i).strip() for i in s.get("items") or [] if str(i).strip()]
+        parts.append(f"\n**{s['heading']}**")
+        parts.extend(f"- {i}" for i in items)
     if card.get("closing"):
-        parts.append(card["closing"])
+        parts.append(f"\n{card['closing']}")
     return "\n".join(parts)
