@@ -60,6 +60,9 @@ def _last_user(messages: list[dict]) -> str:
 
 
 async def fake_complete(messages, *, max_tokens=1200, temperature=0.7, caller="unknown"):
+    if caller == "draft_revise":
+        return ("# 我的巡线小车调试记\n\n## 研究背景\n（改后：更有趣的开头）\n\n"
+                "## 结尾\n这次我终于学会了坚持！")
     return {"greeting": "早！昨晚睡得怎么样？", "briefing": "我盯着几件事，最要紧的是比赛。"}.get(
         caller, f"{caller} 的离线回复")
 
@@ -391,6 +394,40 @@ async def _run(client: httpx.AsyncClient) -> None:
                f"status={dl.status_code} bytes={len(dl.content)}")
     else:
         record("paper_file_download", False, "长文稿未产出文件")
+
+    # 4d. 文稿修订：档案里有新鲜草稿 → "把结尾改改"就地重写交付，
+    #   不重建事务不走规划；同一 draft_id 更新、旧交付文件被新版替换
+    old_fid = ppl.get("file_id")
+    revs = await post_sse(client, "/api/chat",
+                          {"name": NAME, "message": "把结尾改得更有趣一点"})
+    ract = next((e for e in revs
+                 if e.get("type") == "action" and e.get("kind") == "draft"), None)
+    rpl = (ract or {}).get("payload") or {}
+    record("revise_deliver",
+           bool(ract) and ract.get("ok") is True
+           and "改后" in rpl.get("body", "") and rpl.get("revised") is True,
+           f"ok={ract.get('ok') if ract else '无'} revised={rpl.get('revised')}")
+    record("revise_same_draft",
+           bool(rpl.get("draft_id")) and rpl.get("draft_id") == ppl.get("draft_id"),
+           f"old={ppl.get('draft_id')} new={rpl.get('draft_id')}")
+    record("revise_no_plan",
+           "card" not in _types(revs) and "plan" not in _types(revs),
+           f"types={_types(revs)}")
+    if old_fid and rpl.get("file_id"):
+        old_dl = await client.get(f"/api/files/{old_fid}/content{q}")
+        record("revise_old_file_gone",
+               old_dl.status_code == 404 and rpl["file_id"] != old_fid,
+               f"old_status={old_dl.status_code} new_fid={rpl['file_id'][:8]}")
+    else:
+        record("revise_old_file_gone", False, "无新旧 file_id 可对比")
+
+    # 4e. 反锚定：长得像修订但说的是别的东西（闹钟/提醒）不劫持
+    evs_nh = await post_sse(client, "/api/chat",
+                            {"name": NAME, "message": "把闹钟改到8点"})
+    record("revise_no_hijack",
+           not any(e.get("type") == "action" and e.get("kind") == "draft"
+                   for e in evs_nh),
+           f"types={_types(evs_nh)}")
 
     # 5. 悄悄话：private 节点只在 child 视角可见（含 view=非parent 不泄露的白名单校验）
     sevs = await post_sse(client, "/api/chat",

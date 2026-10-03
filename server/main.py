@@ -1315,6 +1315,29 @@ async def _chat_stream(sess, raw_message: str, ctx: dict, resume: ResumeReq | No
         if sess.pending_clarify and not is_secret and not resume:
             pend, sess.pending_clarify = sess.pending_clarify, None
             message = f"{pend['orig']}（孩子补充说明：{message}）"
+        # 文稿修订："把结尾改改"是对上一份稿子的指令——就地重写交付，
+        # 不拿修订请求去规划新事务（那样只会又写出一份不相干的稿子）。
+        # 锚点 = 修订话术 + 档案里有 48h 内的新鲜草稿，缺一个都不进来。
+        if (not is_secret and not resume and len(message) <= 60
+                and _REVISE_ASK.search(message)):
+            try:
+                latest_draft = (await asyncio.to_thread(a_store.drafts) or [None])[0]
+            except Exception:  # noqa: BLE001 拿不到草稿就当普通消息走
+                latest_draft = None
+            if latest_draft and _draft_fresh(latest_draft):
+                last_turn["intent"] = "chat"
+                await emit({"type": "mode", "mode": "chat", "mood": "normal"})
+                try:
+                    res = await actions.revise_draft(
+                        sess.dir, a_store, latest_draft, message)
+                except Exception as e:  # noqa: BLE001 改写失败给回执，不当全场错误
+                    res = {"kind": "draft", "ok": False,
+                           "detail": f"这次没改成：{e}，换个说法再让我试？",
+                           "payload": {}}
+                await emit({"type": "action", **res})
+                reply_text = res["detail"]
+                await emit({"type": "token", "text": res["detail"]})
+                return
         if resume:
             # 续写不分类、不建事务：带着原问题和半截回答直接接着往下说
             last_turn["intent"] = "chat"
@@ -1900,6 +1923,26 @@ async def _open_affair(sess, a_store, message: str, hit: dict) -> tuple[dict | N
 _DRAFT_ASK = re.compile(
     r"帮我写|帮我拟|帮我起草|给我写|起草|写一[封份篇个段则]|写份|写篇|写个|拟一[封份篇个]"
     r"|发言稿|演讲稿|申请书|推荐信|自我介绍|自荐信|请假条|主持稿|竞选稿|致辞|感言|承诺书")
+
+# 文稿修订锚点："把结尾改改/帮我改一下这篇"——对着已有稿子就地改写。
+# 刻意收窄：把/帮…改成/得/写/换/删 + 文档部位词（结尾/标题/第几节），
+# 裸"删掉/改到8点"这类对提醒/闹钟说的话不进来（_draft_fresh 再把一道关）。
+_REVISE_ASK = re.compile(
+    r"把.{0,12}(改成|改得|改改|改写|换掉|换成|重写|润色|精简|删了|删掉)"
+    r"|帮我(改|修|重写|润色)|改改|改一下|修改一下|重新写|重写|润色|扩写|缩写"
+    r"|(标题|题目|结尾|开头|那段话?|这节|这段|这章|内容|稿子|文稿|文章|论文|第.{1,3}[段节章])"
+    r".{0,8}(改|换|删|加|重写|长一?点|短一?点|有趣|生动|简单点)"
+    r"|改得|改短|改长|改有趣|改简单|改生动")
+
+
+def _draft_fresh(draft: dict) -> bool:
+    """修订只锚定"刚写的"那版：两天前的稿子孩子多半已经交差，
+    这时的"帮我改改"更可能是在说别的东西——放下去让正常分类接住。"""
+    try:
+        created = datetime.fromisoformat(str(draft.get("created") or ""))
+        return abs((datetime.now() - created).total_seconds()) <= 48 * 3600
+    except Exception:  # noqa: BLE001 时间戳坏掉的草稿不锚定
+        return False
 
 
 async def _execute_actions(sess, a_store, affair: dict, card: dict, message: str, emit) -> None:

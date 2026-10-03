@@ -261,6 +261,57 @@ async def _do_draft(child_dir: Path, affair: dict, action: dict) -> dict:
              "file_ext": file_item.get("ext")} if file_item else {})})
 
 
+async def revise_draft(child_dir: Path, a_store: AffairStore, draft: dict,
+                       instruction: str) -> dict:
+    """对着已有文稿就地改写：把孩子的修改意见落实到整篇，输出改后的完整文稿。
+
+    不重建事务、不走规划——"把结尾改改"是对上一份稿子的指令，不是新需求。
+    旧交付文件替换掉（files/ 里不留同名两版让人分不清哪个是新的）。
+    """
+    title = str(draft.get("title") or "文稿").strip()[:40]
+    old_body = str(draft.get("body") or "").strip()
+    if not old_body:
+        raise ValueError("这份文稿没有内容，没法改")
+    mem_store = MemoryStore(child_dir)
+    mem = await asyncio.to_thread(mem_store.active_block)
+    new_body = str(await llm.complete(
+        [
+            {"role": "system", "content": "你是文书修改模块，只输出改后的完整文稿。"},
+            {"role": "user", "content": prompts.DRAFT_REVISE.format(
+                name=mem_store.child_name,
+                title=title,
+                body=old_body[:6000],
+                instruction=str(instruction or "").strip()[:200],
+                memory_block=mem or "（暂无记忆）",
+            )},
+        ],
+        max_tokens=2500,
+        caller="draft_revise",
+    ) or "").strip()
+    if not new_body:
+        raise ValueError("改出来是空的")
+    try:
+        file_item = await asyncio.to_thread(_draft_to_file, child_dir, title, new_body)
+    except Exception:  # noqa: BLE001 交付文件是加分项，不是文稿成立的前提
+        file_item = None
+    updated = await asyncio.to_thread(
+        a_store.add_draft, title, new_body, draft.get("affair_id"),
+        file_item.get("id") if file_item else None)
+    old_file = str(draft.get("file_id") or "")
+    if file_item and old_file and old_file != file_item["id"]:
+        try:
+            await asyncio.to_thread(files.FileStore(child_dir).delete, old_file)
+        except Exception:  # noqa: BLE001 删旧失败只留冗余，不影响新版
+            pass
+    return _result(
+        "draft", True, f"《{title}》改好了，新版在上面，不满意接着说",
+        {"draft_id": updated["id"], "title": title, "body": new_body,
+         "affair_id": draft.get("affair_id"), "created": updated.get("created"),
+         "revised": True,
+         **({"file_id": file_item["id"], "file_name": file_item.get("name"),
+             "file_ext": file_item.get("ext")} if file_item else {})})
+
+
 # 长文稿锚点：命中这些词的需求，单发调用写出来只会是"写作建议"——必须分段生成
 _LONG_FORM = re.compile(r"论文|报告|作文|文章|总结|综述|文档|材料|小论文|研究")
 
