@@ -1561,7 +1561,20 @@ async def _chat_stream(sess, raw_message: str, ctx: dict, resume: ResumeReq | No
         finally:
             await queue.put(None)
 
+    t0 = time.monotonic()
+
+    async def _beat() -> None:
+        # 规划/执行/汇总之间动辄十几秒没有事件：节拍既是前端的"还在办"信号，
+        # 也顶住反向代理/网关把静默 SSE 流按空闲超时掐断（nginx 默认 60s）。
+        try:
+            while True:
+                await asyncio.sleep(_BEAT_S)
+                await emit({"type": "beat", "elapsed": int(time.monotonic() - t0)})
+        except asyncio.CancelledError:
+            pass
+
     task = asyncio.create_task(runner())
+    beat = asyncio.create_task(_beat())
     try:
         while True:
             event = await queue.get()
@@ -1569,6 +1582,7 @@ async def _chat_stream(sess, raw_message: str, ctx: dict, resume: ResumeReq | No
                 break
             yield _sse(event)
     finally:
+        beat.cancel()
         if not task.done():
             task.cancel()
 
@@ -1700,7 +1714,7 @@ async def _triage(sess, a_store, message: str, hit: dict, emit,
     返回本轮回复的纯文本（进历史和记忆沉淀）。事务按 existing_id / 标题去重，不重复建单。
     """
     mem, brief = await asyncio.to_thread(
-        lambda: (sess.store.active_block(), _affairs_brief(a_store, limit=8)))
+        lambda: (sess.store.active_block(message), _affairs_brief(a_store, limit=8)))
     mem = mem or "（暂无记忆）"
     if hit.get("block"):
         mem = f"{mem}\n\n和这次相关的记忆：\n{hit['block']}"
@@ -1817,6 +1831,7 @@ _SYNTH_BUDGET = 75.0   # 汇总：实测最慢 52.6s，留余量
 _DIRECT_BUDGET = 25.0  # 直出：实测 ~5s
 _SUPERVISE_BUDGET = 12.0   # 卡片判官：一句话判"回应上没有"，不该比出卡更久
 _RETRY_BUDGET = 30.0       # 判不过的重出预算：比完整汇总短，失败还能退回原卡
+_BEAT_S = 12.0            # SSE 保活节拍间隔：长于 token 间隔、短于常见网关空闲超时
 
 
 async def _supervise_card(sess, message: str, card: dict) -> str:
@@ -2057,8 +2072,16 @@ async def api_chat(request: Request, req: ChatReq):
                 await q.put(None)
 
         _bg(asyncio.create_task(_settle()))
+        # 收尾阶段（记忆沉淀 LLM / 语音合成）同样有事件真空：继续按节拍保活，
+        # 否则网关可能在 done 之后把流按静默断开，丢掉后面的 memory/voice 事件
+        t_settle = time.monotonic()
         while True:
-            chunk = await q.get()
+            try:
+                chunk = await asyncio.wait_for(q.get(), timeout=_BEAT_S)
+            except asyncio.TimeoutError:
+                yield _sse({"type": "beat", "phase": "settle",
+                            "elapsed": int(time.monotonic() - t_settle)})
+                continue
             if chunk is None:
                 break
             yield chunk
@@ -2522,12 +2545,22 @@ def _growth_stats(g: graph.GraphStore, view: str) -> dict:
 
 
 @app.get("/api/growth")
-async def api_growth(request: Request, name: str = "", view: str = "child"):
+async def api_growth(request: Request, name: str = "", view: str = "child", comment: int = 1):
+    """五领域雷达。
+
+    数据（节点分布打分）是本地的、毫秒级；那句点评要走一次 LLM，实测量级是秒。
+    两者混在一个响应里，前端就得为了等一句点评把整张雷达图空着——演示时评委
+    盯着"正在汇总成长证据…"八到十秒，是全场最尴尬的一段等待。
+    所以拆开：默认只回数据，附图立即出；前端拿到数据后再单独取点评（comment=0 可跳过）。
+    """
     user, sess = await _auth_session(request, "growth", name)
     if user["role"] == "parent":
         view = "parent"  # 服务端强制：家长看不到悄悄话节点
     g, _, m = _stores(sess)
     data = await asyncio.to_thread(_growth_stats, g, "parent" if view == "parent" else "child")
+    if not comment:
+        data["comment"] = ""
+        return data
     # 一句点评：LLM 可用就生成，失败就省略（数据本身已经够看）
     try:
         dims_txt = "，".join(f"{d['name']} {d['score']}" for d in data["dimensions"])
