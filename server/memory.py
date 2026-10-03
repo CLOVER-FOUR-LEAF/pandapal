@@ -502,7 +502,18 @@ class MemoryStore:
             memory_md = self.dir.joinpath("MEMORY.md").read_text(encoding="utf-8").strip()
         except OSError:
             memory_md = ""
-        return {"name": index.get("name", ""), "memory_md": memory_md, "topics": topics, "daily": daily}
+        # 梦日记（Dreaming 引擎写的 dream/*.md）：晋升过程的可见证据，
+        # 记忆本页展示"管家把什么整理成了长期记忆"，新梦在前，最多留 7 页
+        dreams = []
+        for f in sorted(self.dir.joinpath("dream").glob("*.md"),
+                        key=lambda p: p.name, reverse=True)[:7]:
+            try:
+                dreams.append({"date": f.stem,
+                               "content": f.read_text(encoding="utf-8").strip()})
+            except OSError:
+                continue
+        return {"name": index.get("name", ""), "memory_md": memory_md,
+                "topics": topics, "daily": daily, "dreams": dreams}
 
     # ---------- 写 ----------
 

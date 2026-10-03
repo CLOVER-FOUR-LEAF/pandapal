@@ -87,6 +87,13 @@ async def main() -> int:
     record("dream_once_per_day", again is None and mem2.count("[梦]") == 1,
            f"again={again}")
 
+    # 记忆本出口：梦日记随 export 给记忆本页（新梦在前、带日期）
+    exp = store.export()
+    record("dream_export",
+           bool(exp.get("dreams")) and "的梦" in exp["dreams"][0]["content"]
+           and exp["dreams"][0]["date"] == date.today().isoformat(),
+           f"dreams={len(exp.get('dreams') or [])}")
+
     # 全新空档案：没有 daily 的梦照跑不误，0 晋升不炸
     empty_dir = Path(os.environ["PANDA_DATA_DIR"]) / "child_空空"
     (empty_dir / "daily").mkdir(parents=True, exist_ok=True)

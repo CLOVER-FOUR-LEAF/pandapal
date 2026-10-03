@@ -4006,6 +4006,19 @@ async function loadMemory() {
         dailyBox.appendChild(item);
       });
     }
+    const dreamsBox = $("#memory-dreams");
+    if (dreamsBox) {
+      dreamsBox.innerHTML = "";
+      const dreams = data.dreams || [];
+      if (!dreams.length) dreamsBox.appendChild(
+        el("p", "empty-hint", "管家还没做过梦——聊得多了，它会自己把反复出现的事整理成长期记忆。"));
+      dreams.forEach((d) => {
+        const item = el("div", "daily-item");
+        item.innerHTML = `<div class="daily-date">${escapeHtml(d.date || "")}</div>
+          <div class="daily-content">${escapeHtml(d.content || "")}</div>`;
+        dreamsBox.appendChild(item);
+      });
+    }
   } catch (e) {
     if (md) md.textContent = `记忆本暂时取不到：${e.message}`;
   }
