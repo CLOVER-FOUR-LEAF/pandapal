@@ -1844,7 +1844,7 @@ async function loadHistory() {
 
 function renderHistory(history) {
   const box = chatBox();
-  if (box) box.innerHTML = CHAT_WELCOME;
+  if (box) { sweepPendingObjectUrls(box); box.innerHTML = CHAT_WELCOME; }
   (history || []).slice(-30).forEach((m) => {
     if (!m) return;
     addMsg(m.role === "user" ? "me" : "ai", m.content || "",
@@ -2083,13 +2083,9 @@ async function deleteRecent(fid) {
 
 function removeAttach(fid) {
   state.attachPending = (state.attachPending || []).filter((f) => f.id !== fid);
-  const hit = (state.attach || []).find((f) => f.id === fid);
   state.attach = (state.attach || []).filter((f) => f.id !== fid);
-  if (hit) {
-    // 顺手把服务端那份也删掉：不留没人引用的孤儿文件占配额
-    api(`/api/files/${encodeURIComponent(fid)}?${q(state.name)}`, { method: "DELETE" })
-      .catch(() => { /* 删不掉不影响使用，配额清理会兜底 */ });
-  }
+  // 移除待发送引用不删除原文件：同一附件可能已经被历史消息使用。
+  // 永久删除仍通过「最近上传」里明确的删除入口操作。
   renderAttachList();
 }
 
@@ -2098,7 +2094,8 @@ async function uploadFiles(fileList) {
   const picked = Array.from(fileList || []);
   if (!picked.length) return;
   if (!state.name) return;
-  const room = ATTACH_MAX - ((state.attach || []).length + (state.attachPending || []).length);
+  const room = ATTACH_MAX - ((state.attach || []).length
+    + (state.attachPending || []).filter((f) => f.uploading).length);
   if (room <= 0) {
     toast(`一次最多带 ${ATTACH_MAX} 个附件`);
     return;
@@ -2129,11 +2126,9 @@ async function uploadFiles(fileList) {
     }
     renderAttachList();
   }
-  state.attachPending = (state.attachPending || []).filter((f) => !f.error);
-  if ((state.attachPending || []).length) {
-    const first = state.attachPending[0];
+  const first = (state.attachPending || []).find((f) => f.error);
+  if (first) {
     toast(`「${first.name}」${first.error}`);
-    state.attachPending = [];
   }
   renderAttachList();
   const input = $("#msg-input");
@@ -2148,24 +2143,64 @@ async function uploadFiles(fileList) {
  */
 const attachBlobs = new Map();
 
-/**
- * 等元素挂上 DOM（最多约 1 秒）。
- *
- * 为什么需要：文件卡是"先建节点、请求回来再 append"的，图片的 fetch 常常比
- * append 先完成。返回 true 表示可以继续挂图；false 表示这个节点已经被换掉/移除，
- * 调用方应当放弃（此时多半已经有一个新节点在接管，不该再往上挂）。
- */
-function waitForDom(node, timeout = 1000) {
-  if (node.isConnected) return Promise.resolve(true);
-  return new Promise((resolve) => {
-    const t0 = Date.now();
-    const tick = () => {
-      if (node.isConnected) { resolve(true); return; }
-      if (Date.now() - t0 > timeout) { resolve(false); return; }
-      if (typeof requestAnimationFrame === "function") requestAnimationFrame(tick);
-      else setTimeout(tick, 16);
+/** 节点级任务负责取消与回收，账号级缓存只复用字节、不复用 objectURL。 */
+const privateImageLoads = new WeakMap();
+
+function attachmentScope() {
+  return `${state.token || ""}:${state.name || ""}`;
+}
+
+async function attachmentBlob(url) {
+  const scope = attachmentScope();
+  const key = `${scope}:${url}`;
+  let blob = attachBlobs.get(key)?.blob;
+  if (!blob) {
+    const resp = await api(url);
+    blob = await resp.blob();
+    if (scope !== attachmentScope()) throw new Error("账号已切换");
+    if (!blob?.size) throw new Error("图片文件为空");
+    if (blob.type && !blob.type.startsWith("image/")
+        && blob.type !== "application/octet-stream") throw new Error("未收到图片文件");
+    attachBlobs.set(key, { blob });
+    if (attachBlobs.size > ATTACH_MAX_FILES) attachBlobs.delete(attachBlobs.keys().next().value);
+  }
+  return blob;
+}
+
+function releasePrivateImage(img) {
+  const task = privateImageLoads.get(img);
+  if (task) { privateImageLoads.delete(img); task.cancel?.(); }
+  img.classList.remove("no-icon");
+  if (img.dataset.objurl) {
+    URL.revokeObjectURL(img.dataset.objurl);
+    delete img.dataset.objurl;
+    img.removeAttribute("src");
+  }
+}
+
+/** 先绑定事件再设置 src；离线节点也能加载，不依赖一秒内挂载或标签页可见。 */
+function setPrivateImageSource(img, src, task) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (error, loaded = false) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      img.removeEventListener("load", onLoad);
+      img.removeEventListener("error", onError);
+      task.cancel = null;
+      if (error) reject(error); else resolve(loaded);
     };
-    tick();
+    const onLoad = () => img.naturalWidth > 0
+      ? finish(null, true) : finish(new Error("图片解码失败"));
+    const onError = () => finish(new Error("图片无法预览，请下载原图检查格式"));
+    const timer = setTimeout(() => finish(new Error("图片加载超时，请重试")), 15000);
+    task.cancel = () => finish(null);
+    img.addEventListener("load", onLoad);
+    img.addEventListener("error", onError);
+    img.loading = "eager";
+    img.src = src;
+    if (img.complete && img.naturalWidth > 0) onLoad();
   });
 }
 
@@ -2180,45 +2215,32 @@ function waitForDom(node, timeout = 1000) {
  *   2. 挂上去后等一次 load——有些图能取到字节却解码不了，那就同样回落成图标。
  */
 async function loadPrivateImage(img, url, onFail, hideIcons = false) {
-  if (!img || !url) { onFail?.(); return; }
-  let objUrl = "";
+  if (!img || !url) { onFail?.(new Error("缺少图片地址")); return false; }
+  releasePrivateImage(img);
+  const task = {};
+  privateImageLoads.set(img, task);
+  const key = `${attachmentScope()}:${url}`;
   try {
-    let blob = (attachBlobs.get(url) || {}).blob;
-    if (!blob) {
-      const resp = await api(url);
-      blob = await resp.blob();
-      if (!blob || !blob.size) throw new Error("空文件");
-      attachBlobs.set(url, { blob });
-    }
-    // 等元素真正挂上 DOM 再挂图。
-    //
-    // 这里以前是 `if (!img.isConnected) return;`——它正是"图发出去以后在聊天里
-    // 显示不出来"的元凶：文件卡是异步插进聊天区的（先建节点、发完请求再 append），
-    // fetch 回来的那一刻 img 往往还没连上，于是整段被静默丢掉，只留下一个没有
-    // src 的 <img>（占位图标还在，所以看起来就是"空白一块"）。而且 blob 已经缓存
-    // 过了，重绘时也不能因为"暂时没连上"就放弃——那会让一次重绘永久丢掉这张图。
-    if (!(await waitForDom(img))) return;   // 真的被换掉/移除了才放弃
-    objUrl = URL.createObjectURL(blob);
-    // 记在元素上，重绘时由 sweepPendingObjectUrls 统一回收
+    const blob = await attachmentBlob(url);
+    if (privateImageLoads.get(img) !== task) return false;
+    const objUrl = URL.createObjectURL(blob);
     img.dataset.objurl = objUrl;
-    img.src = objUrl;
-    // 已经挂过图（缓存命中）就直接收掉占位图标：load 事件不会再触发第二次，
-    // 只在 load 里收会让占位图标永远留着，叠在缩略图上。
-    if (hideIcons && img.complete && img.naturalWidth) img.classList.add("no-icon");
-    if (typeof img.decode === "function") {
-      await img.decode();           // 解码失败会 reject，走到下面的 onFail
-      if (!img.isConnected) return; // 解码期间被换掉：新节点有它自己的加载
-    }
+    const loaded = await setPrivateImageSource(img, objUrl, task);
+    if (!loaded || privateImageLoads.get(img) !== task) return false;
     if (hideIcons) img.classList.add("no-icon");
-  } catch {
-    if (objUrl) { try { URL.revokeObjectURL(objUrl); } catch { /* 忽略 */ } }
-    onFail?.();
+    return true;
+  } catch (error) {
+    if (privateImageLoads.get(img) !== task) return false;
+    attachBlobs.delete(key);
+    releasePrivateImage(img);
+    onFail?.(error);
+    return false;
   }
 }
 
 /** 把"没挂上的 <img>"换回文件图标：卡片仍然可读，只是没有预览。 */
 function swapImgToIcon(img, file) {
-  if (!img || !img.isConnected) return;
+  if (!img || !img.parentNode) return;
   const svg = icon(attachIcon(file));
   img.replaceWith(svg);
 }
@@ -2226,28 +2248,19 @@ function swapImgToIcon(img, file) {
 /** 清掉还没用上的 objectURL：暂存区/对话区重绘前叫一次，别让 blob 越攒越多。 */
 function sweepPendingObjectUrls(root) {
   if (!root) return;
-  if (root._pendingUrls) {
-    root._pendingUrls.forEach((u) => { try { URL.revokeObjectURL(u); } catch { /* 忽略 */ } });
-    root._pendingUrls = null;
-  }
-  root.querySelectorAll("img[data-objurl]").forEach((im) => {
-    try { URL.revokeObjectURL(im.dataset.objurl); } catch { /* 忽略 */ }
-  });
+  root.querySelectorAll("img").forEach(releasePrivateImage);
 }
 
 /** 点开大图：附件原图在对话框里只有缩略图那么大，看不清题面/手写答案。 */
-let lightboxUrl = null;
+let lightboxRequest = 0;
 
 function closeLightbox() {
+  lightboxRequest += 1;
   const box = $("#lightbox");
   if (box) { box.classList.add("hidden"); box.setAttribute("aria-hidden", "true"); }
   state.lightboxFile = null;
-  if (lightboxUrl) {
-    try { URL.revokeObjectURL(lightboxUrl); } catch { /* 忽略 */ }
-    lightboxUrl = null;
-  }
   const img = $("#lightbox-img");
-  if (img) img.removeAttribute("src");
+  if (img) { releasePrivateImage(img); img.removeAttribute("src"); }
 }
 
 /** 显示原图（不裁剪、按屏幕缩放）。blob 已在缓存里就直接用，避免二次下载。 */
@@ -2256,18 +2269,15 @@ async function openLightbox(file) {
   const img = $("#lightbox-img");
   const url = fileContentUrl(file);
   if (!box || !img || !isPreviewableImage(file) || !url) return;
+  closeLightbox();
+  const request = lightboxRequest;
   try {
-    let blob = (attachBlobs.get(url) || {}).blob;
-    if (!blob) {
-      const resp = await api(url);
-      blob = await resp.blob();
-      attachBlobs.set(url, { blob });
-    }
-    if (lightboxUrl) { try { URL.revokeObjectURL(lightboxUrl); } catch { /* 忽略 */ } }
-    lightboxUrl = URL.createObjectURL(blob);
+    const loaded = await loadPrivateImage(img, url, (error) => {
+      if (request === lightboxRequest) toast(`这张图打不开了：${error.message}`);
+    });
+    if (!loaded || request !== lightboxRequest) return;
     state.lightboxFile = file;
     img.alt = file.name || "图片";
-    img.src = lightboxUrl;
     const cap = $("#lightbox-cap");
     if (cap) {
       const bits = [file.name || "图片"];
@@ -2291,28 +2301,47 @@ function filesRow(files) {
     const isImage = isPreviewableImage(f);
     const card = el("a", `msg-file${isImage ? " msg-file-image" : ""}`);
     card.href = fileContentUrl(f) || "#";
+    card.title = f.name || "文件";
     card.setAttribute("aria-label", isImage
       ? `${f.name || "图片"}（点开看大图）`
       : `${f.name || "文件"}（${attachKindCn(f.kind)}）`);
     // 图片：先给一个文件图标兜底，图挂上了再把它去掉——上传的就是张坏图时，
     // 卡片不会变成一个破图占位，而是如实回落到"图片 · 2.1 MB"。
-    let ph = null;
+    let retryImage = null;
+    let status = null;
     if (isImage) {
-      ph = icon("i-image");
-      card.appendChild(ph);
+      card.appendChild(icon("i-image"));
+      status = el("span", "msg-image-status", "图片加载中…");
+      status.setAttribute("role", "status");
+      card.appendChild(status);
     }
     card.onclick = (e) => {
       e.preventDefault();
-      if (isImage) openLightbox(f); else downloadAttach(f);
+      if (isImage && card.dataset.imageState === "error") retryImage?.();
+      else if (isImage && card.dataset.imageState === "ready") openLightbox(f);
+      else if (!isImage) downloadAttach(f);
     };
     if (isImage) {
       const img = el("img");
       img.alt = f.name || "图片";
-      img.loading = "lazy";
-      // hideIcons：图挂上后连占位图标一起收掉，卡片上只留缩略图本身
-      loadPrivateImage(img, fileContentUrl(f), () => img.remove(), true);
-      img.addEventListener("load", () => img.classList.add("no-icon"), { once: true });
       card.appendChild(img);
+      retryImage = async () => {
+        card.dataset.imageState = "loading";
+        card.setAttribute("aria-busy", "true");
+        status.textContent = "图片加载中…";
+        const loaded = await loadPrivateImage(img, fileContentUrl(f), (error) => {
+          card.dataset.imageState = "error";
+          card.setAttribute("aria-busy", "false");
+          status.textContent = `${f.name || "图片"} · 预览失败，点击重试`;
+          card.title = error.message;
+        }, true);
+        if (loaded) {
+          card.dataset.imageState = "ready";
+          card.setAttribute("aria-busy", "false");
+          card.title = `${f.name || "图片"} · 点击查看原图`;
+        }
+      };
+      retryImage();
       // 缩略图本身可点开大图；旁边再给一个明确的"下载原图"入口，
       // 否则想存下来的人只能先点开大图、再点浮层里的按钮，多一步。
       const dl = el("button", "msg-file-dl");
@@ -2795,7 +2824,7 @@ async function sendInner(preset, opts = {}) {
   // 只发文件不写字也允许：模型看得到图/文档，用户想说的往往就在文件里
   // 重发（preset）时走 opts.attach 找回上一轮带的附件，preset 本身不带暂存区
   const attach = preset === undefined ? (state.attach || []) : (opts.attach || []);
-  const pending = (state.attachPending || []).length > 0;
+  const pending = (state.attachPending || []).some((f) => f.uploading);
   if (!text && !attach.length) return;
   if (!state.name) return;
   if (pending) {
@@ -3228,7 +3257,7 @@ function handleEvent(ev, ctx, dropTyping) {
       const box = $("#chat");
       if (!ctx.userRow || !box || !box.contains(ctx.userRow)) break;
       const old = ctx.userRow.querySelector(".msg-files");
-      if (old) old.remove();
+      if (old) { sweepPendingObjectUrls(old); old.remove(); }
       const row = filesRow(ev.files || []);
       if (row) ctx.userRow.appendChild(row);
       break;
