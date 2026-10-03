@@ -112,6 +112,8 @@ const state = {
   recentOpen: false, // 面板是否展开
   needGraphRefresh: false,
   relayDir: "teacher2parent",
+  aggs: new Map(),       // 聚合球 id -> [成员节点 id]（2D 兜底折叠用；3D 内部自己管）
+  mergeAsked: null,      // 正在询问的聚合候选 {key, ids, count}
 };
 
 let pandaSvg = null;
@@ -338,6 +340,9 @@ async function* streamText(path, opts = {}) {
   xhr.onprogress = () => { if (!status || (status >= 200 && status < 300)) push(); };
   xhr.onload = () => {
     if (status && (status < 200 || status >= 300)) {
+      if (status === 401 && state.token && !path.startsWith("/api/auth/")) {
+        forceLogout(); // 与 api() 对齐：token 失效要回登录页，不是只报错
+      }
       let msg = "";
       try { const d = JSON.parse(xhr.responseText); msg = d && (d.detail || d.message || d.error); } catch { /* 非 JSON */ }
       if (!msg) {
@@ -360,11 +365,17 @@ async function* streamText(path, opts = {}) {
     else signal.addEventListener("abort", () => xhr.abort(), { once: true });
   }
   xhr.send(opts.body || null);
-  for (;;) {
-    if (chunks.length) { yield chunks.shift(); continue; }
-    if (err) throw err;
-    if (ended) return;
-    await new Promise((r) => { wake = r; });
+  try {
+    for (;;) {
+      if (chunks.length) { yield chunks.shift(); continue; }
+      if (err) throw err;
+      if (ended) return;
+      await new Promise((r) => { wake = r; });
+    }
+  } finally {
+    // 上游提前 return（换会话丢弃旧流）时把底层请求也停掉，
+    // 否则 XHR 会继续在后台攒到结束——和 fetch 路径的 reader.cancel() 对齐
+    try { xhr.abort(); } catch { /* 已结束 */ }
   }
 }
 
@@ -503,8 +514,6 @@ function useFallback2D(reason) {
   setHidden("#scene-fallback", false);
   setHidden("#scene-canvas", true);
   setHidden("#graph-canvas-2d", false);
-  const note = $("#scene-fallback .fallback-note");
-  if (note) note.textContent = "2D 全景图谱 · 交互与数据实时同步";
   renderFallbackGraph();
   mount2DPanda();
 }
@@ -1096,6 +1105,8 @@ function logout() {
   state.filters = { domain: "", status: "" };
   state.needGraphRefresh = false;
   state.relayDir = "teacher2parent";
+  state.aggs.clear();
+  hideMergeAsk();
   applyRole("child");
   setRelayDir("teacher2parent");
   resetUserUI();
@@ -1186,6 +1197,7 @@ async function enterMain() {
   loadBriefing();
   loadAffairs();
   loadGraph();
+  prefetchGrowth();   // 成长雷达最慢，趁孩子在看晨报的时候先取着
   const historyCount = await loadHistory();
   splashDone();
   // 首次见面（没有任何历史）才把问候也写进聊天区；有记录时只做顶部气泡，
@@ -2670,7 +2682,8 @@ async function sendInner(preset, opts = {}) {
   ctx.tick = setInterval(() => {
     if (!state.busy || ctx.seq !== state.sendSeq || !ctx.phaseText) return;
     const quiet = Math.floor((Date.now() - (ctx.lastEvAt || Date.now())) / 1000);
-    if (quiet >= 8) chatStatus(`${ctx.phaseText} · ${quiet}s`, true);
+    if (quiet >= 8) { chatStatus(`${ctx.phaseText} · ${quiet}s`, true); ctx.suffixShown = true; }
+    else if (ctx.suffixShown) { chatStatus(ctx.phaseText, true); ctx.suffixShown = false; }
   }, 1000);
   const dropTyping = () => {
     if (ctx.typing) { ctx.typing.remove(); ctx.typing = null; }
@@ -3013,7 +3026,11 @@ function toggleVoice() {
 
 function handleEvent(ev, ctx, dropTyping) {
   if (!ev || !ev.type) return;
-  if (ctx && ctx.seq !== undefined && ctx.seq !== state.sendSeq) return; // 过期会话的事件丢弃
+  // 过期会话：聊天态事件丢弃（token/气泡/语音——新轮已经开始，旧语音本就该闭嘴）。
+  // 但 memory/affair 是纯数据事件：settle 阶段被新一轮顶掉时放行它们，
+  // 否则上一轮新增的记忆星球与事务推进要等下次刷新才冒头。
+  if (ctx && ctx.seq !== undefined && ctx.seq !== state.sendSeq
+      && ev.type !== "memory" && ev.type !== "affair") return;
   if (ctx && ev.type !== "beat") ctx.lastEvAt = Date.now(); // beat 只证明连接活着，不算"有进展"
   switch (ev.type) {
     // 服务端保活节拍：规划/汇总之间十几秒无事件时证明流没死（见 _chat_stream）
@@ -3128,6 +3145,7 @@ function handleEvent(ev, ctx, dropTyping) {
       mergeGraphLocally(ev);
       s3("spawnMemory", ev);
       state.needGraphRefresh = true;
+      growthCache.data = null; // 新记忆会改变五领域打分，下次进成长页重取
       break;
 
     case "token":
@@ -3248,6 +3266,7 @@ async function initSceneSafe() {
     }
     state.sceneReady = true;
     await s3("setNodeClickHandler", (node) => openNodeDrawer(node));
+    await s3("setMergePromptHandler", askMergePlanets);
     await s3("setRole", state.role);
     await s3("setGraphData", state.graph);
     await s3("setTimeline", state.timeline);
@@ -3300,19 +3319,192 @@ function loadGraphView() {
 function drawGraph2D() {
   const host = $("#graph-canvas-2d");
   if (host) draw2D(host, filteredGraph());
+  clearTimeout(drawGraph2D._t);
+  drawGraph2D._t = setTimeout(maybeAskMerge2D, 1800);
+}
+
+/* 2D 兜底下的长链检测：与 scene3d.findMergeChains 同一规则（度2中段+度1叶子） */
+const _merge2dAsked = new Set();
+
+function maybeAskMerge2D() {
+  if (!state.fallback2d || state.mergeAsked) return;
+  const nodes = state.graph.nodes || [];
+  const alive = new Set(nodes.map((n) => n.id));
+  const adj = new Map();
+  for (const e of state.graph.edges || []) {
+    const s = e.source, t = e.target;
+    if (s === t || !alive.has(s) || !alive.has(t)) continue;
+    if (!adj.has(s)) adj.set(s, []);
+    if (!adj.has(t)) adj.set(t, []);
+    adj.get(s).push(t);
+    adj.get(t).push(s);
+  }
+  let selfId = null, selfW = -1;
+  for (const n of nodes) {
+    const w = +n.weight || 0;
+    if (n.type === "person" && w > selfW) { selfW = w; selfId = n.id; }
+  }
+  const inAgg = new Set();
+  for (const ids of state.aggs.values()) for (const id of ids) inAgg.add(id);
+  const deg = (id) => (adj.get(id) || []).length;
+  const ok = (id) => alive.has(id) && !inAgg.has(id) && id !== selfId;
+  const mid = new Set();
+  for (const id of adj.keys()) if (deg(id) === 2 && ok(id)) mid.add(id);
+  const seen = new Set();
+  let best = null;
+  for (const seed of mid) {
+    if (seen.has(seed)) continue;
+    const comp = [];
+    const stack = [seed];
+    seen.add(seed);
+    while (stack.length) {
+      const cur = stack.pop();
+      comp.push(cur);
+      for (const nb of adj.get(cur) || []) if (mid.has(nb) && !seen.has(nb)) { seen.add(nb); stack.push(nb); }
+    }
+    const set = new Set(comp);
+    for (const id of comp) for (const nb of adj.get(id) || []) {
+      if (!set.has(nb) && deg(nb) === 1 && ok(nb)) set.add(nb);
+    }
+    if (set.size >= 5 && (!best || set.size > best.size)) best = set;
+  }
+  if (!best) return;
+  const ids = [...best];
+  const key = ids.slice().sort().join(",");
+  if (_merge2dAsked.has(key) || mergeDeclined().has(key)) return;
+  _merge2dAsked.add(key);
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  askMergePlanets({
+    key, ids, count: ids.length,
+    labels: ids.map((id) => (byId.get(id) || {}).label || id).slice(0, 4),
+  });
 }
 
 function filteredGraph() {
-  const nodes = (state.graph.nodes || []).filter((n) => {
+  const memberOf = new Map(); // 成员 id -> 聚合球 id
+  for (const [cid, ids] of state.aggs) for (const id of ids) memberOf.set(id, cid);
+  const base = (state.graph.nodes || []).filter((n) => {
     if (state.role === "parent" && n.private) return false; // 家长视角私密节点前端再滤一道
     if (state.filters.domain && n.domain !== state.filters.domain) return false;
     if (state.filters.status && n.status !== state.filters.status) return false;
     if (state.timeline && String(n.first_seen || "").slice(0, 7) > state.timeline) return false;
     return true;
   });
+  // 折叠：被收进大星球的成员换成一颗聚合节点（2D 兜底与 3D 行为一致）
+  const nodes = [];
+  const groups = new Map();
+  for (const n of base) {
+    const cid = memberOf.get(n.id);
+    if (!cid) { nodes.push(n); continue; }
+    if (!groups.has(cid)) groups.set(cid, []);
+    groups.get(cid).push(n);
+  }
+  for (const [cid, mem] of groups) {
+    if (mem.length < 2) { nodes.push(...mem); continue; }
+    const tally = new Map();
+    let weight = 0, last = "", first = "9999", priv = false, act = 0, done = 0;
+    for (const n of mem) {
+      weight += +n.weight || 1;
+      tally.set(n.domain, (tally.get(n.domain) || 0) + (+n.weight || 1));
+      if (String(n.last_seen || "") > last) last = String(n.last_seen);
+      if (n.first_seen && String(n.first_seen) < first) first = String(n.first_seen);
+      if (n.private) priv = true;
+      if (n.status === "done") done++; else if (n.status !== "dropped") act++;
+    }
+    let domain = mem[0].domain, topW = -1;
+    for (const [k, v] of tally) if (v > topW) { topW = v; domain = k; }
+    nodes.push({
+      id: cid, label: `${mem.length} 颗小星的星系`, type: "cluster", domain,
+      status: act ? "active" : done ? "done" : "dropped",
+      weight: weight + mem.length * 6, private: priv,
+      first_seen: first === "9999" ? last : first, last_seen: last,
+      members: mem.map((m) => m.id),
+    });
+  }
   const ids = new Set(nodes.map((n) => n.id));
-  const edges = (state.graph.edges || []).filter((e) => ids.has(e.source) && ids.has(e.target));
+  const edges = [];
+  const seenPair = new Set();
+  for (const e of state.graph.edges || []) {
+    const s = memberOf.get(e.source) || e.source;
+    const t = memberOf.get(e.target) || e.target;
+    if (s === t || !ids.has(s) || !ids.has(t)) continue;
+    const k = s < t ? s + "" + t : t + "" + s;
+    if (seenPair.has(k)) continue;
+    seenPair.add(k);
+    edges.push(Object.assign({}, e, { source: s, target: t }));
+  }
   return { nodes, edges };
+}
+
+/* ---- 星球聚合询问卡：一条线上小星太多 → 收成一颗大星球 ---- */
+
+const MERGE_NO_KEY = "pb.mergeNo";
+
+function mergeDeclined() {
+  try { return new Set(JSON.parse(localStorage.getItem(MERGE_NO_KEY) || "[]")); } catch { return new Set(); }
+}
+
+function mergeDecline(key) {
+  try {
+    const set = mergeDeclined();
+    set.add(key);
+    localStorage.setItem(MERGE_NO_KEY, JSON.stringify([...set].slice(-40)));
+  } catch { /* ignore */ }
+}
+
+function hideMergeAsk() {
+  const card = $("#merge-ask");
+  if (card) card.classList.remove("is-on");
+  state.mergeAsked = null;
+}
+
+function askMergePlanets(cand) {
+  if (!cand || !Array.isArray(cand.ids) || cand.ids.length < 2) return;
+  if (mergeDeclined().has(cand.key)) return;
+  let card = $("#merge-ask");
+  if (!card) {
+    card = el("div", "merge-ask");
+    card.id = "merge-ask";
+    card.setAttribute("role", "dialog");
+    document.body.appendChild(card);
+  }
+  const names = (cand.labels || []).slice(0, 3).join("、");
+  card.innerHTML =
+    `<div class="merge-ask-text">这条线上连着 <b>${int(cand.count, cand.ids.length)}</b> 颗小星球` +
+    (names ? `（${escapeHtml(names)}${cand.count > 3 ? " 等" : ""}）` : "") +
+    `，要把它们收成一颗大星球吗？小星不会丢，点开大星还能展开。</div>
+     <div class="merge-ask-btns">
+       <button type="button" class="merge-yes">收成大星球</button>
+       <button type="button" class="merge-no">暂不</button>
+     </div>`;
+  state.mergeAsked = cand;
+  card.querySelector(".merge-yes").onclick = async () => {
+    const res = await s3("mergePlanets", cand.ids);
+    if (res && res.id) {
+      state.aggs.set(res.id, res.ids || cand.ids);
+    } else if (!state.sceneReady) {
+      // 2D 兜底：本地记一笔折叠状态，下一次 filteredGraph 生效
+      state.aggs.set("agg:" + cand.key.replace(/[^a-zA-Z0-9]+/g, "-").slice(0, 40), cand.ids);
+    } else {
+      hideMergeAsk();
+      toast("这条链上的小星有变动，先不收了");
+      return;
+    }
+    hideMergeAsk();
+    drawGraph2D();
+    renderFallbackGraph();
+    toast("收成一颗大星球啦，点开还能展开～");
+  };
+  card.querySelector(".merge-no").onclick = () => {
+    mergeDecline(cand.key);
+    hideMergeAsk();
+  };
+  requestAnimationFrame(() => card.classList.add("is-on"));
+  // 25 秒不点就当这轮先不收（不写进"婉拒"名单，下次图谱变化还可以再问）
+  clearTimeout(askMergePlanets._t);
+  askMergePlanets._t = setTimeout(() => {
+    if (state.mergeAsked === cand) hideMergeAsk();
+  }, 25000);
 }
 
 function renderTimeline() {
@@ -3447,7 +3639,11 @@ function openNodeDrawer(node) {
   const domColor = DOMAIN_COLOR[dom] || "";
   const [stName, stCls] = NODE_STATUS[full.status] || [full.status || "", ""];
 
-  const links = (state.graph.edges || [])
+  const memberIds = Array.isArray(full.members) && full.members.length
+    ? full.members
+    : state.aggs.get(id) || null;
+
+  const links = memberIds ? [] : (state.graph.edges || [])
     .filter((e) => e.source === id || e.target === id)
     .map((e) => {
       const out = e.source === id;
@@ -3475,15 +3671,21 @@ function openNodeDrawer(node) {
              <span>${escapeHtml(f.text || "")}</span>
            </div>`).join("")}</div>`
        : '<div class="empty-hint">还没有具体记录</div>'}
-     <div class="drawer-sub">关联节点</div>
-     ${links.length
-       ? `<div class="drawer-links">${links.map((l) => `
-           <span class="link-node" data-goto="${escapeHtml(l.otherId)}">
-             ${l.out ? "" : "← "}${escapeHtml(l.rel)} ${escapeHtml(l.label)}
-           </span>`).join("")}</div>`
-       : '<div class="empty-hint">还没有关联节点</div>'}
+     ${memberIds
+      ? `<div class="drawer-sub">里面的小星球（${memberIds.length}）</div>
+         <div class="drawer-links">${memberIds.map((mid) => `
+          <span class="link-node" data-goto="${escapeHtml(mid)}">${escapeHtml(nodeLabel(mid))}</span>`).join("")}</div>`
+      : `<div class="drawer-sub">关联节点</div>
+         ${links.length
+      ? `<div class="drawer-links">${links.map((l) => `
+          <span class="link-node" data-goto="${escapeHtml(l.otherId)}">
+            ${l.out ? "" : "← "}${escapeHtml(l.rel)} ${escapeHtml(l.label)}
+          </span>`).join("")}</div>`
+      : '<div class="empty-hint">还没有关联节点</div>'}`}
      <div class="inbox-actions">
-       ${canChat
+       ${memberIds
+      ? `<button class="btn-approve" type="button" data-act="split">${iconHTML("i-planet")} 展开这群星球</button>`
+      : canChat
       ? `<button class="btn-approve" type="button" data-act="ask">${iconHTML("i-chat")} 问问管家这件事</button>`
       : '<span class="drawer-note">家长账号不能直接和管家聊天，家长视图里可以用传话筒转达</span>'}
        <button class="btn-reject" type="button" data-act="close">${iconHTML("i-x")} 关闭</button>
@@ -3495,6 +3697,17 @@ function openNodeDrawer(node) {
   });
   const close = body.querySelector('[data-act="close"]');
   if (close) close.onclick = () => drawer.classList.add("hidden");
+  const split = body.querySelector('[data-act="split"]');
+  if (split) {
+    split.onclick = async () => {
+      drawer.classList.add("hidden");
+      await s3("unmergePlanets", id);
+      state.aggs.delete(id);
+      drawGraph2D();
+      renderFallbackGraph();
+      toast("小星球们都回来啦～");
+    };
+  }
   const ask = body.querySelector('[data-act="ask"]');
   if (ask) {
     ask.onclick = () => {
@@ -3541,6 +3754,8 @@ async function toggleRole() {
   saveAuth(); // 记住评委选择的视角，刷新后保持
   await s3("setRole", role);
   await loadGraph(); // 家长视角后端剔除 private 节点及其边
+  prefetchGrowth();  // 换个视角看成长雷达是另一份数据
+  if (!$("#growth-view").classList.contains("hidden")) loadGrowth();
 
   if (role === "parent") {
     go("parent");
@@ -3798,15 +4013,55 @@ async function exportMemoir() {
  * 12. 成长视图 + 梦想
  * ========================================================================== */
 
+/* 成长雷达要好几次 LLM 调用（实测 8–10 秒），进主界面时先在后台取，
+   点进"成长"页时多半已经就绪。缓存按 孩子+视角 分开，切换视角不会串数据。 */
+const growthCache = { key: "", data: null, at: 0, inflight: null };
+
+function growthKey() {
+  return `${state.name}|${state.role === "parent" ? "parent" : "child"}`;
+}
+
+async function fetchGrowth() {
+  const key = growthKey();
+  if (growthCache.key === key && growthCache.data) return growthCache.data;
+  if (growthCache.key === key && growthCache.inflight) return growthCache.inflight;
+  growthCache.key = key;
+  growthCache.data = null;
+  const view = state.role === "parent" ? "parent" : "child";
+  const url = (extra) => `/api/growth?${q(state.name)}&view=${view}${extra}`;
+  // 两段取：先只要数据（本地统计、毫秒级，雷达图立刻能画），再补那句 LLM 点评。
+  // 点评慢就慢，图已经在屏幕上了；点评失败只是少一段文字，不影响数据。
+  growthCache.inflight = api(url("&comment=0"))
+    .then((r) => r.json())
+    .then((d) => {
+      growthCache.data = d; growthCache.at = Date.now(); growthCache.inflight = null;
+      if (growthCache.key === key && !$("#growth-view").classList.contains("hidden")) renderGrowth(d);
+      api(url("&comment=1")).then((r) => r.json()).then((full) => {
+        if (growthCache.key !== key || !full || !full.comment) return;
+        growthCache.data = { ...d, comment: full.comment };
+        if (!$("#growth-view").classList.contains("hidden")) renderGrowth(growthCache.data);
+      }).catch(() => {});
+      return d;
+    })
+    .catch((e) => { growthCache.inflight = null; throw e; });
+  return growthCache.inflight;
+}
+
+/** 进主界面/换视角时预热一次（不 await，失败静默——真进页面时再如实报错）。 */
+function prefetchGrowth() {
+  fetchGrowth().catch(() => {});
+}
+
 async function loadGrowth() {
   const radar = $("#growth-radar");
-  if (radar) radar.innerHTML = '<p class="empty-hint">正在汇总成长证据…</p>';
+  const cached = growthCache.key === growthKey() && growthCache.data;
+  if (radar && !cached) radar.innerHTML = '<p class="empty-hint">正在汇总成长证据…</p>';
+  else if (cached) renderGrowth(cached);   // 有缓存立刻画，别让画面空一拍
   try {
-    const view = state.role === "parent" ? "parent" : "child";
-    const resp = await api(`/api/growth?${q(state.name)}&view=${view}`);
-    renderGrowth(await resp.json());
+    renderGrowth(await fetchGrowth());
   } catch (e) {
-    renderGrowthFallback(e.status === 404 ? "该功能开发中" : `成长雷达暂时取不到：${e.message}`);
+    // 404 只可能是档案损坏（路由本身是有的），照实说，不要写成"开发中"
+    renderGrowthFallback(`成长雷达暂时取不到：${e.message}`);
   }
 }
 
@@ -4606,8 +4861,20 @@ function bind() {
     }
     if (!closed && state.busy) pauseChat();
   });
+  // 窗口变化：迷你条重画；2D 兜底图也要重画——SVG 的 viewBox 按容器宽度算过一次就定死了，
+  // 横竖屏切换（或手机从地址栏展开的窄高变成全屏）后节点仍按旧宽度排布，
+  // 于是挤成一团、标签互相压。重画比等比缩放更干净。
+  let resizeTimer = 0;
   window.addEventListener("resize", () => {
-    if (state.name) renderMiniGraph();
+    if (!state.name) return;
+    renderMiniGraph();
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      if (state.fallback2d) {
+        renderFallbackGraph();
+        if (!$("#graph-view").classList.contains("hidden")) drawGraph2D();
+      }
+    }, 180);
   });
   setupOfflineBar();
   // 跨断点补建底部 tab（老 Safari 只有 addListener）

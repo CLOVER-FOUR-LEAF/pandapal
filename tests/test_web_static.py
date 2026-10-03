@@ -32,8 +32,8 @@ def read(name: str) -> str:
 def test_ids_resolve() -> None:
     html, js = read("index.html"), read("app.js")
     html_ids = set(re.findall(r'\bid="([^"]+)"', html))
-    # 运行时动态建出来的容器（抽屉/梦想卡/底部 tab 栏），HTML 里本来就没有
-    dynamic = {"affair-detail", "dream-out", "tabbar"}
+    # 运行时动态建出来的容器（抽屉/梦想卡/底部 tab 栏/星球聚合询问卡），HTML 里本来就没有
+    dynamic = {"affair-detail", "dream-out", "tabbar", "merge-ask"}
     used = set(re.findall(r'\$\("#([A-Za-z0-9_-]+)"\)', js))
     missing = sorted(i for i in used if i not in html_ids and i not in dynamic)
     record("js_ids_exist_in_html", not missing, f"缺失={missing}")
@@ -143,6 +143,14 @@ def test_wiring() -> None:
     record("attach_history_replay", "m.files || null" in js)
     record("attach_reset", "state.attach = [];" in reset_src())
     record("attach_css", ".attach-chip {" in css and ".msg-file {" in css)
+    # 星球聚合：3D 导出合并/展开/询问钩子，app 侧询问卡 + 2D 折叠 + 抽屉"展开"入口
+    s3 = read("scene3d.js")
+    record("merge_exports", all(k in s3 for k in
+           ("mergePlanets", "unmergePlanets", "setMergePromptHandler", "getMergedGroups")))
+    record("merge_chain_detect", "findMergeChains" in s3 and "AGG_MIN" in s3)
+    record("merge_ask_card", "askMergePlanets" in js and ".merge-ask {" in css)
+    record("merge_2d_fold", "memberOf.get(e.source)" in js and "maybeAskMerge2D" in js)
+    record("merge_split_btn", 'data-act="split"' in js and "unmergePlanets" in js)
 
 
 def test_pause_state_hygiene() -> None:
