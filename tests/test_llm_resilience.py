@@ -427,6 +427,27 @@ async def main() -> None:
                client.calls[0]["json"].get("prompt_cache_key") == llm._cache_key(m1),
                f"body_keys={list(client.calls[0]['json'])}")
 
+        # ---- complete_json：解析失败的重试必须放大预算（截断 JSON 原预算重试必再截） ----
+        seen_budgets: list[int] = []
+        saved_complete = llm.complete
+
+        async def trunc_then_ok(messages, *, max_tokens=1200, temperature=0.3,
+                                caller="unknown"):
+            seen_budgets.append(max_tokens)
+            return '{"title": "被截' if len(seen_budgets) == 1 \
+                else '{"title": "全须全尾", "body": "补上了"}'
+
+        llm.complete = trunc_then_ok
+        try:
+            out = await llm.complete_json(
+                [{"role": "user", "content": "写个文稿"}],
+                max_tokens=800, caller="draft")
+            record("complete_json_retry_bumps_budget",
+                   seen_budgets == [800, 1600] and out.get("title") == "全须全尾",
+                   f"budgets={seen_budgets}")
+        finally:
+            llm.complete = saved_complete
+
     fails = [r for r in RESULTS if not r[1]]
     print(f"\n{'=' * 60}\n{len(RESULTS) - len(fails)}/{len(RESULTS)} 通过")
     if fails:

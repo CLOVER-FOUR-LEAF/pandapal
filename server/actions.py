@@ -239,7 +239,7 @@ async def _do_draft(child_dir: Path, affair: dict, action: dict) -> dict:
                     memory_block=mem or "（暂无记忆）",
                 )},
             ],
-            max_tokens=1600,
+            max_tokens=2400,
             caller="draft",
         )
         title = str(data.get("title") or action.get("title") or "文稿").strip()[:40]

@@ -602,19 +602,24 @@ async def complete(
             try:
                 if cand.protocol == "anthropic":
                     system, rest = _split_system(messages)
-                    resp = await _anthropic_request(client, cand, {
-                        "model": cand.model,
-                        "max_tokens": max_tokens,
-                        "temperature": temperature,
-                        "system": "\n\n".join(system),
-                        "messages": _anthropic_messages(rest),
-                    })
-                    resp.raise_for_status()
-                    data = resp.json()
-                    out = "".join(b.get("text", "") for b in data.get("content", []))
+                    out, truncated, usage = "", False, None
+                    for budget in (max_tokens, min(max_tokens * 3, 8192)):
+                        resp = await _anthropic_request(client, cand, {
+                            "model": cand.model,
+                            "max_tokens": budget,
+                            "temperature": temperature,
+                            "system": "\n\n".join(system),
+                            "messages": _anthropic_messages(rest),
+                        })
+                        resp.raise_for_status()
+                        data = resp.json()
+                        out = "".join(b.get("text", "") for b in data.get("content", []))
+                        truncated = data.get("stop_reason") == "max_tokens"
+                        usage = _usage_of(data, "anthropic") or usage
+                        if out.strip():
+                            break
                     log_call(caller, True, (time.monotonic() - at0) * 1000, tokens=toks,
-                             cand=cand, usage=_usage_of(data, "anthropic"),
-                             truncated=data.get("stop_reason") == "max_tokens")
+                             cand=cand, usage=usage, truncated=truncated)
                     _record_ok(cand)
                     return out
                 body = {
@@ -629,8 +634,8 @@ async def complete(
                     body["reasoning_effort"] = config.LLM_REASONING_EFFORT
                 out, truncated, usage = "", False, None
                 for budget in (max_tokens, min(max_tokens * 3, 8192)):
-                    # 推理模型可能把预算全花在 reasoning_content 上（finish_reason=length
-                    # 且 content 为空）——放大预算补一次
+                    # 推理模型可能把预算全花在 reasoning_content 上；finish_reason
+                    # 缺省时同样会空手而归——空响应一律放大预算补一次，与 stream 同款修
                     body["max_tokens"] = budget
                     resp = await _openai_request(client, cand, body)
                     resp.raise_for_status()
@@ -639,7 +644,7 @@ async def complete(
                     out = choice["message"]["content"] or ""
                     truncated = choice.get("finish_reason") == "length"
                     usage = _usage_of(data, "openai") or usage
-                    if out.strip() or not truncated:
+                    if out.strip():
                         break
                 log_call(caller, True, (time.monotonic() - at0) * 1000, tokens=toks,
                          cand=cand, usage=usage, truncated=truncated)
@@ -700,6 +705,9 @@ async def stream(
         is_last = i == len(todo) - 1
         retries = 0
         budget = max_tokens
+        # 空流（模型一个字都没吐）最多在当前候选上试两轮：
+        # 推理型模型偶尔把预算全烧在 reasoning 上，重试一次基本就能出正文
+        empty_tries = 0
         while True:
             at0 = time.monotonic()
             got = False   # 本候选本尝试已产出过可见 token
@@ -784,8 +792,10 @@ async def stream(
                                     got = True
                                     yield text
                 log_call(caller, got, (time.monotonic() - at0) * 1000,
-                         "" if got else "流式响应为空", tokens=toks,
-                         cand=cand, usage=usage, truncated=(finish == "length"))
+                         "" if got else (f"流式响应为空（试了 {empty_tries} 次）"
+                                         if empty_tries > 1 else "流式响应为空"),
+                         tokens=toks, cand=cand, usage=usage,
+                         truncated=(finish == "length"))
                 if got:
                     if finish == "length":
                         # 非空截断：留一句可见的尾巴，别让孩子以为话本来就说完了
@@ -793,9 +803,12 @@ async def stream(
                     _record_ok(cand)
                     return
                 last_err = LLMError("流式响应为空")
-                if finish == "length" and budget < 8192:
-                    # 推理模型把预算全花在 reasoning_content 上了——没吐任何 token，可安全重试
-                    budget = min(budget * 3, 8192)
+                empty_tries += 1
+                if empty_tries <= 2 and budget < 8192:
+                    # 推理模型把预算全花在 reasoning_content 上了——没吐任何 token，可安全重试。
+                    # 不只在 finish_reason=length 时重试：实测 finish_reason 缺省（None）、
+                    # usage 也只报了输入时同样会空手而归，那一次孩子看到的就是"没反应"。
+                    budget = min(max(budget * 3, budget + 1024), 8192)
                     continue
                 # 空流不进熔断账：连上了、流完了、只是没内容，属暧昧事件而非端点死亡
                 break
@@ -822,6 +835,12 @@ async def stream(
                 break
     if vision_dead:
         raise LLMVisionUnsupported(str(last_err or "模型不支持视觉输入"))
+    if last_err is not None and "流式响应为空" in str(last_err):
+        # 候选遍历到这里还是空手：留一次痕，并把"确有一个端点活着"的口径记在第一个候选上
+        log_call(caller, False, (time.monotonic() - (logged_at or time.monotonic())) * 1000,
+                 f"流式响应为空×{empties}", tokens=toks, cand=todo[0] if todo else None)
+        raise LLMError(
+            "大模型这次没吐出内容（端点活着但流是空的）——稍等一下再问一次，或换一个模型")
     raise LLMError(f"LLM 流式调用失败: {_err_text(last_err) or '所有候选端点均被熔断'}")
 
 
@@ -855,7 +874,12 @@ def extract_json(text: str) -> dict:
 
 
 async def complete_json(messages: list[dict], *, max_tokens: int = 1200, caller: str = "unknown") -> dict:
-    """要求模型输出 JSON，自动修复重试一次。"""
+    """要求模型输出 JSON，自动修复重试一次。
+
+    解析失败的重试必须加预算：被截断的 JSON（推理模型把 token 烧在 reasoning
+    上、或输出本身超预算）拿同一 max_tokens 重试必然再截一次——重试形同虚设，
+    最后只换来一句"JSON 对象不完整"。格式错和截断分不清，统一放大预算最稳。
+    """
     raw = await complete(messages, max_tokens=max_tokens, temperature=0.3, caller=caller)
     try:
         return extract_json(raw)
@@ -864,5 +888,6 @@ async def complete_json(messages: list[dict], *, max_tokens: int = 1200, caller:
             {"role": "assistant", "content": raw},
             {"role": "user", "content": "格式有误。请只输出一个完整 JSON 对象，不要输出其他任何文字。"},
         ]
-        raw2 = await complete(retry, max_tokens=max_tokens, temperature=0.1, caller=caller)
+        raw2 = await complete(retry, max_tokens=min(max_tokens * 2, 8192),
+                              temperature=0.1, caller=caller)
         return extract_json(raw2)
