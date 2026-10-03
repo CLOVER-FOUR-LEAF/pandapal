@@ -331,6 +331,8 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   background: rgba(210, 154, 224, .12);
 }
 .icon-btn.recording { color: var(--bad); border-color: var(--bad); animation: pulse-rec 1.2s ease-in-out infinite; }
+/* 录音已上传、正在识别：压暗 + 等待光标，让人知道"它在忙"而不是"点了没反应" */
+.icon-btn.mic-wait { opacity: .5; cursor: progress; }
 
 /* 小颗粒按钮（chips / 图例 / 筛选） */
 .chip, .filter-chip {
@@ -717,7 +719,10 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   body { overflow: hidden; }
   #main-view {
     display: grid;
-    grid-template-columns: clamp(310px, 23vw, 350px) minmax(0, 1fr) clamp(390px, 28vw, 460px);
+    /* 两侧边栏加宽：左栏（晨报/事务/星球速览）与右栏（对话）都更舒展，
+       窄桌面用 vw 跟着缩，宽屏到 410/540 封顶，中间 3D 场景始终留 1fr。
+       原先 310~350 / 390~460 在 1440 以上就顶到上限，两侧显得局促。 */
+    grid-template-columns: clamp(300px, 25vw, 410px) minmax(0, 1fr) clamp(380px, 32vw, 540px);
     grid-template-rows: var(--topbar-h) minmax(0, 1fr);
     grid-template-areas:
       "topbar topbar topbar"
