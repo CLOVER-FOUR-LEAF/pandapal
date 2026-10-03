@@ -394,6 +394,39 @@ async def main() -> None:
         u = [r["kw"].get("usage") for r in env.logs if r["kw"].get("usage")]
         record("stream_logs_usage", u == [{"in": 7, "out": 2}], f"logs={env.logs}")
 
+        # ---- stream()：非空截断留可见尾巴，告知可说「继续」 ----
+        env.reset()
+        client = _Client()
+        client.scripts = [[openai_delta("前半截", finish="length")]]
+        llm.shared_client = lambda: client
+        toks = [t async for t in llm.stream(
+            [{"role": "user", "content": "hi"}], caller="t")]
+        record("stream_truncation_marker",
+               toks[0] == "前半截" and "截断" in toks[-1] and "继续" in toks[-1],
+               f"toks={toks}")
+
+        # ---- _cache_key：同前缀同指纹，越过首条非 system 即停 ----
+        env.reset()
+        m1 = [{"role": "system", "content": "人设+记忆"},
+              {"role": "user", "content": "问1"}]
+        m2 = [{"role": "system", "content": "人设+记忆"},
+              {"role": "user", "content": "问2"}]
+        m3 = [{"role": "system", "content": "另一套人设"},
+              {"role": "user", "content": "问1"}]
+        record("cache_key_stable",
+               llm._cache_key(m1) == llm._cache_key(m2)
+               and llm._cache_key(m1) != llm._cache_key(m3),
+               "")
+        # 请求体真的带上了 prompt_cache_key（OpenAI 协议）
+        client = _Client()
+        client.scripts = [[openai_delta("ok")]]
+        llm.shared_client = lambda: client
+        async for _ in llm.stream(m1, caller="t"):
+            pass
+        record("cache_key_in_body",
+               client.calls[0]["json"].get("prompt_cache_key") == llm._cache_key(m1),
+               f"body_keys={list(client.calls[0]['json'])}")
+
     fails = [r for r in RESULTS if not r[1]]
     print(f"\n{'=' * 60}\n{len(RESULTS) - len(fails)}/{len(RESULTS)} 通过")
     if fails:

@@ -453,6 +453,23 @@ def estimate_tokens(messages: list[dict]) -> int:
     return int(chars / 1.6) + count_images(messages) * 800 + 8
 
 
+def _cache_key(messages: list[dict]) -> str:
+    """可缓存前缀的指纹，供 OpenAI 系端点的 prompt_cache_key 用。
+
+    人设 + 活跃记忆块整段待在 system 消息里，同一档案的相邻调用前缀高度
+    重复——给个稳定指纹，支持前缀缓存的端点（DeepSeek 等）能省首 token
+    延迟与费用。不支持的端点忽略该字段，无副作用。
+    """
+    h = hashlib.sha256()
+    for m in messages:
+        if m.get("role") != "system":
+            break  # 只有开头的连续 system 段是所有调用共享的前缀
+        c = m.get("content")
+        if isinstance(c, str):
+            h.update(c.encode("utf-8", "ignore"))
+    return h.hexdigest()[:24]
+
+
 def _usage_of(payload: dict, protocol: str) -> dict | None:
     """从响应体里取出 provider 回报的真实 token 计数；没报就返回 None（日志里不记）。"""
     u = payload.get("usage")
@@ -551,6 +568,7 @@ async def complete(
                     "max_tokens": max_tokens,
                     "temperature": temperature,
                     "stream": False,
+                    "prompt_cache_key": _cache_key(messages),
                 }
                 if config.LLM_REASONING_EFFORT:
                     body["reasoning_effort"] = config.LLM_REASONING_EFFORT
@@ -659,6 +677,7 @@ async def stream(
                         "max_tokens": budget,
                         "temperature": temperature,
                         "stream": True,
+                        "prompt_cache_key": _cache_key(messages),
                     }
                     if config.LLM_REASONING_EFFORT:
                         body["reasoning_effort"] = config.LLM_REASONING_EFFORT
@@ -713,6 +732,9 @@ async def stream(
                          "" if got else "流式响应为空", tokens=toks,
                          cand=cand, usage=usage, truncated=(finish == "length"))
                 if got:
+                    if finish == "length":
+                        # 非空截断：留一句可见的尾巴，别让孩子以为话本来就说完了
+                        yield " …（到这里被截断了，说「继续」我接着讲）"
                     _record_ok(cand)
                     return
                 last_err = LLMError("流式响应为空")
