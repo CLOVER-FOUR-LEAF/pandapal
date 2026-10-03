@@ -55,21 +55,24 @@ cp .env.example .env   # 然后填入你的 LLM_API_KEY 等
 | 注册（孩子/家长绑定）· 密保找回密码 · token 吊销 | `server/auth.py` + `/api/auth/register|question|reset` |
 | 记忆驱动开场问候 | `GET /api/greeting` |
 | 闲聊通道（人设+活跃记忆注入+历史尾部→流式回复） | `server/main.py` `_chat_stream` |
-| 意图分类（plan/chat） | `server/router.py` |
+| 意图分类（plan/chat）· FastTriage 免 LLM 快速路（零信号短闲聊直接 chat，命中任一办事信号词 veto 回 LLM，自带小情绪词典） | `server/router.py` |
 | 任务拆解：LLM 输出 JSON DAG，校验去环重试 | `server/planner.py` |
 | 按依赖并行执行 + SSE 实时状态 | `server/executor.py` |
-| 结构化卡片合成 | `server/synth.py` |
+| 结构化卡片合成 + 出卡前判官自检（"实质回应孩子了吗"，不过带意见重出一次，原卡保底） | `server/synth.py` + `server/main.py` `_supervise_card` |
 | 代办文书（"帮我写份自我介绍/发言稿"→LLM 真写全文→文稿卡+落盘 `drafts.json` 挂回事务） | `server/actions.py` `draft` |
 | 先问清楚再动手：需求缺关键信息（如"帮我写论文"没说写什么）→ planner 输出 `{"clarify": …}` 反问而非拿记忆硬猜；原请求挂 `Session.pending_clarify`，孩子下一句回复并回原请求重走完整管线 | `server/planner.py` `clarify` + `server/main.py` pending 合并 |
 | 长文稿管线（论文/报告/作文）：卡片只展示"查到的素材+提纲"，正文走 `paper_outline` 定结构 → 各节并行生成 → 拼 markdown（单节失败如实标缺） | `server/actions.py` `_write_paper` + `prompts.py` `PAPER_*` |
 | 交付物落盘：draft 文稿同时落成 `files/` 里的 .docx 真文件（python-docx 排版，失败退 .md），卡片一键下载、文件面板标「管家产出」徽章 | `server/actions.py` `_draft_to_file` + `GET /api/files/{id}/content?download=1` |
 | 文件式记忆读写：轮后 LLM 抽取→topics/daily/MEMORY；单写锁+原子写 | `server/memory.py` |
+| Dreaming 记忆整理：daily 跨天去重→五信号打分→反复出现的事晋升进 MEMORY.md（标 `[梦]` 出处可查）+ 梦日记落盘；每天一次、全确定性不调 LLM、悄悄话不触发 | `server/dream.py` |
 | 工具脚手架（声明式注册表，@tool 注册即接入 planner/executor/闲聊通道）：看时间 `now` / 本地赛事库 `race_lookup` / 交通参考 `transport_lookup` / wttr.in 天气 `weather` / 联网搜索 `web_search`（Tavily 兼容端点，未配置则必应网页解析兜底）/ 打开网页 `web_browse` | `server/tools.py` |
-| 闲聊直答的工具轮：启发式命中 → 调度器挑工具 → 结果注入 system → 流式回复（`tool` SSE 事件驱动前端工具条） | `server/main.py` `_tool_round` + `server/prompts.py` `TOOL_PICK` |
+| 闲聊直答的工具轮：启发式命中 → 调度器挑工具 → 多工具并行分发 → 结果注入 system → 流式回复（`tool` SSE 事件驱动前端工具条） | `server/main.py` `_tool_round` + `server/prompts.py` `TOOL_PICK` |
 | 记忆本页：主题分组+时间线+长期记忆 | `web/` + `GET /api/memory` |
 | 管家朗读（小米 MiMo TTS）：回复定型后合成语音，`voice` 事件落在 `done` 之后不拖慢正文；口播稿先洗成口语（去 markdown/emoji、日期时间口语化、限长收尾）；方案卡只念一句引导稿；对话音优先级高于问候/晨报，发新消息的瞬间就掐断 | `server/tts.py` + `server/voice.py` |
+| 语音识别双路径：浏览器 SpeechRecognition 优先（免上传逐字上屏），报服务级错误当场落 MiMo ASR 服务端兜底（录 PCM→WAV→`POST /api/stt`），Firefox/国内 Chrome 也能用 | `server/stt.py` + `web/app.js` `setupMic` |
 | 音色档案 `voice.json`：默认清纯甜美女声（voicedesign 按文字生成音色），可一键切内置音色；孩子直接跟管家说"换个温柔的声音"，由管家自行扩写成音色提示词并落档（确定性正则锚点，不动意图分类） | `server/prompts.py` `VOICE_DESIGN` + `POST /api/voice/preview` |
-| LLM 可靠性三层：错误分级退避重试（429 换 Key、5xx/断网指数退避）、双口径熔断器（Key 级 401/403/429 与端点级 5xx/网络分开记账）、异构兜底端点（`LLM_API_KEY3`+`LLM_BASE_URL2` 可切另一家服务商）；流式只在未吐 token 前重试防回复重复 | `server/llm.py` |
+| LLM 可靠性三层：错误分级退避重试（429 换 Key、5xx/断网指数退避）、双口径熔断器（Key 级 401/403/429 与端点级 5xx/网络分开记账）、异构兜底端点（`LLM_API_KEY3`+`LLM_BASE_URL2` 可切另一家服务商）；流式只在未吐 token 前重试防回复重复；`prompt_cache_key` 前缀指纹省重复前缀、非空截断尾部明示"说继续我接着讲" | `server/llm.py` |
+| 调用留痕防篡改：`llm_calls.jsonl` 每行带前一行 sha256 哈希链，`GET /api/logs/verify` 逐行校验改/删/换序 | `server/llm.py` `verify_chain` |
 | 家长周报（本周事务进展+新变化统计→LLM 写成一页纸；悄悄话只计数不进 prompt；LLM 挂了只报统计） | `server/family.py` `GET /api/parent/weekly` |
 | 通知落地「一份通知，千家千版」：学校/机构通知 → 按孩子记忆出专属版 + 自动建事务/清单/提醒；admin 可批量下发 | `server/family.py` `POST /api/notice` |
 | 童年备忘录导出：整份档案打包 zip 交还孩子（家长 403） | `server/family.py` `GET /api/export` |
@@ -120,8 +123,12 @@ cp .env.example .env   # 然后填入你的 LLM_API_KEY 等
 # 暂停键布局实测：本机 Chrome 无头模式量桌面/窄屏下输入栏按钮的矩形
 .venv/bin/python tests/test_pause_layout.py
 
-# 续写指令路由：暂停后点「继续」发来的话必须走闲聊直答，不能误建事务
+# 续写指令路由 + FastTriage 快速路：暂停后点「继续」必须走闲聊，
+# 零信号短闲聊不花 LLM 第一跳，办事信号 veto 回 LLM
 .venv/bin/python tests/test_router.py
+
+# Dreaming 记忆整理：跨天重复事实晋升 MEMORY.md、梦日记、幂等、空档案
+.venv/bin/python tests/test_dream.py
 
 # 多模态附件：类型识别/内容抽取/配额/提示注入围栏/两种协议的图片消息/上传接口
 .venv/bin/python tests/test_files.py
