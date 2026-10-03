@@ -172,12 +172,11 @@ def test_wiring() -> None:
            and ".msg-file.msg-file-image img" in css)
     record("attach_img_fallback",
            "swapImgToIcon" in js and "async function loadPrivateImage(img, url, onFail" in js)
-    # 图片卡是异步插进聊天区的：fetch 回来时 img 常常还没连上 DOM，
-    # 早期那句 `if (!img.isConnected) return;`（注释"别白挂"）会把整张图静默丢掉——
-    # 换成 waitForDom 等待；解码后被换掉时那一句仍然保留（那时才对）。
-    record("attach_waits_for_dom",
-           "function waitForDom" in js and "await waitForDom(img)" in js
-           and "已经换了一轮/被移除，别白挂" not in js)
+    # 节点可以在挂载前加载；不能因为一秒内没挂上 DOM 就永久放弃。
+    record("attach_loads_before_mount",
+           "function setPrivateImageSource" in js and "await waitForDom(img)" not in js
+           and 'img.loading = "eager"' in js)
+    record("attach_retry_visible", "预览失败，点击重试" in js and ".msg-image-status" in css)
     # 图片卡只留缩略图本身：文件名/尺寸那行说明只给非图片渲染
     record("attach_image_card_textless",
            "const info = el(\"span\", \"msg-file-info\")" in js

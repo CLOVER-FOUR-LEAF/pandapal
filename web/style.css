@@ -1434,6 +1434,18 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   display: block; width: auto; height: 150px; max-width: min(240px, 100%);
   object-fit: contain; border: none;
 }
+.msg-file.msg-file-image[data-image-state="loading"],
+.msg-file.msg-file-image[data-image-state="error"] {
+  min-width: 160px; min-height: 112px; line-height: 1.5;
+}
+.msg-file.msg-file-image:not([data-image-state="ready"]) img { display: none; }
+.msg-image-status {
+  display: block; padding: 0 12px 14px; line-height: 1.5;
+  font-size: 12px; overflow-wrap: anywhere;
+}
+.msg-file.msg-file-image[data-image-state="ready"] > .ic,
+.msg-file.msg-file-image[data-image-state="ready"] .msg-image-status { display: none; }
+.msg-file.msg-file-image[data-image-state="error"] { border-style: dashed; }
 /* 图挂上了：收起占位图标，并把卡片的边框/底色去掉——只留图本身。
    只给图加 no-icon 会留下一条空白，所以这里让外层卡片同步进入"只剩图"的状态。 */
 .msg-file.msg-file-image:has(img.no-icon) {
