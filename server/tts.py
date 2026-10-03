@@ -278,6 +278,40 @@ def mime_for(filename: str) -> str:
 
 
 # ---------------------------------------------------------------- 合成
+async def synthesize(body: dict, *, caller: str = "tts", log_ok: bool = True) -> bytes:
+    """发一次合成请求，返回音频字节；失败抛 TTSError（带上游原因，并已留痕）。"""
+    model = body.get("model", "")
+    t0 = time.monotonic()
+    try:
+        resp = await _client().post(
+            f"{base_url()}/chat/completions",
+            # 官方给了 api-key 与 Bearer 两种认证；同一个 Key 两种都带上，
+            # 换网关实现时不会因为只认一种而 401。
+            headers={
+                "api-key": config.TTS_API_KEY,
+                "Authorization": f"Bearer {config.TTS_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json=body,
+        )
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            # 上游报错原文（Key 无效/模型名不对/额度用完）带给后台，排查不用翻网关日志
+            raise TTSError(f"HTTP {e.response.status_code}：{e.response.text[:200]}") from e
+        message = resp.json()["choices"][0]["message"]
+        b64 = (message.get("audio") or {}).get("data")
+        if not b64:
+            raise TTSError("响应里没有音频数据")
+        audio = base64.b64decode(b64)
+    except Exception as e:  # noqa: BLE001
+        _log(caller, False, (time.monotonic() - t0) * 1000, str(e), model)
+        raise e if isinstance(e, TTSError) else TTSError(str(e) or type(e).__name__) from e
+    if log_ok:
+        _log(caller, True, (time.monotonic() - t0) * 1000, model=model)
+    return audio
+
+
 async def speak(child_dir: Path, text: str, profile: dict | None = None,
                 *, caller: str = "tts", max_chars: int | None = None) -> dict | None:
     """合成一段语音并落盘，返回可直接下发给前端的载荷；不可用/失败返回 None。
@@ -298,25 +332,8 @@ async def speak(child_dir: Path, text: str, profile: dict | None = None,
 
     t0 = time.monotonic()
     try:
-        resp = await _client().post(
-            f"{base_url()}/chat/completions",
-            # 官方给了 api-key 与 Bearer 两种认证；同一个 Key 两种都带上，
-            # 换网关实现时不会因为只认一种而 401。
-            headers={
-                "api-key": config.TTS_API_KEY,
-                "Authorization": f"Bearer {config.TTS_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json=body,
-        )
-        resp.raise_for_status()
-        message = resp.json()["choices"][0]["message"]
-        b64 = (message.get("audio") or {}).get("data")
-        if not b64:
-            raise TTSError("响应里没有音频数据")
-        audio_bytes = base64.b64decode(b64)
-    except Exception as e:  # noqa: BLE001 语音失败只留痕，不外抛
-        _log(caller, False, (time.monotonic() - t0) * 1000, str(e), model)
+        audio_bytes = await synthesize(body, caller=caller, log_ok=False)
+    except Exception:  # noqa: BLE001 语音失败只留痕（synthesize 已记），不外抛
         return None
 
     fmt = _fmt()

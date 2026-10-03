@@ -102,8 +102,8 @@ async function loadOverview() {
       ["LLM", data.llm.configured ? "已配置" : "未配置",
         `${data.llm.protocol} · ${data.llm.model}${data.llm.backup ? " · 有备 Key" : ""}`],
       ["联网搜索", data.search.configured ? "已配置" : "未配置", "未配置时用必应网页解析兜底"],
-      ["TTS 语音", data.tts.configured ? "已配置" : "待接入",
-        data.tts.model || "Key/端点可先在此配置，调用链路后续接入"],
+      ["TTS 语音", data.tts.available ? "可用" : (data.tts.configured ? "已关闭" : "未配置"),
+        `${data.tts.mode === "builtin" ? data.tts.model : data.tts.model_design} · ${data.tts.mode}${data.tts.mode === "builtin" ? ` · ${data.tts.voice}` : ""}`],
       ["LLM 调用", data.logs, "累计留痕条数（记录页可查）"],
       ["后台覆盖项", data.overrides.length, data.overrides.join("、") || "全部走 .env / 默认值"],
     ];
@@ -154,9 +154,21 @@ function renderKeyGroup(g) {
     row.appendChild(lab);
 
     const wrap = D.el("div", "kv-input");
-    const input = D.el("input", "text-input");
+    let input;
+    if (f.choices) {
+      input = D.el("select", "text-input");
+      const vals = f.choices.map((c) => c[0]);
+      // 当前值不在候选里（手改过 settings.json）也要原样展示，别悄悄改掉
+      const opts = vals.includes(f.value || "") ? f.choices : [[f.value, f.value], ...f.choices];
+      opts.forEach(([v, t]) => { const o = D.el("option", null, t); o.value = v; input.appendChild(o); });
+      input.value = f.value || "";
+    } else {
+      input = D.el("input", "text-input");
+    }
     input.dataset.key = f.key;
-    if (f.secret) {
+    if (f.choices) {
+      /* 下拉框不需要额外处理 */
+    } else if (f.secret) {
       input.type = "password";
       input.autocomplete = "off";
       input.placeholder = f.set ? `已配置 ${f.preview}（留空不改动）` : "未配置，填入即启用";
@@ -164,7 +176,9 @@ function renderKeyGroup(g) {
       input.type = "text";
       input.value = f.value || "";
       input.spellcheck = false;
+      if (f.placeholder) input.placeholder = f.placeholder;
     }
+    if (f.help) input.title = f.help;
     wrap.appendChild(input);
     if (f.secret && f.set) {
       const clr = D.el("button", "btn btn-ghost kv-btn", "清除");
@@ -184,6 +198,14 @@ function renderKeyGroup(g) {
     fields.push({ f, input });
   });
 
+  if (TESTS[g.key]) {
+    const test = D.el("button", "btn btn-ghost kv-btn", TESTS[g.key].label);
+    test.type = "button";
+    test.title = "用当前已保存的配置实际调用一次";
+    test.onclick = () => TESTS[g.key].run(test);
+    head.insertBefore(test, save);
+  }
+
   save.onclick = async () => {
     const set = {};
     fields.forEach(({ f, input }) => {
@@ -200,6 +222,39 @@ function renderKeyGroup(g) {
     } catch (e) { errHint(e); } finally { save.disabled = false; }
   };
   return panel;
+}
+
+/* 连通性自检：保存之后点一下，直接看到上游的真实报错，不用去翻日志 */
+const TESTS = {
+  llm: { label: "测试连接", run: (btn) => runTest(btn, "/api/admin/test/llm", {},
+    (r) => `LLM 正常：${r.model} 回复「${r.reply}」（${r.ms}ms）`) },
+  tts: { label: "试听", run: (btn) => runTest(btn, "/api/admin/test/tts", {},
+    (r) => { playB64(r.audio, r.mime); return `TTS 正常：${r.model} · ${Math.round(r.bytes / 1024)}KB（${r.ms}ms）`; }) },
+};
+
+async function runTest(btn, path, body, okText) {
+  btn.disabled = true;
+  const old = btn.textContent;
+  btn.textContent = "测试中…";
+  hint("");
+  try {
+    const r = await (await D.api(path, jopts("POST", body))).json();
+    if (r.ok) { hint(okText(r)); D.toast("测试通过"); }
+    else hint(`测试失败：${r.error}`, true);
+  } catch (e) { errHint(e); } finally { btn.disabled = false; btn.textContent = old; }
+}
+
+let testAudio = null;
+function playB64(b64, mime) {
+  try {
+    const bin = atob(b64);
+    const buf = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+    const url = URL.createObjectURL(new Blob([buf], { type: mime || "audio/mpeg" }));
+    if (testAudio) { testAudio.pause(); URL.revokeObjectURL(testAudio.src); }
+    testAudio = new Audio(url);
+    testAudio.play().catch((e) => hint(`音频已合成，但浏览器没放出来：${e.name}`, true));
+  } catch (e) { hint(`音频解码失败：${e.message}`, true); }
 }
 
 async function unsetKeys(keys) {

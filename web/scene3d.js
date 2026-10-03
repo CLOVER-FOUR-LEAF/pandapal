@@ -64,7 +64,7 @@ const THEMES = {
 
 // 行星质感变体：0 气态巨行星（条纹） 1 岩质（大陆/海洋/极冠） 2 涡旋云海
 const PLANET_VARIANTS = 3;
-const GALAXY_STARS = 7000;
+const GALAXY_STARS = 11000;
 const GALAXY_RADIUS = 58;
 const BACK_STARS = 1400;
 
@@ -321,40 +321,214 @@ function atmosphereMaterial(hex) {
   });
 }
 
-// 螺旋星系背景：对数螺旋臂 + 中心核球，顶点色按半径从暖金渐变到冷蓝紫
-function buildGalaxy(glowTex) {
-  const N = GALAXY_STARS;
-  const pos = new Float32Array(N * 3), col = new Float32Array(N * 3);
-  const inner = new THREE.Color(0xffd9a0), mid = new THREE.Color(0xc9a8ff), outer = new THREE.Color(0x6fa3ff);
-  const tmp = new THREE.Color();
-  const ARMS = 4;
-  for (let i = 0; i < N; i++) {
-    const bulge = Math.random() < 0.22;
-    const r = bulge ? Math.pow(Math.random(), 2.2) * 9 : 6 + Math.pow(Math.random(), 0.8) * (GALAXY_RADIUS - 6);
-    const arm = Math.floor(Math.random() * ARMS);
-    const spin = r * 0.11;
-    const spread = (bulge ? 1.6 : 0.5 + r * 0.045) * (Math.random() + Math.random() - 1);
-    const a = (arm / ARMS) * Math.PI * 2 + spin + (bulge ? Math.random() * 6.28 : spread * 0.12);
-    const jx = (Math.random() - 0.5) * (bulge ? 3 : 1.4 + r * 0.05);
-    const jz = (Math.random() - 0.5) * (bulge ? 3 : 1.4 + r * 0.05);
-    pos[i * 3] = Math.cos(a) * r + jx + spread * Math.cos(a + 1.57);
-    pos[i * 3 + 1] = (Math.random() - 0.5) * (bulge ? 4.2 : 1.2) * (1 - Math.min(1, r / GALAXY_RADIUS) * 0.6) - 0.3;
-    pos[i * 3 + 2] = Math.sin(a) * r + jz + spread * Math.sin(a + 1.57);
-    const t = clamp(r / GALAXY_RADIUS, 0, 1);
-    tmp.copy(t < 0.4 ? inner.clone().lerp(mid, t / 0.4) : mid.clone().lerp(outer, (t - 0.4) / 0.6));
-    const br = 0.45 + Math.random() * 0.55;
-    col[i * 3] = tmp.r * br; col[i * 3 + 1] = tmp.g * br; col[i * 3 + 2] = tmp.b * br;
+// 螺旋星系背景。原先是 7000 颗同尺寸点按 4 臂均匀撒开：臂间没有暗区、
+// 臂上没有连续的亮带，看上去只是一片噪点，核球又正好压在图谱节点背后抢视线。
+// 现在分三层叠出旋臂结构：
+//   haze  沿臂中心的大颗柔光（加色）→ 让旋臂读成连续的光带
+//   dust  臂内侧的暗尘带（普通混合，压暗 haze）→ 臂与臂间有清晰的分界
+//   stars 大小/亮度按幂律分布的星点（加色，轻微闪烁）+ 臂上的粉色星云结
+// 节点所在的内圈（r < GALAXY_CLEAR）整体压暗，星系只在图谱外围铺开，不和标签抢。
+const GALAXY_CLEAR = 15;
+const GALAXY_ARM_TWIST = 0.36;   // 对数螺旋的缠绕率：越大臂越紧
+
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// 屏幕空间尺寸的柔光点材质：gl_PointSize 随距离衰减，片元是高斯光斑
+function galaxyPointsMaterial({ soft = 4.0, opacity = 1, additive = true, dark = false }) {
+  return new THREE.ShaderMaterial({
+    uniforms: {
+      uTime: { value: 0 }, uScale: { value: 400 }, uOpacity: { value: opacity },
+      uTwinkle: { value: 1 },
+    },
+    vertexShader: [
+      "attribute float aSize; attribute float aBright; attribute float aPhase;",
+      "attribute vec3 color;",
+      "uniform float uTime; uniform float uScale; uniform float uTwinkle;",
+      "varying vec3 vColor; varying float vBright;",
+      "void main(){",
+      "  vec4 mv = modelViewMatrix * vec4(position, 1.0);",
+      "  float tw = 1.0 + uTwinkle * 0.28 * sin(uTime * (0.6 + fract(aPhase * 7.13) * 1.9) + aPhase * 6.2831);",
+      "  vBright = aBright * tw; vColor = color;",
+      "  gl_PointSize = clamp(aSize * uScale / max(-mv.z, 0.1), 1.0, 96.0);",
+      "  gl_Position = projectionMatrix * mv;",
+      "}",
+    ].join("\n"),
+    fragmentShader: [
+      "uniform float uOpacity; varying vec3 vColor; varying float vBright;",
+      "void main(){",
+      "  vec2 c = gl_PointCoord - 0.5; float d2 = dot(c, c) * 4.0;",
+      "  if (d2 > 1.0) discard;",
+      `  float a = exp(-d2 * ${soft.toFixed(2)}) * (1.0 - d2);`,
+      dark
+        ? "  gl_FragColor = vec4(vColor, a * vBright * uOpacity);"
+        : "  gl_FragColor = vec4(vColor * vBright * a * uOpacity, a * vBright * uOpacity);",
+      "}",
+    ].join("\n"),
+    transparent: true, depthWrite: false, fog: false,
+    blending: additive ? THREE.AdditiveBlending : THREE.NormalBlending,
+  });
+}
+
+function pointsLayer(n, fill, mat) {
+  const pos = new Float32Array(n * 3), col = new Float32Array(n * 3);
+  const size = new Float32Array(n), bright = new Float32Array(n), phase = new Float32Array(n);
+  let k = 0;
+  for (let i = 0; i < n; i++) {
+    if (fill(i, pos, col, size, bright, phase)) k++;
   }
   const geo = new THREE.BufferGeometry();
   geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
   geo.setAttribute("color", new THREE.BufferAttribute(col, 3));
-  const mat = new THREE.PointsMaterial({
-    size: 0.9, map: glowTex, vertexColors: true, transparent: true, opacity: 0.85,
-    depthWrite: false, blending: THREE.AdditiveBlending, sizeAttenuation: true, fog: false,
-  });
+  geo.setAttribute("aSize", new THREE.BufferAttribute(size, 1));
+  geo.setAttribute("aBright", new THREE.BufferAttribute(bright, 1));
+  geo.setAttribute("aPhase", new THREE.BufferAttribute(phase, 1));
   const pts = new THREE.Points(geo, mat);
-  pts.rotation.x = 0.12;
+  pts.frustumCulled = false;
   return pts;
+}
+
+function buildGalaxy() {
+  const rnd = mulberry32(20261002);   // 固定种子：每次打开都是同一片银河，不会"跳"
+  const gauss = () => {               // 近似正态（Irwin–Hall），臂的截面要中间密两侧疏
+    let x = 0;
+    for (let i = 0; i < 4; i++) x += rnd();
+    return (x - 2) / 0.577;
+  };
+  const lowEnd = typeof navigator !== "undefined" && (navigator.hardwareConcurrency || 8) <= 4;
+  const scale = lowEnd ? 0.6 : 1;
+  const ARMS = [   // 两条主臂 + 两条次臂：主次分明才看得出"旋"
+    { a0: 0, w: 1.0 }, { a0: Math.PI, w: 1.0 },
+    { a0: Math.PI * 0.5, w: 0.42 }, { a0: Math.PI * 1.5, w: 0.42 },
+  ];
+  const armW = ARMS.reduce((s, a) => s + a.w, 0);
+  const pickArm = () => {
+    let x = rnd() * armW;
+    for (const a of ARMS) { if ((x -= a.w) <= 0) return a; }
+    return ARMS[0];
+  };
+  const R0 = 5, RMAX = GALAXY_RADIUS;
+  // 对数螺旋 θ(r) = a0 + ln(r/R0)/k
+  const armAngle = (arm, r) => arm.a0 + Math.log(Math.max(r, R0) / R0) / GALAXY_ARM_TWIST;
+  const radial = () => R0 + Math.pow(rnd(), 1.15) * (RMAX - R0);
+  // 内圈压暗系数：节点区（图谱 + 标签）留给信息，星系从外圈开始亮
+  const clearFade = (r) => {
+    const t = clamp((r - GALAXY_CLEAR * 0.55) / (GALAXY_CLEAR * 0.75), 0, 1);
+    return 0.12 + 0.88 * t * t * (3 - 2 * t);
+  };
+  const cCore = new THREE.Color(0xffe2b0), cArm = new THREE.Color(0xbfd4ff),
+        cOuter = new THREE.Color(0x8a7dff), cHII = new THREE.Color(0xff8fc8),
+        cHaze = new THREE.Color(0x6f8dff), cHazeIn = new THREE.Color(0xb48cff);
+  const tmp = new THREE.Color();
+  const thick = (r) => (0.55 + 1.4 * Math.exp(-r / 7)) * (1 - 0.5 * r / RMAX);
+
+  // ---- haze：沿臂中心铺连续光带
+  const HN = Math.round(520 * scale);
+  const haze = pointsLayer(HN, (i, pos, col, size, bright, phase) => {
+    const arm = pickArm();
+    const r = R0 + 2 + Math.pow(rnd(), 0.9) * (RMAX - R0 - 2);
+    const th = armAngle(arm, r) + gauss() * 0.08;
+    const off = gauss() * (0.9 + r * 0.05);
+    pos[i * 3] = Math.cos(th) * r + Math.cos(th + 1.57) * off;
+    pos[i * 3 + 1] = gauss() * 0.35;
+    pos[i * 3 + 2] = Math.sin(th) * r + Math.sin(th + 1.57) * off;
+    const t = clamp(r / RMAX, 0, 1);
+    tmp.copy(cHazeIn).lerp(cHaze, t);
+    col[i * 3] = tmp.r; col[i * 3 + 1] = tmp.g; col[i * 3 + 2] = tmp.b;
+    size[i] = (6 + rnd() * 7) * (0.75 + t * 0.8);
+    bright[i] = 0.26 * arm.w * clearFade(r) * (1 - 0.45 * t);
+    phase[i] = rnd();
+    return true;
+  }, galaxyPointsMaterial({ soft: 2.2, opacity: 1 }));
+  haze.material.uniforms.uTwinkle.value = 0;
+
+  // ---- dust：臂内侧（朝核心一侧）的暗带，压在 haze 之上、星点之下
+  const DN = Math.round(900 * scale);
+  const dust = pointsLayer(DN, (i, pos, col, size, bright, phase) => {
+    const arm = ARMS[i % 2];   // 只给两条主臂画尘带
+    const r = R0 + 4 + rnd() * (RMAX * 0.82 - R0 - 4);
+    const th = armAngle(arm, r) - 0.16 - Math.abs(gauss()) * 0.05;
+    const off = gauss() * 0.45;
+    pos[i * 3] = Math.cos(th) * r + Math.cos(th + 1.57) * off;
+    pos[i * 3 + 1] = gauss() * 0.12 + 0.05;
+    pos[i * 3 + 2] = Math.sin(th) * r + Math.sin(th + 1.57) * off;
+    col[i * 3] = 0.01; col[i * 3 + 1] = 0.008; col[i * 3 + 2] = 0.03;
+    size[i] = 1.6 + rnd() * 2.2;
+    bright[i] = 0.42 * clearFade(r) * (1 - 0.4 * r / RMAX);
+    phase[i] = 0;
+    return true;
+  }, galaxyPointsMaterial({ soft: 2.0, opacity: 1, additive: false, dark: true }));
+  dust.material.uniforms.uTwinkle.value = 0;
+
+  // ---- stars：臂上的星 + 臂间稀疏星 + 小核球 + 星云结
+  const SN = Math.round(GALAXY_STARS * scale);
+  const stars = pointsLayer(SN, (i, pos, col, size, bright, phase) => {
+    const u = rnd();
+    let x, y, z, r, c, b, sz;
+    if (u < 0.08) {
+      // 核球：紧凑、偏暖、亮度被 clearFade 压住——中心是"小豆"本人，别抢
+      r = Math.pow(rnd(), 1.8) * 6;
+      const th = rnd() * Math.PI * 2;
+      x = Math.cos(th) * r; z = Math.sin(th) * r; y = gauss() * 0.9 * (1 - r / 7);
+      c = cCore; b = 0.55; sz = 0.18 + rnd() * 0.2;
+    } else if (u < 0.80) {
+      const arm = pickArm();
+      r = radial();
+      const th = armAngle(arm, r) + gauss() * 0.06;
+      const off = gauss() * (0.55 + r * 0.035);
+      x = Math.cos(th) * r + Math.cos(th + 1.57) * off;
+      z = Math.sin(th) * r + Math.sin(th + 1.57) * off;
+      y = gauss() * 0.28 * thick(r);
+      const t = r / RMAX;
+      tmp.copy(cArm).lerp(cOuter, clamp((t - 0.35) / 0.65, 0, 1));
+      c = tmp.clone();
+      b = (0.55 + 0.45 * arm.w) * (1 - Math.min(1, Math.abs(off) / 4) * 0.5);
+      sz = 0.16 + Math.pow(rnd(), 6) * 0.9;   // 幂律：大多数很小，少数亮星
+      b *= 1.15;
+    } else if (u < 0.84) {
+      // 星云结（HII 区）：沿主臂外侧的粉色亮团
+      const arm = ARMS[(rnd() * 2) | 0];
+      r = R0 + 6 + rnd() * (RMAX * 0.75 - R0 - 6);
+      const th = armAngle(arm, r) + 0.05 + gauss() * 0.03;
+      const off = gauss() * 0.4;
+      x = Math.cos(th) * r + Math.cos(th + 1.57) * off;
+      z = Math.sin(th) * r + Math.sin(th + 1.57) * off;
+      y = gauss() * 0.15;
+      c = cHII; b = 0.75; sz = 0.3 + rnd() * 0.4;
+    } else {
+      // 臂间与外晕：稀疏、暗，给星盘一个完整轮廓
+      r = R0 + Math.pow(rnd(), 0.7) * (RMAX * 1.05 - R0);
+      const th = rnd() * Math.PI * 2;
+      x = Math.cos(th) * r; z = Math.sin(th) * r; y = gauss() * 0.5 * thick(r);
+      tmp.copy(cArm).lerp(cOuter, clamp(r / RMAX, 0, 1));
+      c = tmp.clone(); b = 0.28; sz = 0.12 + rnd() * 0.12;
+    }
+    pos[i * 3] = x; pos[i * 3 + 1] = y; pos[i * 3 + 2] = z;
+    col[i * 3] = c.r; col[i * 3 + 1] = c.g; col[i * 3 + 2] = c.b;
+    size[i] = sz;
+    bright[i] = b * clearFade(r) * (0.6 + rnd() * 0.4);
+    phase[i] = rnd();
+    return true;
+  }, galaxyPointsMaterial({ soft: 5.0, opacity: 1 }));
+
+  haze.renderOrder = -3;
+  dust.renderOrder = -2;
+  stars.renderOrder = -1;
+  const g = new THREE.Group();
+  g.add(haze, dust, stars);
+  // 星盘略低于图谱平面并微倾：读作"托着星球的银河"，而不是和节点搅在一起
+  g.position.y = -1.6;
+  g.rotation.x = 0.1;
+  g.userData.materials = [haze.material, dust.material, stars.material];
+  return g;
 }
 
 // 远景星空：球壳上均匀撒点，大小/亮度各异
@@ -456,39 +630,28 @@ export function initScene(containerEl) {
       if (!container) throw new Error("initScene: canvas 没有父元素");
       hiddenCanvas = containerEl;
     }
+    // 三组模块同时发请求：原先是"主体 → 后处理 → 熊猫"三轮串行，
+    // 弱网下光排队就要多等两个往返。后两组可选，失败/超时都只降级不报错。
+    const optional = (p, ms, why) => withTimeout(p, ms, why).catch(() => null);
+    const postP = optional(Promise.all([
+      import("./vendor/addons/postprocessing/EffectComposer.js"),
+      import("./vendor/addons/postprocessing/RenderPass.js"),
+      import("./vendor/addons/postprocessing/UnrealBloomPass.js"),
+      import("./vendor/addons/postprocessing/OutputPass.js"),
+      import("./vendor/addons/environments/RoomEnvironment.js"),
+    ]), 6000, "postprocessing timeout");
+    const pandaP = optional(import("./panda3d.js"), 6000, "panda timeout");
     const mods = await withTimeout(
       Promise.all([
         import("./vendor/three.module.min.js"),
         import("./vendor/OrbitControls.js"),
         import("./vendor/CSS2DRenderer.js"),
       ]),
-      4000,
+      8000,
       "3D 模块加载超时"
     );
     THREE = mods[0];
-    // 后处理 + 环境贴图：加载失败降级为普通渲染，不影响主体
-    let post = null;
-    try {
-      post = await withTimeout(
-        Promise.all([
-          import("./vendor/addons/postprocessing/EffectComposer.js"),
-          import("./vendor/addons/postprocessing/RenderPass.js"),
-          import("./vendor/addons/postprocessing/UnrealBloomPass.js"),
-          import("./vendor/addons/postprocessing/OutputPass.js"),
-          import("./vendor/addons/environments/RoomEnvironment.js"),
-        ]),
-        3000,
-        "postprocessing timeout"
-      );
-    } catch (_) {
-      post = null;
-    }
-    let panda = null;
-    try {
-      panda = await withTimeout(import("./panda3d.js"), 1500, "panda timeout");
-    } catch (_) {
-      panda = null; // 熊猫可选
-    }
+    const [post, panda] = await Promise.all([postP, pandaP]);
     build(container, hiddenCanvas, mods[1].OrbitControls, mods[2], panda, post);
   })();
   const p = initPromise;
@@ -641,7 +804,7 @@ function build(container, hiddenCanvas, OrbitControls, CSS2D, pandaMod, post) {
   const dust = new THREE.Points(dustGeo, dustMat);
   scene.add(dust);
   // 银河：螺旋臂星盘（缓慢自转）+ 远景星空球壳
-  const galaxy = buildGalaxy(tex.glow);
+  const galaxy = buildGalaxy();
   scene.add(galaxy);
   const backStars = buildBackStars(tex.glow);
   scene.add(backStars);
@@ -977,6 +1140,9 @@ function measure() {
   if (R.composer) { try { R.composer.setSize(w, h); } catch (_) {} }
   R.camera.aspect = w / h;
   R.camera.updateProjectionMatrix();
+  // 星系点精灵按"世界尺寸 → 像素"换算：视口高度 × DPR / (2·tan(fov/2))
+  const pxScale = (h * dpr) / (2 * Math.tan((R.camera.fov * Math.PI) / 360));
+  for (const m of R.galaxy.userData.materials) m.uniforms.uScale.value = pxScale;
   R.labelBudget = w * h > 700000 ? 16 : w * h > 300000 ? 11 : 7;
   layoutPandaRect();
   if (R.ready && !R.running) renderFrame(0);
@@ -1507,6 +1673,7 @@ function renderFrame(dt) {
 
   R.dust.rotation.y += dt * 0.01;
   R.galaxy.rotation.y += dt * 0.006;
+  for (const m of R.galaxy.userData.materials) m.uniforms.uTime.value = time;
   R.backStars.rotation.y -= dt * 0.002;
 
   // 悬停拾取

@@ -2471,7 +2471,29 @@ function pauseChat() {
   }
 }
 
+/**
+ * 发送入口：任何一处没接住的异常都不能把 state.busy 永久锁成 true——
+ * 那会让输入框、「新项目/项目/清空」全部卡在"管家还在回复"（曾因 ctx 先用后声明出过这事）。
+ */
 async function send(preset, opts = {}) {
+  const seq0 = state.sendSeq;
+  try {
+    await sendInner(preset, opts);
+  } catch (e) {
+    console.error("[send] 未捕获异常：", e);
+    // 只收拾本轮自己开的局：已经有更新的一轮在跑就别去动它
+    if (state.busy && state.sendSeq === seq0 + 1) {
+      state.chatAbort = null;
+      state.chatCtx = null;
+      document.querySelectorAll("#chat .typing").forEach((n) => n.remove());
+      unlockInput();
+      chatStatus();
+      addSys("这条没发出去，再试一次吧");
+    }
+  }
+}
+
+async function sendInner(preset, opts = {}) {
   const input = $("#msg-input");
   const raw = preset !== undefined ? String(preset) : input ? input.value : "";
   let text = raw.trim();
@@ -2522,6 +2544,12 @@ async function send(preset, opts = {}) {
   // 续写沿用原问题的悄悄话状态，不看孩子此刻有没有切换开关
   const secret = resume ? resume.question.startsWith("[[secret]]") : state.secret;
   if (input && preset === undefined) input.value = "";
+  const payload = secret && !resume ? `[[secret]]${text}` : text;
+  // ctx 必须先于用户气泡建好：附件回填（file 事件）要挂回 ctx.userRow
+  const ctx = { seq, typing: null, aiBubble: resume ? resume.bubble : null,
+                aiRaw: resume ? resume.raw : "", resumeBase: resume ? resume.raw : "",
+                question: resume ? resume.question : payload, tree: null, affairTouched: false,
+                userRow: null };
   if (!resume) {
     ctx.userRow = addMsg("me", text, secret, secret ? null : attach);
   }
@@ -2536,10 +2564,7 @@ async function send(preset, opts = {}) {
   if (pandaSvg) setMood(pandaSvg, "thinking");
   chatStatus("正在想…", true);
 
-  const payload = secret && !resume ? `[[secret]]${text}` : text;
-  const ctx = { seq, typing: addTyping(), aiBubble: resume ? resume.bubble : null,
-                aiRaw: resume ? resume.raw : "", resumeBase: resume ? resume.raw : "",
-                question: resume ? resume.question : payload, tree: null, affairTouched: false };
+  ctx.typing = addTyping();
   state.chatCtx = ctx; // 暂停时要按当前轮次的状态决定「继续」入口与看板刷新
   const dropTyping = () => {
     if (ctx.typing) { ctx.typing.remove(); ctx.typing = null; }

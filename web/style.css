@@ -730,6 +730,8 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   #left-col { grid-area: left; overflow: hidden; position: relative; }
   /* 桌面端 body 是 overflow:hidden，这几个视图必须自己限定高度并内部滚动 */
   #parent-view, #growth-view, #memory-view { height: 100dvh; min-height: 0; }
+  /* 后台内容远高于一屏：整个视图自己滚，顶栏与分区条吸顶 */
+  #admin-view { height: 100dvh; overflow-y: auto; overscroll-behavior: contain; }
   .memory-body, #growth-evidence, #parent-inbox { min-height: 0; }
   /* 矮视口下登录卡片改内部滚动，避免顶部标题/底部按钮被裁掉 */
   #login-view { height: 100dvh; overflow-y: auto; }
@@ -1320,6 +1322,11 @@ body[data-theme="dark"] .md code {
 #msg-input::placeholder { color: var(--ink-dim); }
 #msg-input:focus { border-color: var(--bamboo); box-shadow: 0 0 0 3px rgba(16, 185, 129, .18); background: var(--card); }
 #msg-input.secret-on { border-color: var(--dom-aesthetics); box-shadow: 0 0 0 3px rgba(192, 132, 252, .2); }
+/* 右栏只有 ~400px：四个工具键 + 发送键会把输入框挤到只剩几个字宽，收紧间距与键径 */
+.inputbar { gap: 6px; padding: 10px 12px; }
+.inputbar .icon-btn { width: 34px; height: 34px; }
+.inputbar .icon-btn .ic { width: 16px; height: 16px; }
+#msg-input { padding: 10px 14px; }
 .btn-send {
   width: 42px; height: 42px; padding: 0; border-radius: 50%; flex: none;
   background: linear-gradient(135deg, #10b981, #059669); color: #ffffff;
@@ -1955,7 +1962,7 @@ body[data-theme="dark"] .btn-reject { color: #fb7185; background: rgba(251, 113,
   #main-view { padding-bottom: calc(var(--topbar-h) + var(--safe-b) + 18px); }
   /* 其余视图同样要给固定 tabbar 让出底部空间，
      否则 graph/logs（100dvh 钉底栏）与 parent/growth/memory（滚动到底）的内容会被 tabbar 盖住且吃掉点击 */
-  #graph-view, #logs-view, #parent-view, #growth-view, #memory-view {
+  #graph-view, #logs-view, #parent-view, #growth-view, #memory-view, #admin-view {
     padding-bottom: calc(var(--topbar-h) + var(--safe-b) + 18px);
   }
   #main-view .topbar { flex-wrap: wrap; height: auto; padding: 10px 12px; }
@@ -2074,7 +2081,15 @@ body[data-theme="dark"] .btn-reject { color: #fb7185; background: rgba(251, 113,
   max-width: 1180px; margin: 14px auto 40px; padding: 0 16px;
   display: flex; flex-direction: column; gap: 12px;
 }
+#admin-view { scrollbar-gutter: stable; }
+#admin-view > .topbar { position: sticky; top: 0; z-index: 5; }
 .admin-tabs { align-self: center; flex-wrap: wrap; }
+/* 测试结果/报错写在这里：吸顶，滚到页面底部点「试听」也看得到 */
+#admin-hint { position: sticky; top: calc(var(--topbar-h) + 8px); z-index: 4; }
+#admin-hint:not(:empty) {
+  align-self: center; padding: 6px 14px; border-radius: 999px;
+  background: var(--card); border: 1px solid var(--line-strong); box-shadow: var(--shadow-card);
+}
 .admin-pane { display: flex; flex-direction: column; gap: 12px; }
 .admin-pane.hidden { display: none; }
 .hint.bad { color: var(--bad); }
@@ -2100,9 +2115,10 @@ body[data-theme="dark"] .btn-reject { color: #fb7185; background: rgba(251, 113,
 }
 .kv-row + .kv-row { border-top: 1px solid var(--line); }
 .kv-label {
-  flex: none; width: 210px; display: flex; align-items: center; gap: 8px;
+  flex: none; width: 240px; display: flex; align-items: center; gap: 8px;
   font-size: 12px; color: var(--ink-2);
 }
+.kv-label .tag { white-space: nowrap; flex: none; }
 .kv-label code { font-family: var(--font-num); font-size: 11.5px; }
 .kv-input { flex: 1; display: flex; align-items: center; gap: 8px; min-width: 0; }
 .kv-input .text-input { font-size: 13px; padding: 8px 12px; border-radius: var(--r-sm); }

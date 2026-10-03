@@ -1,12 +1,17 @@
 """意图分类：闲聊直答 / 新事务 / 多任务拆解 / 事务进展 / 转达 / 讲懂知识点，并识别情绪。"""
 from __future__ import annotations
 
+import asyncio
 import re
 
 from . import llm, prompts
 
 _VALID_INTENTS = {"chat", "new_affair", "todo", "affair_update", "relay", "explain"}
 _VALID_MOODS = {"happy", "sad", "nervous", "normal"}
+
+# 分类是每条消息的第一跳，孩子在它返回前什么都看不到。留痕里 router 的 p90 是 6.8s、
+# 最慢 17s——超过这个预算就用关键词保底先往下走，别让整轮卡在"判断要不要办事"上。
+ROUTER_BUDGET_S = 8.0
 
 # LLM 不可用时的关键词保底
 _NEW_HINTS = ("准备", "规划", "安排", "要带", "带什么", "怎么去", "攻略", "行程", "报名了", "比赛要", "帮我查", "帮我做", "想学", "要不要",
@@ -63,14 +68,14 @@ async def classify(message: str, affairs_brief: str = "") -> dict:
         # 续写指令不需要分类：直接闲聊直答，省一次 LLM 调用，也不会误建事务
         return {"intent": "chat", "mood": "normal", "affair_id": None, "reason": "续写指令"}
     try:
-        data = await llm.complete_json(
+        data = await asyncio.wait_for(llm.complete_json(
             [{"role": "user", "content": prompts.ROUTER.format(
                 message=message,
                 affairs_brief=affairs_brief or "（目前没有正在跟进的事）",
             )}],
             max_tokens=500,
             caller="router",
-        )
+        ), ROUTER_BUDGET_S)
         intent = str(data.get("intent", "")).lower()
         mood = str(data.get("mood", "normal")).lower()
         if intent in ("chat", "new_affair") and looks_like_todos(message):

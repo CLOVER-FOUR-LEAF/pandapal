@@ -1205,12 +1205,16 @@ def _strip_images(msgs: list[dict]) -> list[dict]:
     return out
 
 
+def _is_checklist_heading(head: str) -> bool:
+    return any(k in head for k in ("携带", "清单", "要带", "准备什么", "物品", "带上", "装备"))
+
+
 def _make_checklist_from_card(card: dict) -> list[str]:
-    """从卡片里挑出可以勾选的条目（清单类板块）。"""
+    """从卡片里挑出可以勾选的条目（清单类板块，标题约定见 prompts.CARD_ACTION_RULES）。"""
     items = []
     for sec in card.get("sections", []):
         head = str(sec.get("heading", ""))
-        if any(k in head for k in ("携带", "清单", "要带", "准备什么", "物品")):
+        if _is_checklist_heading(head):
             items.extend(str(i) for i in sec.get("items", []))
     return items[:12]
 
@@ -1408,11 +1412,18 @@ async def _chat_stream(sess, raw_message: str, ctx: dict, resume: ResumeReq | No
                     await asyncio.to_thread(a_store.update, affair["id"], patch,
                                             actor="butler", note="执行链已存档")
                 await emit({"type": "phase", "phase": "synthesizing"})
-                card = await _card_with_fallback(
-                    sess.store, message, results=results, title=plan["title"],
-                    pairs=[(n["title"], results.get(n["id"], "")) for n in plan["nodes"]
-                           if statuses.get(n["id"]) != "error"],
-                    attach_ctx=_attach_digest(_file_store(sess), attachments))
+                ok_nodes = [n for n in plan["nodes"] if statuses.get(n["id"]) != "error"]
+                if not ok_nodes:
+                    # 一个环节都没跑成：拿一堆"查询失败"去汇总只会得到空洞的卡片，
+                    # 直接走单次直出（它不依赖节点结果）
+                    card = await _card_with_fallback(
+                        sess.store, message, use_synth=False, title=plan["title"],
+                        attach_ctx=_attach_digest(_file_store(sess), attachments))
+                else:
+                    card = await _card_with_fallback(
+                        sess.store, message, results=results, title=plan["title"],
+                        pairs=[(n["title"], results.get(n["id"], "")) for n in ok_nodes],
+                        attach_ctx=_attach_digest(_file_store(sess), attachments))
             else:
                 await emit({"type": "phase", "phase": "synthesizing"})
                 card = await _card_with_fallback(
@@ -1792,7 +1803,9 @@ async def _execute_actions(sess, a_store, affair: dict, card: dict, message: str
     # 提醒：从卡片里挑"提醒/注意"类的条目
     reminders = []
     for sec in card.get("sections", []):
-        if any(k in str(sec.get("heading", "")) for k in ("提醒", "注意", "健康", "准备")):
+        head = str(sec.get("heading", ""))
+        # "准备"曾在这里：会把"携带清单（准备什么）"整板当提醒加进去，和清单重复
+        if any(k in head for k in ("提醒", "注意", "健康")) and not _is_checklist_heading(head):
             reminders.extend(str(i) for i in sec.get("items", []))
     for text in reminders[:3]:
         to_run.append({"kind": "reminder", "text": text[:40]})

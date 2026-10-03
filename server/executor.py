@@ -11,6 +11,9 @@ Emit = Callable[[dict], Awaitable[None]]
 
 NODE_TIMEOUT_S = 75   # 单节点总时限：一个卡死的联网工具不能拖住整条链
 NODE_RETRIES = 1      # 瞬时失败（网络抖动/限流）重试次数；超时不重试，直接降级
+# 整条链的总时限：单节点 75s × 三层依赖就是近 4 分钟。节点 p90 实测 15s，
+# 90s 足够跑完 3 层；到点还没开始/没跑完的环节记为超时，交给汇总按"已查到的"出卡片。
+CHAIN_BUDGET_S = 90
 
 
 async def _run_llm_node(ctx: tuple[str, str], event: str, node: dict, results: dict) -> str:
@@ -59,6 +62,8 @@ async def run_plan(
     by_id = {n["id"]: n for n in nodes}
     # 活跃记忆块一次取齐、全节点共享：每个节点各读一遍全部 topic 文件纯属浪费
     ctx = await asyncio.to_thread(lambda: (store.child_name, store.active_block(event)))
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + CHAIN_BUDGET_S
 
     def _ancestors(node: dict) -> set[str]:
         """节点的全部上游依赖（传递闭包）——LLM 上下文只该看到祖先结果，
@@ -83,8 +88,11 @@ async def run_plan(
             text = ""
             for attempt in range(NODE_RETRIES + 1):
                 try:
+                    left = deadline - loop.time()
+                    if left <= 1:
+                        raise asyncio.TimeoutError()
                     text = await asyncio.wait_for(
-                        _run_node(ctx, store, event, node, upstream), NODE_TIMEOUT_S)
+                        _run_node(ctx, store, event, node, upstream), min(NODE_TIMEOUT_S, left))
                     break
                 except asyncio.TimeoutError:
                     raise
@@ -99,10 +107,11 @@ async def run_plan(
                 "status": "done", "detail": text[:400],
             })
         except Exception as e:  # noqa: BLE001 单节点失败不拖垮整链
-            reason = "超时" if isinstance(e, asyncio.TimeoutError) else str(e)
+            reason = "超时" if isinstance(e, asyncio.TimeoutError) else (str(e) or type(e).__name__)
             results[node["id"]] = f"（本环节查询失败：{reason}，按常识处理）"
             statuses[node["id"]] = "error"
-            await emit({"type": "node", "id": node["id"], "title": node["title"], "status": "error"})
+            await emit({"type": "node", "id": node["id"], "title": node["title"], "status": "error",
+                        "detail": f"没查成（{reason[:40]}），按常识处理"})
         finally:
             done_events[node["id"]].set()
 

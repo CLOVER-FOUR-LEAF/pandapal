@@ -11,6 +11,12 @@ from .store import bigrams
 VALID_TOOLS = tools.names() | {"llm"}
 
 
+MAX_NODES = 6
+# 规划整体时限：planner 实测 p90 8.3s、最慢 11.8s。超时就交给调用方走"单次直出卡片"，
+# 不让孩子对着"正在规划"干等到 LLM_TIMEOUT（90s）
+PLAN_BUDGET_S = 25.0
+
+
 class PlanError(RuntimeError):
     pass
 
@@ -19,6 +25,9 @@ def _validate(plan: dict) -> dict:
     nodes = plan.get("nodes")
     if not isinstance(nodes, list) or not nodes:
         raise PlanError("plan.nodes 为空")
+    # 提示词要求 3-5 个节点；超出的截掉（执行器按节点并发，失控的计划会把额度一次烧光）
+    if len(nodes) > MAX_NODES:
+        del nodes[MAX_NODES:]
     # 第一遍：规范化节点并收集全部 id（依赖可以指向任意节点，不限于先声明的）
     ids: set[str] = set()
     for i, n in enumerate(nodes):
@@ -31,7 +40,12 @@ def _validate(plan: dict) -> dict:
         n.setdefault("title", f"环节 {i + 1}")
         tool = n.get("tool") or "llm"
         if tool not in VALID_TOOLS:
-            raise PlanError(f"未知工具: {tool}")
+            # 模型偶尔编出不存在的工具名（"search""map"）。整份计划作废太浪费：
+            # 这一环降级成 llm 推导，其余真工具环节照跑
+            n.setdefault("args", {})
+            if isinstance(n["args"], dict):
+                n["args"].setdefault("task", str(n.get("title") or ""))
+            tool = "llm"
         n["tool"] = tool
         if not isinstance(n.get("args"), dict):
             n["args"] = {}
@@ -107,7 +121,7 @@ async def make_plan(store: MemoryStore, message: str, affairs_snapshot: dict | N
                 brief = "\n".join(f"- {r['title']}（{r.get('stage')}）" for r in rel[:5])
     name, mem = await asyncio.to_thread(lambda: (store.child_name, store.active_block(message)))
     try:
-        plan = await llm.complete_json(
+        plan = await asyncio.wait_for(llm.complete_json(
             [
                 {"role": "system", "content": "你是任务规划模块，只输出 JSON。"},
                 {"role": "user", "content": prompts.PLANNER.format(
@@ -122,7 +136,9 @@ async def make_plan(store: MemoryStore, message: str, affairs_snapshot: dict | N
             max_tokens=1200,  # 3-5 个节点的 JSON 足够。实测调小并不省时间：
                                # 瓶颈是模型推理本身，不是输出长度，保留上限只是兜底防跑飞
             caller="planner",
-        )
+        ), PLAN_BUDGET_S)
         return _validate(plan)
+    except asyncio.TimeoutError as e:
+        raise PlanError(f"规划超过 {PLAN_BUDGET_S:.0f}s") from e
     except Exception as e:
-        raise PlanError(str(e)) from e
+        raise PlanError(str(e) or type(e).__name__) from e

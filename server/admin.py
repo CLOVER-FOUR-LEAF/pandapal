@@ -129,8 +129,16 @@ def _settings_payload() -> dict:
             }
             if secret:
                 field["preview"] = _mask(value) if value else ""
+            elif isinstance(value, bool):
+                field["value"] = "1" if value else "0"
             else:
-                field["value"] = value
+                field["value"] = "" if value is None else str(value)
+            if key in _CHOICES:
+                field["choices"] = _CHOICES[key]
+            if key in _HELP:
+                field["help"] = _HELP[key]
+            if key in _DEFAULT_HINT:
+                field["placeholder"] = _DEFAULT_HINT[key]()
             fields.append(field)
         groups.append({"key": gkey, "title": title, "fields": fields})
     return {"groups": groups}
@@ -146,6 +154,29 @@ _SETTINGS_GROUPS = [
       "TTS_ENABLED", "TTS_DEFAULT_MODE", "TTS_DEFAULT_STYLE", "TTS_FORMAT",
       "TTS_MAX_CHARS", "TTS_CARD_MAX_CHARS"]),
 ]
+
+
+# 枚举型配置给下拉框，免得手敲出 "Design" "true" 这类服务端不认的值
+_CHOICES = {
+    "LLM_PROTOCOL": [["openai", "OpenAI 兼容"], ["anthropic", "Anthropic"]],
+    "LLM_REASONING_EFFORT": [["", "不传（非推理模型）"], ["low", "low"], ["high", "high"], ["max", "max"]],
+    "LLM_VISION": [["auto", "auto（先试，失败降级）"], ["on", "on（强制看图）"], ["off", "off（不带图）"]],
+    "TTS_ENABLED": [["1", "开启"], ["0", "关闭"]],
+    "TTS_DEFAULT_MODE": [["design", "design（音色设计）"], ["builtin", "builtin（内置音色）"]],
+    "TTS_FORMAT": [["mp3", "mp3"], ["wav", "wav"]],
+}
+_HELP = {
+    "TTS_API_KEY": "填了 Key 才会出声；孩子端右上角的喇叭随之出现",
+    "TTS_VOICE": "builtin 模式的内置音色：冰糖 / 茉莉 / 苏打 / 白桦",
+    "TTS_DEFAULT_STYLE": "design 模式下就是喂给音色设计模型的描述",
+}
+# 留空时实际会用的值：作为 placeholder 显示，管理员一眼看出"空着也能跑"
+_DEFAULT_HINT = {
+    "TTS_BASE_URL": lambda: f"留空 = {tts.DEF_BASE_URL}",
+    "TTS_MODEL": lambda: f"留空 = {tts.DEF_MODEL_BUILTIN}",
+    "TTS_MODEL_DESIGN": lambda: f"留空 = {tts.DEF_MODEL_DESIGN}",
+    "TTS_VOICE": lambda: f"留空 = {tts.DEF_VOICE}",
+}
 
 
 @router.get("/api/admin/settings")
@@ -167,9 +198,14 @@ async def api_admin_settings_put(request: Request, req: SettingsReq):
     bad = [k for k in list(req.set) + list(req.unset) if k not in config.SETTINGS_KEYS]
     if bad:
         raise HTTPException(400, f"不认识的配置项：{'、'.join(bad[:5])}")
-    proto = req.set.get("LLM_PROTOCOL")
-    if proto is not None and proto.strip().lower() not in ("openai", "anthropic", ""):
-        raise HTTPException(400, "LLM_PROTOCOL 只能是 openai 或 anthropic")
+    for key, value in req.set.items():
+        allowed = [c[0] for c in _CHOICES.get(key, [])]
+        if allowed and str(value).strip().lower() not in allowed + [""]:
+            raise HTTPException(400, f"{key} 只能是 {' / '.join(a for a in allowed if a)}")
+    for key in ("TTS_MAX_CHARS", "TTS_CARD_MAX_CHARS"):
+        v = str(req.set.get(key, "")).strip()
+        if v and not v.isdigit():
+            raise HTTPException(400, f"{key} 要填正整数")
 
     def _apply() -> dict:
         with store.write_lock(config.SETTINGS_PATH.parent):
@@ -188,6 +224,57 @@ async def api_admin_settings_put(request: Request, req: SettingsReq):
         return _settings_payload()
 
     return await asyncio.to_thread(_apply)
+
+
+@router.post("/api/admin/test/llm")
+async def api_admin_test_llm(request: Request):
+    """连通性自检：用当前生效配置发一句最短的请求，回耗时与报错原文。"""
+    _admin(request)
+    if not config.LLM_API_KEY:
+        return {"ok": False, "error": "还没配 LLM_API_KEY"}
+    import time
+    t0 = time.monotonic()
+    try:
+        text = await asyncio.wait_for(
+            llm.complete([{"role": "user", "content": "只回复两个字：在的"}],
+                         max_tokens=16, caller="admin_test"), timeout=30)
+    except Exception as e:  # noqa: BLE001 把原因原样给管理员看
+        return {"ok": False, "error": str(e)[:300], "ms": round((time.monotonic() - t0) * 1000)}
+    return {"ok": True, "reply": str(text)[:80], "model": config.LLM_MODEL,
+            "ms": round((time.monotonic() - t0) * 1000)}
+
+
+class TTSTestReq(BaseModel):
+    text: str = Field(default="", max_length=60)
+
+
+@router.post("/api/admin/test/tts")
+async def api_admin_test_tts(request: Request, req: TTSTestReq):
+    """试音：用当前后台配置合成一句，音频以 base64 直接回给后台播放。
+
+    不走孩子档案的 voice_cache（admin 不绑定档案），合成失败把上游原因带回来，
+    而不是像孩子端那样静默——后台就是来排查配置的。
+    """
+    _admin(request)
+    if not config.TTS_ENABLED:
+        return {"ok": False, "error": "TTS_ENABLED 是关闭状态"}
+    if not config.TTS_API_KEY.strip():
+        return {"ok": False, "error": "还没配 TTS_API_KEY"}
+    import base64
+    import time
+    text = tts.to_speech_text(req.text or config.TTS_PREVIEW_TEXT, 60)
+    model, body = tts.build_body(text, {"mode": config.TTS_DEFAULT_MODE})
+    body["model"] = model
+    t0 = time.monotonic()
+    try:
+        audio = await tts.synthesize(body, caller="admin_test")
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": str(e)[:300], "model": model,
+                "ms": round((time.monotonic() - t0) * 1000)}
+    fmt = tts._fmt()
+    return {"ok": True, "model": model, "format": fmt, "mime": tts.mime_for(f"x.{fmt}"),
+            "audio": base64.b64encode(audio).decode(), "bytes": len(audio),
+            "ms": round((time.monotonic() - t0) * 1000)}
 
 
 # ---------------------------------------------------------------- 用户管理

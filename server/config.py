@@ -112,6 +112,20 @@ SESSION_IDLE_S = float(os.getenv("PANDA_SESSION_IDLE", "1800"))
 
 SETTINGS_PATH = DATA_DIR / "settings.json"
 
+def _as_bool(v) -> bool:
+    if isinstance(v, bool):
+        return v
+    return str(v).strip().lower() not in ("0", "false", "off", "no", "")
+
+
+def _as_int(v, default: int) -> int:
+    try:
+        n = int(str(v).strip())
+    except (TypeError, ValueError):
+        return default
+    return n if n > 0 else default
+
+
 # 可在后台编辑的键 → （本模块属性名, 归一化函数, 是否密钥）。不在表里的键一律不收。
 SETTINGS_KEYS: dict[str, tuple[str, object, bool]] = {
     "LLM_PROTOCOL": ("LLM_PROTOCOL", lambda v: str(v).strip().lower(), False),
@@ -129,12 +143,13 @@ SETTINGS_KEYS: dict[str, tuple[str, object, bool]] = {
     "TTS_MODEL": ("TTS_MODEL", lambda v: str(v).strip(), False),
     "TTS_MODEL_DESIGN": ("TTS_MODEL_DESIGN", lambda v: str(v).strip(), False),
     "TTS_VOICE": ("TTS_VOICE", lambda v: str(v).strip(), False),
-    "TTS_ENABLED": ("TTS_ENABLED", lambda v: str(v).strip(), False),
+    # 开关必须归一成 bool：存成字符串 "0" 时 `if config.TTS_ENABLED` 永远为真，后台关不掉
+    "TTS_ENABLED": ("TTS_ENABLED", lambda v: _as_bool(v), False),
     "TTS_DEFAULT_MODE": ("TTS_DEFAULT_MODE", lambda v: str(v).strip().lower(), False),
     "TTS_DEFAULT_STYLE": ("TTS_DEFAULT_STYLE", lambda v: str(v).strip(), False),
     "TTS_FORMAT": ("TTS_FORMAT", lambda v: str(v).strip().lower(), False),
-    "TTS_MAX_CHARS": ("TTS_MAX_CHARS", lambda v: int(v) or 400, False),
-    "TTS_CARD_MAX_CHARS": ("TTS_CARD_MAX_CHARS", lambda v: int(v) or 120, False),
+    "TTS_MAX_CHARS": ("TTS_MAX_CHARS", lambda v: _as_int(v, 400), False),
+    "TTS_CARD_MAX_CHARS": ("TTS_CARD_MAX_CHARS", lambda v: _as_int(v, 120), False),
 }
 
 

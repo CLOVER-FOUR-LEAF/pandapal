@@ -338,6 +338,24 @@ async def _run(client: httpx.AsyncClient) -> None:
                    {"name": NAME, "index": 0, "done": True})
     record("checklist_404", r.status_code == 404, f"status={r.status_code}")
 
+    # 6b. 新建项目 / 删除历史：归档 → 清空 → 恢复 → 删除；家长无权
+    n0 = len((await get_json(client, f"/api/history{q}"))["history"])
+    r = await client.post(f"/api/history/new{q}")
+    record("history_new", r.status_code == 200 and bool(r.json().get("archived")) == (n0 > 0))
+    record("history_emptied", (await get_json(client, f"/api/history{q}"))["history"] == [])
+    arcs = (await get_json(client, f"/api/history/archives{q}"))["archives"]
+    record("history_archived", len(arcs) == (1 if n0 else 0), str(arcs)[:80])
+    if arcs:
+        r = await client.post(f"/api/history/archives/{arcs[0]['id']}/restore{q}")
+        record("history_restore", r.status_code == 200 and len(r.json()["history"]) == arcs[0]["count"])
+        hn = len(r.json()["history"])
+        r = await client.delete(f"/api/history{q}&index=0")
+        record("history_del_turn", r.status_code == 200 and len(r.json()["history"]) < hn)
+    r = await client.delete(f"/api/history{q}")
+    record("history_clear", r.status_code == 200 and r.json()["history"] == [])
+    r = await client.delete(f"/api/history/archives/not-valid{q}")
+    record("history_bad_id_400", r.status_code == 400)
+
     # 7. 家长只读：写事务/勾清单 → 403，看板读 → 200；收件箱决定权仍在
     r = await post(client, "/api/auth/login",
                    {"username": "豆豆妈", "password": "mama123"})
@@ -348,6 +366,8 @@ async def _run(client: httpx.AsyncClient) -> None:
     r = await post(client, "/api/checklist/nonexistent",
                    {"name": "小豆", "index": 0, "done": True})
     record("parent_checklist_403", r.status_code == 403, f"status={r.status_code}")
+    r = await client.delete(f"/api/history?name=小豆")
+    record("parent_history_clear_403", r.status_code == 403, f"status={r.status_code}")
     r = await post(client, "/api/affairs",
                    {"name": "小豆", "patch": {"title": "家长越权测试"}})
     record("parent_affairs_403", r.status_code == 403, f"status={r.status_code}")

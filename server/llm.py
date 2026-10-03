@@ -63,6 +63,16 @@ async def close_shared_clients() -> None:
 LOG_DIR = config.DATA_DIR / "logs"
 
 
+def _err_text(e: BaseException | None) -> str:
+    """异常 → 留痕文案。httpx 的超时/断连异常 str() 是空串，
+    之前 logs 页里一大片失败记录看不出原因，这里补上类名。"""
+    if e is None:
+        return ""
+    msg = str(e).strip()
+    name = type(e).__name__
+    return f"{name}: {msg}" if msg else name
+
+
 def log_call(caller: str, ok: bool, ms: float, err: str = "", tokens: int | None = None) -> None:
     """每次 LLM 调用留痕（评委可查 API 调用记录，证明真生成）。"""
     try:
@@ -318,7 +328,7 @@ async def complete(
     try:
         keys = _keys()
     except LLMError as e:
-        log_call(caller, False, 0, str(e))  # 没配 Key 的失败也留痕，logs 页能看到原因
+        log_call(caller, False, 0, _err_text(e))  # 没配 Key 的失败也留痕，logs 页能看到原因
         raise
     client = shared_client()
     toks = estimate_tokens(messages)  # 附图/长文本时日志里能看出这轮有多重
@@ -366,8 +376,8 @@ async def complete(
                 log_call(caller, False, (time.monotonic() - t0) * 1000, f"视觉被拒: {e}")
                 raise LLMVisionUnsupported(str(e)) from e
             last_err = e
-    log_call(caller, False, (time.monotonic() - t0) * 1000, str(last_err))
-    raise LLMError(f"LLM 调用失败: {last_err}")
+    log_call(caller, False, (time.monotonic() - t0) * 1000, _err_text(last_err))
+    raise LLMError(f"LLM 调用失败: {_err_text(last_err)}")
 
 
 async def stream(
@@ -387,7 +397,7 @@ async def stream(
     try:
         keys = _keys()
     except LLMError as e:
-        log_call(caller, False, 0, str(e))
+        log_call(caller, False, 0, _err_text(e))
         raise
     client = shared_client()
     toks = estimate_tokens(messages)
@@ -476,7 +486,7 @@ async def stream(
                     raise LLMVisionUnsupported(str(e)) from e
                 last_err = e
                 break
-    log_call(caller, False, (time.monotonic() - t0) * 1000, str(last_err))
+    log_call(caller, False, (time.monotonic() - t0) * 1000, _err_text(last_err))
     raise LLMError(f"LLM 流式调用失败: {last_err}")
 
 
