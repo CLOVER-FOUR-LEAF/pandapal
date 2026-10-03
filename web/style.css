@@ -20,6 +20,53 @@
      16 Toast / 动效 / 响应式 / 无障碍
    ========================================================================== */
 
+/* ---------------------------------------------------------------- 0 字体 */
+/* Anthropic 风格的替代配对（自托管，断网也生效）：
+   UI 与正文用 DM Sans——Styrene B（Anthropic 的 UI 字体）的自由替代，
+   几何人文无衬线；管家的话/品牌标题用 Source Serif 4——Tiempos/Copernicus
+   的自由替代。只带 latin 子集（共 ~316KB），中文字形按 unicode-range
+   逐字回落到系统字体栈，不拖首屏。 */
+@font-face {
+  font-family: "DM Sans";
+  font-style: normal;
+  font-weight: 300 700;
+  font-display: swap;
+  src: url("fonts/dm-sans-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC,
+    U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215,
+    U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "DM Sans";
+  font-style: normal;
+  font-weight: 300 700;
+  font-display: swap;
+  src: url("fonts/dm-sans-latin-ext.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304,
+    U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB,
+    U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "Source Serif 4";
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url("fonts/source-serif-4-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC,
+    U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215,
+    U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Source Serif 4";
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url("fonts/source-serif-4-latin-ext.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304,
+    U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB,
+    U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
 /* ---------------------------------------------------------------- 0 变量 */
 /* 夜色竹林（唯一主题）：温润墨玉夜空，无浅色模式 */
 :root {
@@ -87,11 +134,17 @@
   --r: 14px;
   --r-sm: 10px;
   --gap: 14px;
-  /* 拉丁/数字用系统无衬线（SF/Segoe 更利落），中文字形自动回落到
-     PingFang/鸿蒙/Noto/雅黑——逐字符回退不用声明中文在前 */
-  --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC",
+  /* 拉丁/数字用 DM Sans（Anthropic 的 Styrene 风格），中文字形自动回落到
+     PingFang/鸿蒙/Noto/雅黑——逐字符回退不用声明中文在前；
+     网络字体没加载出来时系统栈顶上（-apple-system/Segoe） */
+  --font: "DM Sans", -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC",
           "HarmonyOS Sans SC", "Noto Sans SC", "Microsoft YaHei",
           system-ui, "Segoe UI", Roboto, sans-serif;
+  /* 管家的话用衬线（Claude 把回复排成衬线正文，是 Anthropic 最显眼的格式特征）：
+     拉丁走 Source Serif 4，中文回落宋体系（macOS 宋体 / Windows 宋体 /
+     Linux Noto Serif），都没有就回落无衬线，绝不空字形 */
+  --font-serif: "Source Serif 4", "Songti SC", "STSong", "Noto Serif SC",
+                "Noto Serif CJK SC", "SimSun", Georgia, "Times New Roman", serif;
   --font-num: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
 
   --shadow-card: 0 4px 20px rgba(0, 0, 0, .35), 0 0 0 1px rgba(255, 255, 255, .03) inset;
@@ -522,6 +575,7 @@ button:disabled, .btn:disabled, .icon-btn:disabled, .chip:disabled {
 }
 .hero-kicker .ic { width: 15px; height: 15px; }
 .login-title {
+  font-family: var(--font-serif); /* 品牌标题用衬线，像 Anthropic 的编辑风大字 */
   font-size: clamp(34px, 4.4vw, 50px); font-weight: 800; letter-spacing: .06em; line-height: 1.15;
   background: linear-gradient(96deg, #8cecba, var(--bamboo) 40%, #d8f0c0 70%, var(--amber));
   -webkit-background-clip: text; background-clip: text; color: transparent;
@@ -1883,6 +1937,7 @@ button:disabled, .btn:disabled, .icon-btn:disabled, .chip:disabled {
   background: var(--card); border: 1px solid var(--line-strong); border-radius: var(--r);
 }
 
+
 /* --------------------------- 14 调用记录 */
 #logs-view { display: flex; flex-direction: column; gap: var(--gap); padding: var(--gap); height: 100dvh; }
 #logs-view .topbar { flex: none; }
@@ -1945,6 +2000,36 @@ button:disabled, .btn:disabled, .icon-btn:disabled, .chip:disabled {
 .daily-item:last-child { border-bottom: none; }
 .daily-date { flex: none; width: 86px; font-family: var(--font-num); font-size: 11px; color: var(--ink-dim); padding-top: 2px; }
 .daily-content { font-size: 13px; color: var(--ink-2); line-height: 1.7; white-space: pre-wrap; }
+
+/* --------------------------- 15.5 输出面排版：管家写的每一段都走衬线 */
+/* 「所有输出」= 管家写给人读的文字：对话回复、晨报、事务卡与详情抽屉、
+   传话筒/通知结果、收件箱、周报、记忆本、成长点评、梦想、方案卡与文稿。
+   UI 骨架（按钮/输入/徽标/计数/标签/提示）保持无衬线——读的字是衬线、
+   点的东西是几何无衬线，和 Anthropic 把 Claude 回复排成衬线是同一套分工。
+   这条块放在各组件规则之后：同特异性时稳压前面的声明（如 .memory-md）。 */
+.md,                                   /* 所有渲染出的 markdown（AI 回复/文稿/记忆本） */
+#briefing-card .panel-body,            /* 晨报 */
+#affair-board .panel-body,             /* 事务卡：标题/摘要/步骤 */
+.drawer-body,                          /* 事务详情 / 节点详情抽屉 */
+.relay-body, .relay-advice,            /* 传话筒 / 通知结果 / 周报建议条 */
+.inbox-title, .inbox-detail, .inbox-reply,
+.weekly-out,                           /* 周报整块（标题/进展/留意/夸夸） */
+.topic-name, .topic-body, .daily-item, /* 记忆本：主题 / 每日沉淀 / 梦想 */
+.growth-comment, .evidence-item,       /* 成长：点评 / 证据事实 */
+.card-title, .sec-items li,            /* 方案卡：标题 / 条目 */
+.dream-body,                           /* 梦想回复 */
+#panda-bubble {                        /* 熊猫气泡：管家开口说的那句话 */
+  font-family: var(--font-serif);
+}
+/* 上面这些容器里"不是给人读的"元素回到无衬线：控件、徽标、计数、提示 */
+:is(#briefing-card, #affair-board, #affair-detail, #node-drawer, #parent-view,
+    #memory-view, #growth-view, #chat, .dream-out, #panda-bubble)
+  :is(button, .btn, .chip, .node-pill, input, textarea, select, .empty-hint,
+      .stage-name, .owner-badge, .secret-tag, .relay-typing, .degraded-note,
+      .weekly-sec-head, .weekly-stat, .weekly-foot, .topic-rel, .inbox-status,
+      summary, .due-chip, .countdown, .progress-num, .reminder-pill) {
+  font-family: var(--font);
+}
 
 /* --------------------------- 16 Toast / 动效 / 响应式 */
 #toast-root { position: fixed; inset: 0; pointer-events: none; z-index: 90; }

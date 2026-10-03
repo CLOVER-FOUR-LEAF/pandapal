@@ -153,6 +153,34 @@ def test_wiring() -> None:
     record("merge_split_btn", 'data-act="split"' in js and "unmergePlanets" in js)
 
 
+def test_fonts() -> None:
+    """Anthropic 风格字体：自托管 @font-face + 双栈（UI 无衬线 / 管家的话衬线）。"""
+    css = read("style.css")
+    record("font_faces_declared", css.count("@font-face") == 4
+           and '"DM Sans"' in css and '"Source Serif 4"' in css)
+    files = sorted(p.name for p in (WEB / "fonts").glob("*.woff2"))
+    record("font_files_present", files == [
+        "dm-sans-latin-ext.woff2", "dm-sans-latin.woff2",
+        "source-serif-4-latin-ext.woff2", "source-serif-4-latin.woff2"], str(files))
+    record("font_files_nonempty", all((WEB / "fonts" / f).stat().st_size > 10000 for f in files))
+    record("font_stack_dm_sans", '--font: "DM Sans",' in css.replace("\n", " ").replace("  ", " "))
+    record("serif_stack_cjk_fallback", "--font-serif:" in css
+           and '"Songti SC"' in css and '"SimSun"' in css)
+    # 输出面统一块：管家写的每一段都走衬线（覆盖全部输出容器）
+    block = re.search(r"输出面排版.*?font-family: var\(--font-serif\);", css, re.S)
+    record("output_serif_block", bool(block))
+    for sel in (".md,", "#briefing-card .panel-body,", "#affair-board .panel-body,",
+                ".drawer-body,", ".relay-body", ".inbox-detail", ".weekly-out,",
+                ".topic-body", ".growth-comment", ".card-title", ".dream-body",
+                "#panda-bubble"):
+        record(f"serif_covers_{sel.split(',')[0].strip('.#')}", sel in css)
+    record("output_guard_sans", ":is(button, .btn, .chip" in css
+           and ".empty-hint," in css and "font-family: var(--font);" in css)
+    # 登录标题是品牌面，单独在组件规则里走衬线
+    record("serif_on_login-title",
+           bool(re.search(r"\.login-title\s*\{[^}]*font-family:\s*var\(--font-serif\)", css, re.S)))
+
+
 def test_parent_streaming() -> None:
     """家长端全面流式：转达/通知/周报/梦想四路都走 ?stream=1，且有在途序号保护。"""
     js, css = read("app.js"), read("style.css")
@@ -185,6 +213,7 @@ def main() -> int:
         test_braces_balanced()
         test_es_modules_parse()
         test_wiring()
+        test_fonts()
         test_parent_streaming()
         test_pause_state_hygiene()
     except Exception as e:  # noqa: BLE001
