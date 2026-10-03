@@ -836,11 +836,9 @@ async def stream(
     if vision_dead:
         raise LLMVisionUnsupported(str(last_err or "模型不支持视觉输入"))
     if last_err is not None and "流式响应为空" in str(last_err):
-        # 候选遍历到这里还是空手：留一次痕，并把"确有一个端点活着"的口径记在第一个候选上
-        log_call(caller, False, (time.monotonic() - (logged_at or time.monotonic())) * 1000,
-                 f"流式响应为空×{empties}", tokens=toks, cand=todo[0] if todo else None)
-        raise LLMError(
-            "大模型这次没吐出内容（端点活着但流是空的）——稍等一下再问一次，或换一个模型")
+        # 端点活着、流也走完了，就是一个字都没给：说人话，
+        # 别让孩子对着"流式调用失败"发愣（留痕在上面的候选循环里已经记过）
+        raise LLMError("大模型这次没吐出内容（端点活着但流是空的）——稍等一下再问一次，或换个模型")
     raise LLMError(f"LLM 流式调用失败: {_err_text(last_err) or '所有候选端点均被熔断'}")
 
 
