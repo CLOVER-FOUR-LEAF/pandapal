@@ -4059,28 +4059,151 @@ async function renderChips(chips) {
 const MIC_ERR_TEXT = {
   "not-allowed": "麦克风没授权——在浏览器（或系统设置）里允许录音再试",
   "service-not-allowed": "语音识别被系统禁用了（macOS 检查「Siri 与听写」）",
-  "network": "语音识别连不上：Chrome 走 Google 语音服务，国内网络用不了（换 Safari 或 Edge）",
+  "network": "浏览器内置识别连不上（Chrome 走 Google 语音服务，国内不可用）",
   "no-speech": "没听到声音，凑近点再说一次？",
   "audio-capture": "找不到能用的麦克风",
   "language-not-supported": "这个浏览器不支持中文语音识别",
 };
+// 报这些错说明这台浏览器的识别服务链路是死的（不是孩子没说好），本页内直接
+// 换服务端识别，不再白试
+const MIC_SR_DEAD = new Set(["network", "service-not-allowed", "language-not-supported"]);
+const MIC_MAX_MS = 60000;   // 单次录音硬顶：防一直挂着录
 
+// Float32 PCM 帧 → 16bit 单声道 WAV：MiMo ASR 只收 mp3/wav，
+// 用 Web Audio 拿到的原始 PCM 在浏览器里直接封 wav，服务端不用装 ffmpeg。
+function pcmToWav(chunks, rate) {
+  let n = 0;
+  for (const c of chunks) n += c.length;
+  const buf = new ArrayBuffer(44 + n * 2);
+  const v = new DataView(buf);
+  const w = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  w(0, "RIFF"); v.setUint32(4, 36 + n * 2, true); w(8, "WAVE");
+  w(12, "fmt "); v.setUint32(16, 16, true); v.setUint16(20, 1, true);
+  v.setUint16(22, 1, true); v.setUint32(24, rate, true);
+  v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  w(36, "data"); v.setUint32(40, n * 2, true);
+  let off = 44;
+  for (const c of chunks) {
+    for (let i = 0; i < c.length; i++, off += 2) {
+      const s = Math.max(-1, Math.min(1, c[i]));
+      v.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+    }
+  }
+  return buf;
+}
+
+/* 语音识别两条路：
+ *   A. 浏览器原生 SpeechRecognition —— 免上传、逐字上屏；但 Chrome 走 Google
+ *      服务器（国内必报 network）、Firefox 根本没有这个 API。
+ *   B. 服务端 ASR —— getUserMedia 录 PCM → WAV → POST /api/stt（MiMo），
+ *      任何支持 getUserMedia 的浏览器都能用。
+ * 策略：有 SR 先试 SR；SR 报服务级错误（MIC_SR_DEAD）说明这条路在这台浏览器
+ * 上就是死的——当场落到 B，不让孩子白点一次。权限拒绝（not-allowed）不落：
+ * B 走同一个麦克风权限，一样被拒。
+ * 授权框的事：SR.start() 不保证弹标准授权（Chrome 可能直接 network 挂掉），
+ * B 路径的 getUserMedia 一定会弹——所以走到 B 的人一定能看见权限申请。 */
 function setupMic() {
   const btn = $("#mic-btn");
+  if (!btn) return;
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SR || !btn) {
-    if (btn) btn.remove();
-    return;
-  }
+  const canRec = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+  if (!SR && !canRec) { btn.remove(); return; }
   btn.classList.remove("hidden");
+
   let recording = false;
-  let cur = null;   // 当前活跃实例；旧实例晚到的 onend/onerror 不许碰新会话的状态
-  const stop = () => {
+  let starting = false;   // getUserMedia 等授权期间的占位：授权框开着时别重复起
+  let srDead = false;     // SR 报过服务级错误，本页会话内不再白试
+  let cur = null;         // 活跃识别器/录音器；旧实例晚到的回调不许碰新会话
+  const uiStop = () => {
     recording = false;
     btn.classList.remove("recording");
     btn.setAttribute("aria-pressed", "false");
   };
-  const start = () => {
+  const uiStart = () => {
+    recording = true;
+    btn.classList.add("recording");
+    btn.setAttribute("aria-pressed", "true");
+  };
+  const setText = (text) => {
+    const input = $("#msg-input");
+    if (input) {
+      input.value = text;
+      input.focus();
+    }
+  };
+
+  // ---- 路径 B：录 PCM → WAV → 服务端识别 -------------------------------
+  const startServer = async () => {
+    if (!canRec) { toast("这个浏览器录不了音"); return; }
+    starting = true;
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (e) {
+      starting = false;
+      const name = e && e.name;
+      toast(name === "NotAllowedError" || name === "SecurityError" ? MIC_ERR_TEXT["not-allowed"]
+            : name === "NotFoundError" ? MIC_ERR_TEXT["audio-capture"]
+            : `麦克风起不来（${name || "未知原因"}）`);
+      return;
+    }
+    let ctx = null;
+    try {
+      // 直接要 16kHz：识别用不上更高的，wav 体积也小一半；不认此参的浏览器回落默认
+      const AC = window.AudioContext || window.webkitAudioContext;
+      try { ctx = new AC({ sampleRate: 16000 }); } catch { ctx = new AC(); }
+    } catch { /* 没有 Web Audio */ }
+    if (!ctx) {
+      starting = false;
+      stream.getTracks().forEach((t) => t.stop());
+      toast("这个浏览器录不了音");
+      return;
+    }
+    const src = ctx.createMediaStreamSource(stream);
+    const proc = ctx.createScriptProcessor(4096, 1, 1);
+    const chunks = [];
+    proc.onaudioprocess = (e) => chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+    src.connect(proc);
+    proc.connect(ctx.destination);   // 有的浏览器不挂 destination 就不回调
+    const teardown = () => {
+      try { proc.onaudioprocess = null; proc.disconnect(); src.disconnect(); } catch { /* 已断 */ }
+      stream.getTracks().forEach((t) => t.stop());
+      ctx.close().catch(() => {});
+    };
+    const rec = {
+      _aborted: false,
+      async stop() {
+        if (this._aborted) return;   // abort() 后晚到的 stop()：丢弃不转写
+        teardown();
+        const wav = pcmToWav(chunks, ctx.sampleRate);
+        toast("识别中…");
+        try {
+          const fd = new FormData();
+          fd.append("file", new Blob([wav], { type: "audio/wav" }), "mic.wav");
+          const r = await api(`/api/stt?${q(state.name || "")}`, { method: "POST", body: fd });
+          const d = await r.json().catch(() => ({}));
+          if (d.text) setText(d.text);
+          else toast("没听清，再说一次？");
+        } catch (e) {
+          toast(e.message || "识别失败，稍后再试");
+        }
+      },
+      abort() {   // 发送/退出登录：丢弃不转写，顺手清掉录音态
+        this._aborted = true;
+        teardown();
+        if (cur === rec) cur = null;
+        uiStop();
+      },
+    };
+    cur = rec;
+    micRec = rec;
+    starting = false;
+    uiStart();
+    setTimeout(() => { if (cur === rec && recording) btn.click(); }, MIC_MAX_MS);
+  };
+
+  // ---- 路径 A：浏览器原生 SpeechRecognition ----------------------------
+  const startSR = () => {
     // 每次都起新实例：识别器出错/中止后可能停在"已启动"的内部状态，
     // 拿同一个对象再 start() 会同步抛 InvalidStateError——"点了没反应"的来源之一。
     const rec = new SR();
@@ -4089,27 +4212,53 @@ function setupMic() {
     rec.onresult = (e) => {
       let text = "";
       for (const r of e.results) text += r[0].transcript;
-      const input = $("#msg-input");
-      if (input) input.value = text;
+      setText(text);
     };
-    rec.onend = () => { if (cur === rec) { cur = null; stop(); } };
+    rec.onend = () => { if (cur === rec) { cur = null; uiStop(); } };
     rec.onerror = (e) => {
       if (cur !== rec) return;
       cur = null;
-      stop();
-      const msg = MIC_ERR_TEXT[e && e.error];
-      if (msg) toast(msg);  // aborted / bad-grammar 不在表里：主动收尾，不算错
+      uiStop();
+      const code = e && e.error;
+      const msg = MIC_ERR_TEXT[code];
+      if (MIC_SR_DEAD.has(code)) {
+        // 内置识别服务是死的（Chrome 国内必报 network）：这次点击别浪费，
+        // 当场换成服务端识别接着录
+        srDead = true;
+        toast(`${msg}——改用管家服务端识别`);
+        startServer();
+      } else if (msg) {
+        toast(msg);  // aborted / bad-grammar 不在表里：主动收尾，不算错
+      }
     };
     cur = rec;
     micRec = rec;         // 全局引用：发送/退出登录时按得住（见 resetComposer）
-    rec.start();
+    try {
+      rec.start();
+    } catch {
+      // start() 同步抛（实例状态坏）→ 同样按"SR 不可用"处理，落服务端识别
+      cur = null;
+      uiStop();
+      srDead = true;
+      startServer();
+    }
   };
-  btn.onclick = () => {
-    if (recording) { stop(); cur?.stop(); return; }  // 先清 UI 再 stop，识别器卡住时按钮也不一直红着
-    recording = true;
-    btn.classList.add("recording");
-    btn.setAttribute("aria-pressed", "true");
-    try { start(); } catch { stop(); toast("语音识别起不来，换个浏览器试试"); }
+
+  btn.onclick = async () => {
+    if (starting) return;
+    if (recording) {
+      const c = cur;
+      cur = null;
+      uiStop();           // 先清 UI 再停，识别器卡住时按钮也不一直红着
+      if (c) { try { await c.stop(); } catch { /* 停不下就算 */ } }
+      return;
+    }
+    if (SR && !srDead) {
+      uiStart();
+      startSR();
+    } else {
+      await startServer();
+    }
   };
 }
 

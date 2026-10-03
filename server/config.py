@@ -79,6 +79,9 @@ TTS_DEFAULT_STYLE = os.getenv("TTS_DEFAULT_STYLE", "") or (
     "像刚下课后跟熟悉的小朋友说话。语速稍快一点，语气轻快、亲切、有一点雀跃，"
     "但不撒娇也不做作。咬字清晰，句尾自然收住，不要拖长音。")
 TTS_DEFAULT_TAGS = os.getenv("TTS_DEFAULT_TAGS", "")
+# 语音识别模型（麦克风走服务端兜底时用）：与合成同一端点同一把 Key。
+# 留空回落 stt.DEF_MODEL_ASR（mimo-v2.5-asr）。
+TTS_MODEL_ASR = os.getenv("TTS_MODEL_ASR", "")
 # 输出容器：mp3 体积约为 wav 的 1/10（24kHz 单声道 wav 每秒 48KB），本地场景够用；
 # 真遇到某个浏览器解不了，填 wav 即可（官方 API 的默认值）。
 TTS_FORMAT = os.getenv("TTS_FORMAT", "mp3").lower()
@@ -171,6 +174,7 @@ SETTINGS_KEYS: dict[str, tuple[str, object, bool]] = {
     "TTS_BASE_URL": ("TTS_BASE_URL", lambda v: str(v).strip().rstrip("/"), False),
     "TTS_MODEL": ("TTS_MODEL", lambda v: str(v).strip(), False),
     "TTS_MODEL_DESIGN": ("TTS_MODEL_DESIGN", lambda v: str(v).strip(), False),
+    "TTS_MODEL_ASR": ("TTS_MODEL_ASR", lambda v: str(v).strip(), False),
     "TTS_VOICE": ("TTS_VOICE", lambda v: str(v).strip(), False),
     # 开关必须归一成 bool：存成字符串 "0" 时 `if config.TTS_ENABLED` 永远为真，后台关不掉
     "TTS_ENABLED": ("TTS_ENABLED", lambda v: _as_bool(v), False),

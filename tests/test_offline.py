@@ -36,7 +36,7 @@ for _m in [m for m in sys.modules if m == "server" or m.startswith("server.")]:
 
 import httpx  # noqa: E402
 
-from server import config, llm, planner, tools  # noqa: E402
+from server import config, llm, planner, stt, tools  # noqa: E402
 from server import executor, main as _main, sessions as _sess_mod  # noqa: E402
 from server.main import app  # noqa: E402
 
@@ -493,7 +493,46 @@ async def _run(client: httpx.AsyncClient) -> None:
            f"codes={codes.count(200)}x200 tail={codes[-1]}")
     client.headers.pop("Authorization", None)
 
-    # 9. executor 祖先作用域：并行分支的产物不掺进别的 LLM 节点的上下文
+    # 9. 回复语音不丢：suggest/memory 先入队时 voice 事件也必须下发。
+    # 回归 _chat_settle 的收口——之前按"取两个元素"数（for _ in range(2)），
+    # TTS 要几秒才到，语音事件几乎总排在结束标记之后被丢（试音有声、回复没声）。
+    r = await post(client, "/api/auth/login",
+                   {"username": "admin", "password": "admin123"})
+    client.headers["Authorization"] = f"Bearer {r.json()['token']}"
+    real_speak_event = _main._speak_event
+
+    async def fake_speak_event(*a, **k):
+        await asyncio.sleep(0.05)   # 保证落在 suggest/memory 之后：复现丢包场景
+        return {"url": "/api/voice/x.mp3", "text": "离线语音", "format": "mp3"}
+
+    _main._speak_event = fake_speak_event
+    try:
+        evs = await post_sse(client, "/api/chat",
+                             {"name": NAME, "message": "再说一次你好"})
+    finally:
+        _main._speak_event = real_speak_event
+    record("voice_event_not_dropped", "voice" in _types(evs), f"types={_types(evs)}")
+
+    # 10. /api/stt：服务端语音识别兜底（Chrome 国内 / Firefox 走这条）
+    real_avail, real_tr = stt.available, stt.transcribe
+    stt.available = lambda: True
+
+    async def fake_transcribe(data, mime, **kw):
+        return "识别出的话"
+
+    stt.transcribe = fake_transcribe
+    try:
+        r = await client.post(f"/api/stt{q}",
+                              files={"file": ("mic.wav", b"RIFFfake", "audio/wav")})
+        record("stt_endpoint", r.status_code == 200 and r.json().get("text") == "识别出的话",
+               f"status={r.status_code}")
+    finally:
+        stt.available, stt.transcribe = real_avail, real_tr
+    r = await client.post(f"/api/stt{q}",
+                          files={"file": ("mic.wav", b"x", "audio/wav")})
+    record("stt_no_key_503", r.status_code == 503, f"status={r.status_code}")
+
+    # 11. executor 祖先作用域：并行分支的产物不掺进别的 LLM 节点的上下文
     sess = await _sess_mod.login(NAME)
     seen: dict[str, str] = {}
 
