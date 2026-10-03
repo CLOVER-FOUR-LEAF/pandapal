@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- PandaButler 记忆与隐私边界图（与代码同步维护：server/memory|graph|family 变更时更新） -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1060 700" font-family="'PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0e1a1f"/>
+      <stop offset="1" stop-color="#15262b"/>
+    </linearGradient>
+    <marker id="ah" markerWidth="9" markerHeight="9" refX="7.5" refY="4.5" orient="auto">
+      <path d="M0,0 L9,4.5 L0,9 z" fill="#4fbf7f"/>
+    </marker>
+    <marker id="ah-orange" markerWidth="9" markerHeight="9" refX="7.5" refY="4.5" orient="auto">
+      <path d="M0,0 L9,4.5 L0,9 z" fill="#ffb347"/>
+    </marker>
+    <style>
+      .t    { font-size: 15px;   fill: #eaf4ee; font-weight: 600; }
+      .t2   { font-size: 12.5px; fill: #b9e3c8; font-weight: 600; }
+      .s    { font-size: 11px;   fill: #93ab9f; }
+      .note { font-size: 11px;   fill: #7f978d; }
+      .arr  { stroke: #4fbf7f; stroke-width: 1.6; fill: none; marker-end: url(#ah); }
+      .arrm { stroke: #ffb347; stroke-width: 1.6; fill: none; marker-end: url(#ah-orange); }
+    </style>
+  </defs>
+  <rect width="1060" height="700" fill="url(#bg)"/>
+
+  <text x="24" y="34" class="t" font-size="17">PandaButler · 记忆与隐私边界</text>
+  <text x="1036" y="34" class="note" text-anchor="end">悄悄话不泄露，不是过滤，是结构 —— 没有任何代码路径把它读进家长侧</text>
+
+  <!-- ============ 左：写入 ============ -->
+  <rect x="24" y="56" width="496" height="380" rx="14" fill="#132128" stroke="#233c3a" stroke-width="1.5"/>
+  <text x="44" y="82" class="t">记忆怎么长（写入）</text>
+
+  <rect x="44" y="100" width="200" height="50" rx="10" fill="#182b31" stroke="#2c4a44" stroke-width="1.2"/>
+  <text x="144" y="121" class="t2" text-anchor="middle">孩子对话 / 事务推进</text>
+  <text x="144" y="139" class="s" text-anchor="middle">每轮结束后</text>
+  <path class="arr" d="M144 150 L144 168"/>
+
+  <rect x="44" y="168" width="200" height="50" rx="10" fill="#1c3138" stroke="#35594e" stroke-width="1.2"/>
+  <text x="144" y="189" class="t2" text-anchor="middle">LLM 结构化抽取</text>
+  <text x="144" y="207" class="s" text-anchor="middle">节点 / 边 / 主题 / 日记</text>
+
+  <rect x="264" y="168" width="236" height="50" rx="10" fill="#2a2027" stroke="#5a4148" stroke-width="1.2"/>
+  <text x="382" y="189" class="t2" text-anchor="middle" fill="#f0b8a8">悄悄话（[[secret]] 前缀）</text>
+  <text x="382" y="207" class="s" text-anchor="middle">只进图谱 private 节点，不落文件层</text>
+
+  <path class="arr" d="M120 218 C 120 228, 110 228, 110 240"/>
+  <path class="arr" d="M160 218 C 170 228, 200 228, 210 240"/>
+  <path class="arrm" d="M382 218 L382 240"/>
+
+  <rect x="44" y="240" width="200" height="118" rx="10" fill="#182b31" stroke="#2c4a44" stroke-width="1.2"/>
+  <text x="144" y="262" class="t2" text-anchor="middle">文件层 · 人可读</text>
+  <text x="144" y="282" class="s" text-anchor="middle">MEMORY.md 长期记忆</text>
+  <text x="144" y="300" class="s" text-anchor="middle">topics/*.md 主题</text>
+  <text x="144" y="318" class="s" text-anchor="middle">daily/*.md 每日沉淀</text>
+  <text x="144" y="340" class="note" text-anchor="middle">悄悄话只写占位行</text>
+
+  <rect x="264" y="240" width="236" height="118" rx="10" fill="#182b31" stroke="#2c4a44" stroke-width="1.2"/>
+  <text x="382" y="262" class="t2" text-anchor="middle">图谱层 · graph.json</text>
+  <text x="382" y="282" class="s" text-anchor="middle">节点 / 边 · 五领域（德智体美劳）</text>
+  <text x="382" y="300" class="s" text-anchor="middle">时间线 first_seen / last_seen</text>
+  <text x="382" y="318" class="s" text-anchor="middle">private 节点 = 悄悄话的唯一去处</text>
+  <text x="382" y="340" class="note" text-anchor="middle">数据即文件，可整份拷走</text>
+
+  <rect x="44" y="374" width="456" height="48" rx="10" fill="#16262c" stroke="#2c4a44" stroke-width="1.2"/>
+  <text x="60" y="394" class="t2">Dreaming（每天一次 · 不调 LLM）</text>
+  <text x="60" y="412" class="s">daily 里跨天重复的事实晋升进 MEMORY.md，标 [梦] 出处可查 —— 记忆会生长</text>
+
+  <!-- ============ 右：读取 ============ -->
+  <rect x="540" y="56" width="496" height="380" rx="14" fill="#132128" stroke="#233c3a" stroke-width="1.5"/>
+  <text x="560" y="82" class="t">记忆怎么用（读取与过滤）</text>
+
+  <rect x="560" y="100" width="456" height="116" rx="10" fill="#182b31" stroke="#2c4a44" stroke-width="1.2"/>
+  <text x="576" y="122" class="t2">三个注入出口 · 统一围栏</text>
+  <text x="576" y="142" class="s">active_block：活跃关注点块（注意力门控：新近常驻、相关排前）</text>
+  <text x="576" y="160" class="s">recall：bigram 命中 + 沿边一跳（对话里“想起了”的节点）</text>
+  <text x="576" y="178" class="s">brief_block：事务简报（家长 / 老师场景也走这里）</text>
+  <text x="576" y="200" class="note">全部包 &lt;memory_data&gt; 围栏：数据不是指令，标签中和防越狱</text>
+
+  <rect x="560" y="232" width="456" height="116" rx="10" fill="#182b31" stroke="#2c4a44" stroke-width="1.2"/>
+  <text x="576" y="254" class="t2">视角过滤（服务端强制，不是 UI 隐藏）</text>
+  <text x="576" y="274" class="s">孩子视角：完整档案（含悄悄话）</text>
+  <text x="576" y="292" class="s">家长视角：private 节点在构造上剔除，只报“另有 N 条悄悄话，未计入”</text>
+  <text x="576" y="310" class="s">导出：整份档案只给孩子本人（家长账号 403）</text>
+  <text x="576" y="332" class="note">周报 / 通知落地同样只取图谱公开层</text>
+
+  <rect x="560" y="364" width="456" height="58" rx="10" fill="#1a2f35" stroke="#33574f" stroke-width="1.2"/>
+  <text x="576" y="386" class="t2">隐私即护城河</text>
+  <text x="576" y="406" class="s">孩子敢说真话 → 记忆才真 → 建议才准 → 家长续费；边界是规则，不是承诺</text>
+
+  <!-- ============ 下：三层权限膜 ============ -->
+  <rect x="24" y="456" width="1012" height="158" rx="14" fill="#132128" stroke="#233c3a" stroke-width="1.5"/>
+  <text x="44" y="482" class="t">三层权限膜（受雇于家长 · 服务于孩子 · 对家庭整体利益负责）</text>
+
+  <rect x="44" y="498" width="304" height="72" rx="10" fill="#182b31" stroke="#2c4a44" stroke-width="1.2"/>
+  <text x="196" y="520" class="t2" text-anchor="middle">事务层 · 三方透明</text>
+  <text x="196" y="540" class="s" text-anchor="middle">行程、花钱、报名 → 家长收件箱审批</text>
+  <text x="196" y="558" class="s" text-anchor="middle">家长有决定权</text>
+
+  <rect x="378" y="498" width="304" height="72" rx="10" fill="#182b31" stroke="#2c4a44" stroke-width="1.2"/>
+  <text x="530" y="520" class="t2" text-anchor="middle">陪伴层 · 只对孩子</text>
+  <text x="530" y="540" class="s" text-anchor="middle">悄悄话、心事 → 家长只看到条数</text>
+  <text x="530" y="558" class="s" text-anchor="middle">管家替孩子保密</text>
+
+  <rect x="712" y="498" width="304" height="72" rx="10" fill="#2a2027" stroke="#5a4148" stroke-width="1.2"/>
+  <text x="864" y="520" class="t2" text-anchor="middle" fill="#f0b8a8">安全层 · 唯一刺破膜</text>
+  <text x="864" y="540" class="s" text-anchor="middle">自伤 / 欺凌等安全信号</text>
+  <text x="864" y="558" class="s" text-anchor="middle">按明确政策升级给家长</text>
+
+  <text x="44" y="596" class="note">测试断言（tests/test_family.py）：悄悄话原文不进任何周报 / 通知 prompt；图谱家长视角导出 leaked_private = 0（tests/test_api.py 实测）</text>
+
+  <!-- ============ 尾注 ============ -->
+  <rect x="24" y="630" width="1012" height="46" rx="12" fill="#16262c" stroke="#2c4a44" stroke-width="1.2"/>
+  <text x="530" y="650" class="s" text-anchor="middle">记忆是孩子的档案，不是平台的资产：数据即文件、可整份导出 —— 最好的管家，是孩子长大后把它当成一本童年备忘录。</text>
+  <text x="530" y="668" class="note" text-anchor="middle">评委可现场验证：家长账号访问孩子图谱 / 导出接口，一律 403；断网时 AI 如实停答，档案照常可翻</text>
+</svg>

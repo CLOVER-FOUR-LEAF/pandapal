@@ -1,72 +1,125 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 520" font-family="-apple-system, 'PingFang SC', sans-serif">
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- PandaButler Agent 工作流图（与代码同步维护：server/router|planner|executor|synth 变更时更新） -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1060 890" font-family="'PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif">
   <defs>
-    <style>
-      .lbl { font-size: 13px; fill: #3a3128; font-weight: 600; }
-      .sub { font-size: 11px; fill: #8a7a63; }
-      .arr { stroke: #b0977a; stroke-width: 1.8; fill: none; marker-end: url(#ah); }
-      .dash { stroke-dasharray: 5 4; }
-    </style>
-    <marker id="ah" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
-      <path d="M0,0 L8,4 L0,8 z" fill="#b0977a"/>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0e1a1f"/>
+      <stop offset="1" stop-color="#15262b"/>
+    </linearGradient>
+    <marker id="ah" markerWidth="9" markerHeight="9" refX="7.5" refY="4.5" orient="auto">
+      <path d="M0,0 L9,4.5 L0,9 z" fill="#4fbf7f"/>
     </marker>
+    <marker id="ah-orange" markerWidth="9" markerHeight="9" refX="7.5" refY="4.5" orient="auto">
+      <path d="M0,0 L9,4.5 L0,9 z" fill="#ffb347"/>
+    </marker>
+    <style>
+      .t    { font-size: 15px;   fill: #eaf4ee; font-weight: 600; }
+      .t2   { font-size: 12.5px; fill: #b9e3c8; font-weight: 600; }
+      .s    { font-size: 11px;   fill: #93ab9f; }
+      .chip { font-size: 11px;   fill: #cfe3d8; }
+      .note { font-size: 11px;   fill: #7f978d; }
+      .arr  { stroke: #4fbf7f; stroke-width: 1.6; fill: none; marker-end: url(#ah); }
+      .arrm { stroke: #ffb347; stroke-width: 1.6; fill: none; marker-end: url(#ah-orange); }
+    </style>
   </defs>
-  <rect width="900" height="520" fill="#fdf6ec"/>
+  <rect width="1060" height="890" fill="url(#bg)"/>
 
-  <!-- 入口 -->
-  <rect x="50" y="40" width="180" height="56" rx="12" fill="#ffffff" stroke="#e8dcc8" stroke-width="1.5"/>
-  <text x="140" y="64" text-anchor="middle" class="lbl">孩子消息</text>
-  <text x="140" y="82" text-anchor="middle" class="sub">POST /api/chat</text>
+  <text x="24" y="34" class="t" font-size="17">PandaButler · Agent 工作流</text>
+  <text x="1036" y="34" class="note" text-anchor="end">一条消息的完整旅程：分类 → 规划 → 执行 → 卡片 → 沉淀</text>
 
-  <!-- 记忆注入 -->
-  <rect x="300" y="30" width="260" height="76" rx="12" fill="#e8eefb" stroke="#cfd9ee" stroke-width="1.5"/>
-  <text x="430" y="54" text-anchor="middle" class="lbl">轮前记忆注入</text>
-  <text x="430" y="72" text-anchor="middle" class="sub">人设 + 活跃关注点块（active 全量）</text>
-  <text x="430" y="90" text-anchor="middle" class="sub">+ 主题检索 + 历史尾部</text>
+  <!-- 1 消息 -->
+  <rect x="400" y="52" width="260" height="46" rx="11" fill="#182b31" stroke="#2c4a44" stroke-width="1.2"/>
+  <text x="530" y="73" class="t2" text-anchor="middle">孩子消息</text>
+  <text x="530" y="90" class="s" text-anchor="middle">POST /api/chat（SSE 流）</text>
+  <path class="arr" d="M530 98 L530 114"/>
 
-  <!-- 分类 -->
-  <polygon points="140,150 230,190 140,230 50,190" fill="#fff3dd" stroke="#e8dcc8" stroke-width="1.5"/>
-  <text x="140" y="186" text-anchor="middle" class="lbl">router</text>
-  <text x="140" y="203" text-anchor="middle" class="sub">plan / chat</text>
+  <!-- 2 轮前注入 -->
+  <rect x="270" y="114" width="520" height="64" rx="11" fill="#1a2f35" stroke="#33574f" stroke-width="1.2"/>
+  <text x="530" y="136" class="t2" text-anchor="middle">轮前记忆注入（每轮必做）</text>
+  <text x="530" y="154" class="s" text-anchor="middle">人设 + 活跃关注点块（注意力门控：新近常驻、相关排前）+ 历史尾部</text>
+  <text x="530" y="170" class="s" text-anchor="middle">+ 主题检索（bigram 命中 + 沿边一跳）· 统一包 &lt;memory_data&gt; 围栏（数据不是指令）</text>
+  <path class="arr" d="M530 178 L530 196"/>
 
-  <!-- chat 路径 -->
-  <rect x="40" y="290" width="200" height="60" rx="12" fill="#ffffff" stroke="#e8dcc8" stroke-width="1.5"/>
-  <text x="140" y="315" text-anchor="middle" class="lbl">闲聊通道</text>
-  <text x="140" y="333" text-anchor="middle" class="sub">LLM 流式回复 → token SSE</text>
+  <!-- 3 FastTriage 菱形 -->
+  <polygon points="530,196 660,232 530,268 400,232" fill="#24343a" stroke="#3f6b5c" stroke-width="1.4"/>
+  <text x="530" y="229" class="chip" text-anchor="middle" font-weight="600">FastTriage</text>
+  <text x="530" y="246" class="note" text-anchor="middle">零信号短闲聊</text>
+  <path class="arr" d="M400 232 L330 232"/>
 
-  <!-- plan 路径 -->
-  <rect x="320" y="150" width="230" height="60" rx="12" fill="#fff0e0" stroke="#f0dcb8" stroke-width="1.5"/>
-  <text x="435" y="174" text-anchor="middle" class="lbl">planner：LLM → JSON DAG</text>
-  <text x="435" y="192" text-anchor="middle" class="sub">校验：去环/未知依赖/重试一次</text>
+  <!-- 3b 快速路 -->
+  <rect x="50" y="204" width="280" height="56" rx="11" fill="#24343a" stroke="#3f6b5c" stroke-width="1.2"/>
+  <text x="190" y="226" class="t2" text-anchor="middle">直接闲聊通道（免 LLM 分类）</text>
+  <text x="190" y="244" class="s" text-anchor="middle">零信号短闲聊不花第一跳分类调用</text>
+  <path class="arr" d="M190 260 L190 390"/>
 
-  <rect x="320" y="250" width="230" height="70" rx="12" fill="#fff0e0" stroke="#f0dcb8" stroke-width="1.5"/>
-  <text x="435" y="274" text-anchor="middle" class="lbl">executor：按依赖并行</text>
-  <text x="435" y="292" text-anchor="middle" class="sub">race_lookup / weather / web_search / llm</text>
-  <text x="435" y="308" text-anchor="middle" class="sub">节点状态 → SSE 实时推任务树</text>
+  <path class="arr" d="M530 268 L530 296"/>
 
-  <rect x="320" y="360" width="230" height="60" rx="12" fill="#fff0e0" stroke="#f0dcb8" stroke-width="1.5"/>
-  <text x="435" y="384" text-anchor="middle" class="lbl">synth：汇总 → 结构化卡片</text>
-  <text x="435" y="402" text-anchor="middle" class="sub">记忆注入个性化（如感冒→带药提醒）</text>
+  <!-- 4 router -->
+  <rect x="370" y="296" width="320" height="64" rx="11" fill="#1c3138" stroke="#35594e" stroke-width="1.4"/>
+  <text x="530" y="320" class="t2" text-anchor="middle">router 意图分类（LLM）</text>
+  <text x="530" y="338" class="s" text-anchor="middle">chat / explain / plan / relay / affair_update</text>
+  <text x="530" y="354" class="note" text-anchor="middle">情绪 mood · 同一句话 + 同一份简报 300s 内不重问</text>
 
-  <!-- 保底 -->
-  <rect x="620" y="250" width="230" height="70" rx="12" fill="#fdeef0" stroke="#edd3d6" stroke-width="1.5"/>
-  <text x="735" y="274" text-anchor="middle" class="lbl">保底：DAG 失败</text>
-  <text x="735" y="292" text-anchor="middle" class="sub">→ 单 LLM 直出卡片</text>
-  <text x="735" y="308" text-anchor="middle" class="sub">只跳过程展示，绝不跳生成</text>
+  <!-- 分支箭头 -->
+  <path class="arr" d="M370 328 C 280 328, 230 350, 205 390"/>
+  <path class="arr" d="M530 360 L530 390"/>
+  <path class="arr" d="M690 328 C 780 328, 830 350, 855 390"/>
 
-  <!-- 沉淀 -->
-  <rect x="300" y="455" width="260" height="52" rx="12" fill="#e9f3ea" stroke="#cfe0d2" stroke-width="1.5"/>
-  <text x="430" y="477" text-anchor="middle" class="lbl">轮后：LLM 抽取 → 记忆落盘</text>
-  <text x="430" y="495" text-anchor="middle" class="sub">topics upsert / daily 追加 / 原子写</text>
+  <!-- 左列：chat / explain -->
+  <rect x="60" y="390" width="290" height="74" rx="11" fill="#182b31" stroke="#2c4a44" stroke-width="1.2"/>
+  <text x="205" y="412" class="t2" text-anchor="middle">闲聊 / 讲懂（chat · explain）</text>
+  <text x="205" y="430" class="s" text-anchor="middle">工具轮：启发式命中 → 挑工具 → 多工具并行</text>
+  <text x="205" y="446" class="s" text-anchor="middle">explain：用孩子自己的经历打比方（记忆即素材）</text>
+  <path class="arr" d="M205 464 L205 484"/>
+  <rect x="60" y="484" width="290" height="52" rx="11" fill="#182b31" stroke="#2c4a44" stroke-width="1.2"/>
+  <text x="205" y="506" class="t2" text-anchor="middle">流式回复</text>
+  <text x="205" y="524" class="s" text-anchor="middle">token 事件逐字上屏 · done 收尾</text>
 
-  <!-- 箭头 -->
-  <path class="arr" d="M140 96 L140 150"/>
-  <path class="arr" d="M230 68 L300 68"/>
-  <path class="arr dash" d="M430 106 C 430 128, 250 160, 228 180"/>
-  <path class="arr" d="M95 230 C 70 255, 90 275, 120 290"/>
-  <path class="arr" d="M230 190 L320 180"/>
-  <path class="arr" d="M435 210 L435 250"/>
-  <path class="arr" d="M435 320 L435 360"/>
-  <path class="arr dash" d="M550 185 C 640 195, 735 200, 735 250"/>
-  <path class="arr" d="M140 350 C 140 420, 260 460, 300 480"/>
-  <path class="arr" d="M435 420 L435 455"/>
+  <!-- 中列：plan 管线 -->
+  <rect x="370" y="390" width="320" height="70" rx="11" fill="#182b31" stroke="#2c4a44" stroke-width="1.2"/>
+  <text x="530" y="412" class="t2" text-anchor="middle">planner：LLM → JSON DAG / clarify</text>
+  <text x="530" y="430" class="s" text-anchor="middle">信息不够 → 先反问（挂 pending，下句合并重走）</text>
+  <text x="530" y="448" class="s" text-anchor="middle">够 → 校验去环 / 未知依赖 / 未知工具，失败重试一次</text>
+  <path class="arr" d="M530 460 L530 480"/>
+  <rect x="370" y="480" width="320" height="62" rx="11" fill="#182b31" stroke="#2c4a44" stroke-width="1.2"/>
+  <text x="530" y="502" class="t2" text-anchor="middle">executor：按依赖并行</text>
+  <text x="530" y="520" class="s" text-anchor="middle">工具 + 动作（提醒 / 清单 / 请家长确认 / ics）</text>
+  <text x="530" y="536" class="s" text-anchor="middle">节点状态实时推任务树（node 事件）</text>
+  <path class="arr" d="M530 542 L530 562"/>
+  <rect x="370" y="562" width="320" height="52" rx="11" fill="#182b31" stroke="#2c4a44" stroke-width="1.2"/>
+  <text x="530" y="584" class="t2" text-anchor="middle">synth：汇总 → 结构化卡片</text>
+  <text x="530" y="602" class="s" text-anchor="middle">记忆注入个性化（如感冒 → 带药提醒）</text>
+  <path class="arr" d="M530 614 L530 634"/>
+  <rect x="370" y="634" width="320" height="56" rx="11" fill="#182b31" stroke="#2c4a44" stroke-width="1.2"/>
+  <text x="530" y="656" class="t2" text-anchor="middle">判官自检：实质回应孩子了吗？</text>
+  <text x="530" y="674" class="s" text-anchor="middle">不过 → 带意见重出一次（原卡保底）</text>
+
+  <!-- 右列：relay / 事件 / 降级 -->
+  <rect x="710" y="390" width="300" height="56" rx="11" fill="#182b31" stroke="#2c4a44" stroke-width="1.2"/>
+  <text x="860" y="412" class="t2" text-anchor="middle">relay 传话筒 / affair_update</text>
+  <text x="860" y="430" class="s" text-anchor="middle">更新阶段·清单·日志 · 孩子→老师需点同意</text>
+  <rect x="710" y="466" width="300" height="92" rx="11" fill="#1a2f35" stroke="#33574f" stroke-width="1.2"/>
+  <text x="860" y="488" class="t2" text-anchor="middle">SSE 事件流</text>
+  <text x="860" y="506" class="s" text-anchor="middle">mode · recall · plan · node · action · card</text>
+  <text x="860" y="524" class="s" text-anchor="middle">memory · token · done · error</text>
+  <text x="860" y="542" class="note" text-anchor="middle">心跳保活 · 断线重连 · 真流式降级</text>
+  <rect x="710" y="578" width="300" height="96" rx="11" fill="#2a2027" stroke="#5a4148" stroke-width="1.2"/>
+  <text x="860" y="600" class="t2" text-anchor="middle" fill="#f0b8a8">降级不降真</text>
+  <text x="860" y="618" class="s" text-anchor="middle">DAG 失败 → 单 LLM 直出卡片</text>
+  <text x="860" y="636" class="s" text-anchor="middle">LLM 不可达 → 如实报错，不伪造</text>
+  <text x="860" y="654" class="s" text-anchor="middle">工具失败 / 没搜到 → 如实说“没查到”</text>
+  <rect x="710" y="694" width="300" height="58" rx="11" fill="#182b31" stroke="#2c4a44" stroke-width="1.2"/>
+  <text x="860" y="716" class="t2" text-anchor="middle">就地修订（不重走规划）</text>
+  <text x="860" y="734" class="s" text-anchor="middle">「把结尾改改」→ 48h 内锚点就地改写</text>
+
+  <!-- 汇入沉淀 -->
+  <path class="arr" d="M205 536 L205 772"/>
+  <path class="arr" d="M530 690 L530 772"/>
+
+  <!-- 轮后沉淀 -->
+  <rect x="60" y="772" width="950" height="92" rx="12" fill="#16262c" stroke="#2c4a44" stroke-width="1.2"/>
+  <text x="80" y="796" class="t2">轮后沉淀 · 记忆生长</text>
+  <text x="80" y="818" class="s">LLM 抽取 → 悄悄话只进图谱层（private，不落文件层）→ 单写锁 + tmp→rename 原子写 → memory 事件回放</text>
+  <text x="80" y="836" class="s">Dreaming：每天一次，跨天重复的事实晋升进 MEMORY.md（确定性打分，不调 LLM）· 断网时 AI 端点如实停答，本地数据照常可看</text>
+  <text x="80" y="854" class="note">所有回复由 LLM 实时生成：无预设脚本、无硬编码答案；评委可查 GET /api/logs 逐次调用留痕（哈希链防篡改）</text>
 </svg>

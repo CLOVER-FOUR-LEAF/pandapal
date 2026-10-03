@@ -1,86 +1,191 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 560" font-family="-apple-system, 'PingFang SC', sans-serif">
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- PandaButler 系统架构图（与代码同步维护：server/ web/ data/ 变更时更新） -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1060 850" font-family="'PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif">
   <defs>
-    <style>
-      .box { rx: 10; stroke-width: 1.5; }
-      .lbl { font-size: 14px; fill: #3a3128; font-weight: 600; }
-      .sub { font-size: 11px; fill: #8a7a63; }
-      .arr { stroke: #b0977a; stroke-width: 1.6; fill: none; marker-end: url(#ah); }
-      .dash { stroke-dasharray: 5 4; }
-    </style>
-    <marker id="ah" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
-      <path d="M0,0 L8,4 L0,8 z" fill="#b0977a"/>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0e1a1f"/>
+      <stop offset="1" stop-color="#15262b"/>
+    </linearGradient>
+    <marker id="ah" markerWidth="9" markerHeight="9" refX="7.5" refY="4.5" orient="auto">
+      <path d="M0,0 L9,4.5 L0,9 z" fill="#4fbf7f"/>
     </marker>
+    <marker id="ah-dash" markerWidth="9" markerHeight="9" refX="7.5" refY="4.5" orient="auto">
+      <path d="M0,0 L9,4.5 L0,9 z" fill="#8a7f9e"/>
+    </marker>
+    <style>
+      .t    { font-size: 15px;   fill: #eaf4ee; font-weight: 600; }
+      .t2   { font-size: 12.5px; fill: #b9e3c8; font-weight: 600; }
+      .s    { font-size: 11px;   fill: #93ab9f; }
+      .chip { font-size: 11px;   fill: #cfe3d8; }
+      .note { font-size: 11px;   fill: #7f978d; }
+      .arr  { stroke: #4fbf7f; stroke-width: 1.6; fill: none; marker-end: url(#ah); }
+      .arrd { stroke: #8a7f9e; stroke-width: 1.6; fill: none; stroke-dasharray: 5 4; marker-end: url(#ah-dash); }
+    </style>
   </defs>
-  <rect width="900" height="560" fill="#fdf6ec"/>
+  <rect width="1060" height="850" fill="url(#bg)"/>
 
-  <!-- 浏览器层 -->
-  <rect x="30" y="30" width="840" height="150" rx="14" fill="#ffffff" stroke="#e8dcc8" class="box"/>
-  <text x="50" y="55" class="lbl">浏览器单页（原生 ES Modules，零构建）</text>
-  <rect x="50" y="70" width="120" height="46" rx="9" fill="#fff3dd" stroke="#e8dcc8"/>
-  <text x="110" y="97" text-anchor="middle" class="sub" font-size="12">登录选档</text>
-  <rect x="185" y="70" width="120" height="46" rx="9" fill="#fff3dd" stroke="#e8dcc8"/>
-  <text x="245" y="90" text-anchor="middle" class="sub" font-size="12">熊猫 SVG 形象</text>
-  <text x="245" y="106" text-anchor="middle" class="sub" font-size="10">眨眼/浮动/表情</text>
-  <rect x="320" y="70" width="140" height="46" rx="9" fill="#fff3dd" stroke="#e8dcc8"/>
-  <text x="390" y="90" text-anchor="middle" class="sub" font-size="12">对话 + chips</text>
-  <text x="390" y="106" text-anchor="middle" class="sub" font-size="10">SSE 流式渲染</text>
-  <rect x="475" y="70" width="120" height="46" rx="9" fill="#fff3dd" stroke="#e8dcc8"/>
-  <text x="535" y="97" text-anchor="middle" class="sub" font-size="12">任务树</text>
-  <rect x="610" y="70" width="120" height="46" rx="9" fill="#fff3dd" stroke="#e8dcc8"/>
-  <text x="670" y="97" text-anchor="middle" class="sub" font-size="12">记忆本</text>
-  <text x="50" y="145" class="sub">POST /api/session · GET /api/greeting · POST /api/chat (SSE) · GET /api/memory</text>
+  <text x="24" y="34" class="t" font-size="17">PandaButler 系统架构</text>
+  <text x="1036" y="34" class="note" text-anchor="end">零构建前端 · 单进程后端 · 无数据库 · 数据即文件</text>
 
-  <!-- 服务端层 -->
-  <rect x="30" y="215" width="560" height="300" rx="14" fill="#ffffff" stroke="#e8dcc8" class="box"/>
-  <text x="50" y="240" class="lbl">PandaButler Server（FastAPI + asyncio）</text>
-  <rect x="50" y="255" width="120" height="52" rx="9" fill="#e9f3ea" stroke="#cfe0d2"/>
-  <text x="110" y="276" text-anchor="middle" class="sub" font-size="12">session</text>
-  <text x="110" y="292" text-anchor="middle" class="sub" font-size="10">名字→档案目录</text>
-  <rect x="50" y="320" width="120" height="52" rx="9" fill="#e9f3ea" stroke="#cfe0d2"/>
-  <text x="110" y="341" text-anchor="middle" class="sub" font-size="12">router</text>
-  <text x="110" y="357" text-anchor="middle" class="sub" font-size="10">LLM 意图分类</text>
-  <rect x="200" y="255" width="140" height="52" rx="9" fill="#fff0e0" stroke="#f0dcb8"/>
-  <text x="270" y="276" text-anchor="middle" class="sub" font-size="12">planner</text>
-  <text x="270" y="292" text-anchor="middle" class="sub" font-size="10">LLM → JSON DAG</text>
-  <rect x="200" y="320" width="140" height="52" rx="9" fill="#fff0e0" stroke="#f0dcb8"/>
-  <text x="270" y="341" text-anchor="middle" class="sub" font-size="12">executor</text>
-  <text x="270" y="357" text-anchor="middle" class="sub" font-size="10">依赖并行 → SSE</text>
-  <rect x="200" y="385" width="140" height="52" rx="9" fill="#fff0e0" stroke="#f0dcb8"/>
-  <text x="270" y="406" text-anchor="middle" class="sub" font-size="12">synth</text>
-  <text x="270" y="422" text-anchor="middle" class="sub" font-size="10">汇总 → 结构化卡片</text>
-  <rect x="360" y="255" width="210" height="52" rx="9" fill="#e8eefb" stroke="#cfd9ee"/>
-  <text x="465" y="276" text-anchor="middle" class="sub" font-size="12">memory</text>
-  <text x="465" y="292" text-anchor="middle" class="sub" font-size="10">活跃块注入 + 轮后 LLM 抽取落盘</text>
-  <rect x="360" y="320" width="210" height="52" rx="9" fill="#e8eefb" stroke="#cfd9ee"/>
-  <text x="465" y="341" text-anchor="middle" class="sub" font-size="12">单写锁 + tmp→rename 原子写</text>
-  <text x="465" y="357" text-anchor="middle" class="sub" font-size="10">会话隔离：data/{child}/</text>
-  <rect x="360" y="385" width="210" height="52" rx="9" fill="#f3e9f6" stroke="#e0d2e6"/>
-  <text x="465" y="406" text-anchor="middle" class="sub" font-size="12">llm 客户端</text>
-  <text x="465" y="422" text-anchor="middle" class="sub" font-size="10">OpenAI 兼容 / Anthropic 双协议·主备Key</text>
-  <rect x="50" y="385" width="120" height="52" rx="9" fill="#fdeef0" stroke="#edd3d6"/>
-  <text x="110" y="406" text-anchor="middle" class="sub" font-size="12">tools</text>
-  <text x="110" y="422" text-anchor="middle" class="sub" font-size="10">赛事库/天气/搜索</text>
-  <text x="50" y="470" class="sub">保底链：DAG 失败 → 单 LLM 直出卡片；节点失败 → 标记后继续；搜索无 Key → 模型知识补位</text>
+  <!-- ============ ① 前端三视角 ============ -->
+  <rect x="24" y="52" width="1012" height="176" rx="14" fill="#132128" stroke="#233c3a" stroke-width="1.5"/>
+  <text x="44" y="78" class="t">① 三视角前端（原生 ES Modules · 零构建 · PWA）</text>
 
-  <!-- 存储层 -->
-  <rect x="620" y="215" width="250" height="140" rx="14" fill="#ffffff" stroke="#e8dcc8" class="box"/>
-  <text x="640" y="240" class="lbl">文件系统存储（无数据库）</text>
-  <text x="640" y="265" class="sub" font-size="12">data/{child}/MEMORY.md</text>
-  <text x="640" y="285" class="sub" font-size="12">topics/*.md · daily/*.md</text>
-  <text x="640" y="305" class="sub" font-size="12">index.json · reminders.json</text>
-  <text x="640" y="330" class="sub" font-size="12">data/race_db.json（赛事知识库）</text>
+  <!-- 孩子 -->
+  <rect x="44" y="90" width="332" height="106" rx="11" fill="#182b31" stroke="#2c4a44" stroke-width="1.2"/>
+  <text x="60" y="114" class="t2">孩子视角 · 3D 竹林小屋</text>
+  <rect x="56" y="126" width="150" height="26" rx="7" fill="#1f373d" stroke="#33574f"/>
+  <text x="131" y="143" class="chip" text-anchor="middle">对话流 + chips</text>
+  <rect x="214" y="126" width="150" height="26" rx="7" fill="#1f373d" stroke="#33574f"/>
+  <text x="289" y="143" class="chip" text-anchor="middle">事务看板 · 详情</text>
+  <rect x="56" y="158" width="150" height="26" rx="7" fill="#1f373d" stroke="#33574f"/>
+  <text x="131" y="175" class="chip" text-anchor="middle">记忆星球 3D / 2D</text>
+  <rect x="214" y="158" width="150" height="26" rx="7" fill="#1f373d" stroke="#33574f"/>
+  <text x="289" y="175" class="chip" text-anchor="middle">记忆本 · 成长 · 梦想</text>
+  <text x="60" y="200" class="note">语音输入输出 · 悄悄话 🤫（[[secret]] 前缀）</text>
 
-  <!-- 外部服务 -->
-  <rect x="620" y="385" width="250" height="130" rx="14" fill="#ffffff" stroke="#e8dcc8" class="box"/>
-  <text x="640" y="410" class="lbl">外部服务</text>
-  <text x="640" y="435" class="sub" font-size="12">LLM API（env 配置，服务端持有 Key）</text>
-  <text x="640" y="458" class="sub" font-size="12">wttr.in 天气（免费无 Key）</text>
-  <text x="640" y="481" class="sub" font-size="12">可选 Tavily 兼容搜索</text>
+  <!-- 家长 -->
+  <rect x="392" y="90" width="332" height="106" rx="11" fill="#182b31" stroke="#2c4a44" stroke-width="1.2"/>
+  <text x="408" y="114" class="t2">家长视角 · 白天配色</text>
+  <rect x="404" y="126" width="150" height="26" rx="7" fill="#1f373d" stroke="#33574f"/>
+  <text x="479" y="143" class="chip" text-anchor="middle">待确认收件箱</text>
+  <rect x="562" y="126" width="150" height="26" rx="7" fill="#1f373d" stroke="#33574f"/>
+  <text x="637" y="143" class="chip" text-anchor="middle">传话筒（双向）</text>
+  <rect x="404" y="158" width="150" height="26" rx="7" fill="#1f373d" stroke="#33574f"/>
+  <text x="479" y="175" class="chip" text-anchor="middle">成长周报（一页纸）</text>
+  <rect x="562" y="158" width="150" height="26" rx="7" fill="#1f373d" stroke="#33574f"/>
+  <text x="637" y="175" class="chip" text-anchor="middle">孩子档案只读</text>
+  <text x="408" y="200" class="note">悄悄话服务端强制过滤，只报条数</text>
 
-  <!-- 箭头 -->
-  <path class="arr" d="M450 180 L450 215" />
-  <path class="arr" d="M590 320 L620 300" />
-  <path class="arr dash" d="M590 440 L620 445" />
-  <path class="arr" d="M170 340 L200 340" />
-  <path class="arr" d="M270 372 L270 385" />
+  <!-- admin -->
+  <rect x="740" y="90" width="276" height="106" rx="11" fill="#182b31" stroke="#2c4a44" stroke-width="1.2"/>
+  <text x="756" y="114" class="t2">admin · 评委验真</text>
+  <rect x="752" y="126" width="124" height="26" rx="7" fill="#1f373d" stroke="#33574f"/>
+  <text x="814" y="143" class="chip" text-anchor="middle">调用留痕 + 校验</text>
+  <rect x="884" y="126" width="124" height="26" rx="7" fill="#1f373d" stroke="#33574f"/>
+  <text x="946" y="143" class="chip" text-anchor="middle">API 配置</text>
+  <rect x="752" y="158" width="124" height="26" rx="7" fill="#1f373d" stroke="#33574f"/>
+  <text x="814" y="175" class="chip" text-anchor="middle">用户管理</text>
+  <rect x="884" y="158" width="124" height="26" rx="7" fill="#1f373d" stroke="#33574f"/>
+  <text x="946" y="175" class="chip" text-anchor="middle">档案 · 数据</text>
+  <text x="756" y="200" class="note">孩子 / 家长视角一键切换</text>
+
+  <text x="44" y="220" class="note">PWA 可装桌面 · 断网可翻档案（AI 端点不缓存，断网如实停答） · 自托管字体 · WebGL 不可用自动降级 2D 图谱</text>
+
+  <!-- 传输层箭头 -->
+  <path class="arr" d="M210 232 L210 252"/>
+  <path class="arr" d="M558 232 L558 252"/>
+  <path class="arr" d="M878 232 L878 252"/>
+  <text x="530" y="272" class="s" text-anchor="middle">HTTPS · Bearer Token ↔ SSE 事件流（mode · recall · plan · node · action · card · memory · token · done · error）</text>
+
+  <!-- ============ ② 服务端 ============ -->
+  <rect x="24" y="280" width="1012" height="388" rx="14" fill="#132128" stroke="#233c3a" stroke-width="1.5"/>
+  <text x="44" y="306" class="t">② FastAPI 服务端（asyncio · 单进程 · 无数据库依赖）</text>
+
+  <!-- 接入与鉴权 -->
+  <rect x="44" y="318" width="272" height="112" rx="11" fill="#182b31" stroke="#2c4a44" stroke-width="1.2"/>
+  <text x="60" y="340" class="t2">接入与鉴权</text>
+  <rect x="56" y="352" width="124" height="26" rx="7" fill="#1f373d" stroke="#33574f"/>
+  <text x="118" y="369" class="chip" text-anchor="middle">auth 注册·密保</text>
+  <rect x="188" y="352" width="124" height="26" rx="7" fill="#1f373d" stroke="#33574f"/>
+  <text x="250" y="369" class="chip" text-anchor="middle">sessions 档案隔离</text>
+  <rect x="56" y="386" width="124" height="26" rx="7" fill="#1f373d" stroke="#33574f"/>
+  <text x="118" y="403" class="chip" text-anchor="middle">权限矩阵 + 限频</text>
+  <rect x="188" y="386" width="124" height="26" rx="7" fill="#1f373d" stroke="#33574f"/>
+  <text x="250" y="403" class="chip" text-anchor="middle">PBKDF2 + 哈希 token</text>
+  <text x="60" y="424" class="note">非 admin 越权一律 403</text>
+
+  <!-- 对话与 Agent 管线 -->
+  <rect x="332" y="318" width="416" height="112" rx="11" fill="#182b31" stroke="#2c4a44" stroke-width="1.2"/>
+  <text x="348" y="340" class="t2">对话与 Agent 管线</text>
+  <rect x="344" y="352" width="128" height="26" rx="7" fill="#1f373d" stroke="#33574f"/>
+  <text x="408" y="369" class="chip" text-anchor="middle">router 分类+快路径</text>
+  <rect x="480" y="352" width="128" height="26" rx="7" fill="#1f373d" stroke="#33574f"/>
+  <text x="544" y="369" class="chip" text-anchor="middle">planner JSON DAG</text>
+  <rect x="616" y="352" width="128" height="26" rx="7" fill="#1f373d" stroke="#33574f"/>
+  <text x="680" y="369" class="chip" text-anchor="middle">executor 并行调度</text>
+  <rect x="344" y="386" width="128" height="26" rx="7" fill="#1f373d" stroke="#33574f"/>
+  <text x="408" y="403" class="chip" text-anchor="middle">synth 卡片 + 判官</text>
+  <rect x="480" y="386" width="128" height="26" rx="7" fill="#1f373d" stroke="#33574f"/>
+  <text x="544" y="403" class="chip" text-anchor="middle">actions 文书管线</text>
+  <rect x="616" y="386" width="128" height="26" rx="7" fill="#1f373d" stroke="#33574f"/>
+  <text x="680" y="403" class="chip" text-anchor="middle">suggest 动态 chips</text>
+  <text x="348" y="424" class="note">prompts：人设 + 规则段（围栏 / 悄悄话 / 讲懂）</text>
+
+  <!-- 记忆与图谱 -->
+  <rect x="764" y="318" width="252" height="112" rx="11" fill="#182b31" stroke="#2c4a44" stroke-width="1.2"/>
+  <text x="780" y="340" class="t2">记忆与图谱</text>
+  <rect x="772" y="352" width="116" height="26" rx="7" fill="#1f373d" stroke="#33574f"/>
+  <text x="830" y="369" class="chip" text-anchor="middle">memory 双层记忆</text>
+  <rect x="896" y="352" width="116" height="26" rx="7" fill="#1f373d" stroke="#33574f"/>
+  <text x="954" y="369" class="chip" text-anchor="middle">graph 图谱检索</text>
+  <rect x="772" y="386" width="116" height="26" rx="7" fill="#1f373d" stroke="#33574f"/>
+  <text x="830" y="403" class="chip" text-anchor="middle">dream 每日整理</text>
+  <rect x="896" y="386" width="116" height="26" rx="7" fill="#1f373d" stroke="#33574f"/>
+  <text x="954" y="403" class="chip" text-anchor="middle">store 原子写锁</text>
+  <text x="780" y="424" class="note">注意力门控 · memory_data 围栏</text>
+
+  <!-- 事务与家庭侧 -->
+  <rect x="44" y="442" width="300" height="112" rx="11" fill="#182b31" stroke="#2c4a44" stroke-width="1.2"/>
+  <text x="60" y="464" class="t2">事务与家庭侧</text>
+  <rect x="56" y="476" width="138" height="26" rx="7" fill="#1f373d" stroke="#33574f"/>
+  <text x="125" y="493" class="chip" text-anchor="middle">affairs 状态机·清单</text>
+  <rect x="202" y="476" width="138" height="26" rx="7" fill="#1f373d" stroke="#33574f"/>
+  <text x="271" y="493" class="chip" text-anchor="middle">提醒 + ics 日历导出</text>
+  <rect x="56" y="510" width="138" height="26" rx="7" fill="#1f373d" stroke="#33574f"/>
+  <text x="125" y="527" class="chip" text-anchor="middle">family 周报·通知</text>
+  <rect x="202" y="510" width="138" height="26" rx="7" fill="#1f373d" stroke="#33574f"/>
+  <text x="271" y="527" class="chip" text-anchor="middle">files 多模态附件</text>
+  <text x="60" y="548" class="note">童年备忘录导出（只给孩子）</text>
+
+  <!-- 语音链路 -->
+  <rect x="360" y="442" width="300" height="112" rx="11" fill="#182b31" stroke="#2c4a44" stroke-width="1.2"/>
+  <text x="376" y="464" class="t2">语音链路</text>
+  <rect x="372" y="476" width="138" height="26" rx="7" fill="#1f373d" stroke="#33574f"/>
+  <text x="441" y="493" class="chip" text-anchor="middle">tts 朗读 + 音色设计</text>
+  <rect x="518" y="476" width="138" height="26" rx="7" fill="#1f373d" stroke="#33574f"/>
+  <text x="587" y="493" class="chip" text-anchor="middle">stt 服务端 ASR 兜底</text>
+  <rect x="372" y="510" width="284" height="26" rx="7" fill="#1f373d" stroke="#33574f"/>
+  <text x="514" y="527" class="chip" text-anchor="middle">voice 音色档案 voice.json（孩子可对话调整）</text>
+  <text x="376" y="548" class="note">口播稿先口语化 · voice 事件不拖慢正文</text>
+
+  <!-- 工具与模型接入 -->
+  <rect x="676" y="442" width="340" height="112" rx="11" fill="#182b31" stroke="#2c4a44" stroke-width="1.2"/>
+  <text x="692" y="464" class="t2">工具与模型接入</text>
+  <rect x="688" y="476" width="156" height="26" rx="7" fill="#1f373d" stroke="#33574f"/>
+  <text x="766" y="493" class="chip" text-anchor="middle">tools 注册表（注册即接入）</text>
+  <rect x="852" y="476" width="156" height="26" rx="7" fill="#1f373d" stroke="#33574f"/>
+  <text x="930" y="493" class="chip" text-anchor="middle">now · 赛事 · 交通 · 天气</text>
+  <rect x="688" y="510" width="156" height="26" rx="7" fill="#1f373d" stroke="#33574f"/>
+  <text x="766" y="527" class="chip" text-anchor="middle">web_search · web_browse</text>
+  <rect x="852" y="510" width="156" height="26" rx="7" fill="#1f373d" stroke="#33574f"/>
+  <text x="930" y="527" class="chip" text-anchor="middle">llm 双协议客户端</text>
+  <text x="692" y="548" class="note">退避重试 · 双口径熔断 · 异构兜底 · 哈希链留痕</text>
+
+  <!-- 可靠性底座 -->
+  <rect x="44" y="566" width="972" height="86" rx="11" fill="#16262c" stroke="#2c4a44" stroke-width="1.2"/>
+  <text x="60" y="590" class="t2">降级不降真 · 可靠性底座</text>
+  <text x="60" y="612" class="s">DAG 规划失败 → 单 LLM 直出卡片（只跳拆解展示，绝不跳生成）· 节点失败 → 标记后继续 · 工具失败 / 没搜到 → 如实说“没查到”，不编造</text>
+  <text x="60" y="630" class="s">LLM 三层可靠性（分级退避 · Key/端点双口径熔断 · 异构兜底端点）· 调用留痕哈希链，GET /api/logs/verify 逐行校验改删换序</text>
+  <text x="60" y="648" class="s">断网验真：AI 端点不缓存、不可达时如实停答；记忆本 / 事务看板等本地数据照常可看</text>
+
+  <!-- 服务端 → 存储 / 外部 -->
+  <path class="arr" d="M300 668 L300 708"/>
+  <text x="312" y="692" class="note">原子写（单写锁 · tmp→rename）</text>
+  <path class="arrd" d="M830 668 L830 708"/>
+  <text x="818" y="692" class="note" text-anchor="end">HTTPS（Key 只在服务端）</text>
+
+  <!-- ============ ③ 存储 ============ -->
+  <rect x="24" y="708" width="596" height="118" rx="14" fill="#132128" stroke="#233c3a" stroke-width="1.5"/>
+  <text x="44" y="734" class="t">③ 文件系统存储 · data/（数据即文件）</text>
+  <text x="44" y="760" class="s">child_*/：graph.json · affairs.json · checklists.json · parent_inbox.json · reminders.json · drafts.json · files/</text>
+  <text x="44" y="778" class="s">人可读记忆：MEMORY.md · topics/*.md · daily/*.md（孩子长大后整份打包带走）</text>
+  <text x="44" y="796" class="s">users.json（PBKDF2）· tokens.json（仅哈希）· logs/llm_calls.jsonl（哈希链）· race_db / transport_db</text>
+
+  <!-- ============ ④ 外部服务 ============ -->
+  <rect x="636" y="708" width="400" height="118" rx="14" fill="#1a1826" stroke="#3a3350" stroke-width="1.5"/>
+  <text x="656" y="734" class="t">④ 外部服务（Key 只在服务端）</text>
+  <text x="656" y="760" class="s">LLM API：OpenAI 兼容 / Anthropic Messages 双协议</text>
+  <text x="656" y="778" class="s">小米 MiMo：TTS 语音合成 + ASR 语音识别（可选）</text>
+  <text x="656" y="796" class="s">wttr.in 天气（免费无需 Key）· 联网搜索（Tavily 兼容 / 必应兜底）</text>
 </svg>
