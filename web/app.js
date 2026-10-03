@@ -934,7 +934,7 @@ const CHAT_WELCOME =
 /** 清掉上一账号留在界面上的内容，避免换号后看到旧数据。 */
 function resetUserUI() {
   const box = chatBox();
-  if (box) box.innerHTML = CHAT_WELCOME;
+  if (box) { sweepPendingObjectUrls(box); box.innerHTML = CHAT_WELCOME; }
   const set = (sel, html) => { const n = $(sel); if (n) n.innerHTML = html; };
   set("#chips", ""); // 快捷话题是上一个账号的上下文，清掉等新账号的 /api/suggest
   // 附件是上一个账号/上一轮的遗留：清干净，别把别人的文件带给下一个账号
@@ -1072,6 +1072,7 @@ function applyAuth() {
   if (sendBtn) sendBtn.disabled = !canChat;
   setHidden("#secret-btn", !canChat);
   setHidden("#dream-btn", !canChat);
+  setHidden("#mic-btn", !canChat);   // 语音输入也是发消息的一种（家长只读）
   // 角色徽标 + 各子视图"返回"按钮回到本角色首页
   const roleName = { child: "孩子", parent: "家长", admin: "评委" }[role] || role;
   setText("#child-name", `@ ${state.name} · ${roleName}`);
@@ -1840,9 +1841,25 @@ function attachIcon(file) {
   return "i-doc";
 }
 
+/** 只有"真能当图显示"的附件才挂 <img>：图片类型 + 有可用的原图地址。
+ *
+ * 这条判断必须守住：xlsx/docx 的原图是 application/octet-stream、pdf 带
+ * Content-Disposition: attachment，浏览器一律解码失败，挂上去只会留下一块空白
+ * （图标还被跳过）——那正是"传了 Excel/PDF 看不到图标"的成因。
+ */
+function isPreviewableImage(f) {
+  return !!f && f.kind === "image" && !!(f.preview || f.content);
+}
+
+/** 下载/看原图用的地址：优先 content（所有类型都有），退回 preview（老数据）。 */
+function fileContentUrl(f) {
+  return (f && (f.content || f.preview)) || "";
+}
+
 function renderAttachList() {
   const box = $("#attach-list");
   if (!box) return;
+  sweepPendingObjectUrls(box);   // 重绘前先把上一批缩略图的 objectURL 收掉
   box.innerHTML = "";
   const items = [...(state.attach || []), ...(state.attachPending || [])];
   if (!items.length && !state.recentOpen) {
@@ -4587,6 +4604,18 @@ function bind() {
     if (input) input.click();
   });
   on("#files-btn", toggleRecentFiles);
+  // 看大图：点背景或图片本身关闭，Esc 也能关（见下面的全局键盘处理）
+  const lightbox = $("#lightbox");
+  if (lightbox) {
+    lightbox.onclick = (e) => {
+      if (e.target === lightbox || e.target === $("#lightbox-img")) closeLightbox();
+    };
+  }
+  on("#lightbox-close", closeLightbox);
+  on("#lightbox-download", () => {
+    const f = state.lightboxFile;
+    if (f) downloadAttach(f);
+  });
   // 粘贴上传：截图后 Ctrl+V 直接进待发送区（桌面端最省事的一条路）
   const msgInput = $("#msg-input");
   if (msgInput) {
