@@ -108,7 +108,10 @@ def reset_src() -> str:
     """resetUserUI 的函数体（断言"切账号时把上一轮状态清干净"）。"""
     js = read("app.js")
     start = js.find("function resetUserUI")
-    return js[start:start + 2000] if start >= 0 else ""
+    if start < 0:
+        return ""
+    nxt = js.find("\nfunction ", start + 1)
+    return js[start:nxt] if nxt > 0 else js[start:]
 
 
 def _rule_depth(css: str, selector: str) -> int | None:
@@ -134,7 +137,8 @@ def test_wiring() -> None:
            f"depth={_rule_depth(css, '.pause-btn {')}")
     record("send_hidden_when_busy", '.inputbar[data-busy="1"] .btn-send' in css)
     record("pause_wired", 'on("#pause-btn", pauseChat)' in js)
-    record("esc_pauses", "if (!closed && state.busy) pauseChat();" in js)
+    record("esc_pauses", "pauseChat();" in js and "stopChat();" in js
+           and "const dt = now - lastEsc;" in js)
     record("esc_ignores_ime", "e.isComposing" in js)
     record("resume_is_explicit", 'send("继续", { resume: true })' in js and "opts.resume &&" in js)
     record("resume_chip", "chip-resume" in js and ".chip-resume" in css)
@@ -261,6 +265,37 @@ def test_pause_state_hygiene() -> None:
         record(f"reset_clears_{field}", field in reset)
 
 
+def test_queue_and_stop() -> None:
+    """打断两档（暂停/停止）+ 消息队列的关键钩子。
+
+    这三件事是配套的：回答进行中再发消息要排队而不是被吞掉；
+    暂停冻结队列（孩子的话不能被静默发掉）；停止则放行队列。
+    """
+    html, js, css = read("index.html"), read("app.js"), read("style.css")
+    # 队列容器在输入栏上方，和 chips/attach-list 一样是"发送前区"
+    record("queue_container", 'id="msg-queue"' in html
+           and html.find('id="msg-queue"') < html.find('<div class="inputbar">'))
+    record("queue_state", "msgQueue: []" in js and "queueSeq: 0" in js)
+    for fn in ("enqueueMsg", "dequeueMsg", "takeQueuedMsg", "renderMsgQueue",
+               "drainMsgQueue", "clearMsgQueue"):
+        record(f"queue_fn_{fn}", f"function {fn}" in js)
+    # busy 时不再吞消息，而是入队（旧写法是直接 toast 然后 return）
+    record("queue_on_busy", "enqueueMsg(text, attach)" in js)
+    record("queue_not_dropped", "msgQueue.length" in js
+           and 'toast("管家还在回上一条，稍等一下～")' not in js)
+    # 暂停冻结队列，停止放行
+    record("queue_frozen_on_pause", "state.chatPaused && !state.chatStopped" in js)
+    record("queue_drained_on_unlock", "drainMsgQueue();" in js)
+    # 硬停止：独立函数 + 清掉续写入口 + 状态标记
+    record("stop_chat_fn", "function stopChat" in js)
+    record("stop_state", "chatStopped: false" in js)
+    record("stop_clears_resume", "state.chatResume = null;" in js and "clearResumeChip();" in js)
+    record("stop_chip", "chip-stop" in js and ".chip-stop" in css)
+    # 登出要把队列清干净，不能把上一个账号的话带进新会话
+    record("reset_clears_queue", "clearMsgQueue();" in reset_src())
+    record("queue_styles", ".msg-queue" in css and ".mq-item" in css)
+
+
 def main() -> int:
     try:
         test_ids_resolve()
@@ -273,6 +308,7 @@ def main() -> int:
         test_parent_streaming()
         test_logout_path_defined()
         test_pause_state_hygiene()
+        test_queue_and_stop()
     except Exception as e:  # noqa: BLE001
         record("检查脚本自身", False, repr(e))
     passed = sum(1 for _, ok, _ in RESULTS if ok)

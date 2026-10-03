@@ -586,6 +586,10 @@
       <!-- 附件暂存区：发送前先看清这轮带了什么，可逐个移除 -->
       <div id="attach-list" class="attach-list hidden" aria-live="polite"></div>
 
+      <!-- 消息队列：回答进行中排下的消息，轮次结束自动依次发出，点 × 撤下 -->
+      <div id="msg-queue" class="msg-queue hidden" role="group"
+           aria-label="排队等待发送的消息"></div>
+
       <div class="inputbar">
         <button id="attach-btn" class="icon-btn" type="button"
                 aria-label="上传文件：图片、PDF、Word、Excel、文本"

@@ -105,6 +105,9 @@ const state = {
   chatPaused: false, // 本轮是不是被用户主动暂停
   chatCtx: null,     // 当前轮次的渲染上下文（暂停时按它决定「继续」入口）
   chatResume: null,  // 暂停后待续写的内容 {raw, bubble}
+  chatStopped: false, // 本轮是不是被「硬停止」——丢弃半截回答，不给「继续」入口
+  msgQueue: [],      // 回答进行中排队的消息 [{id, text, attach}]，轮次结束自动发下一条
+  queueSeq: 0,       // 队列项 id 自增，删除/取用时定位用
   retryText: "",     // 上一轮因网络失败的消息原文（点「重发」用）
   retryFiles: [],    // 上一轮带走的附件 id（重发时不能丢，否则悄悄少了一半输入）
   attach: [],        // 待发送的附件元数据（上传成功后进这里）
@@ -1074,7 +1077,9 @@ function resetUserUI() {
   state.chatPaused = false;
   state.chatCtx = null;
   state.chatResume = null;
+  state.chatStopped = false;
   clearResumeChip();
+  clearMsgQueue(); // 队列属于上一个账号的对话，不能带进新会话
   state.sendSeq++; // 在途的旧响应作废，别把上一个账号的内容写进新会话
   setPauseVisible(false);
   hideBubble($("#panda-bubble"));
@@ -2718,25 +2723,112 @@ function setPauseVisible(on) {
   if (bar) bar.dataset.busy = on ? "1" : "0";
 }
 
-/** 暂停后给一个「继续」快捷入口：接着没说完的往下说，而不是重开一轮对话。 */
+/** 暂停后给两个快捷入口：接着没说完的往下说，或者就此打住不再续写。 */
 function showResumeChip() {
   const box = $("#chips");
   if (!box || !state.chatResume || !state.chatResume.bubble || !state.chatResume.bubble.isConnected) return;
-  if (box.querySelector(".chip-resume")) return;
-  const b = el("button", "chip chip-resume", "继续刚才的回答");
-  b.type = "button";
-  b.title = "接着没说完的往下说";
-  b.onclick = () => {
-    b.remove();
-    send("继续", { resume: true });
-  };
-  box.insertBefore(b, box.firstChild);
+  if (!box.querySelector(".chip-resume")) {
+    const b = el("button", "chip chip-resume", "继续刚才的回答");
+    b.type = "button";
+    b.title = "接着没说完的往下说";
+    b.onclick = () => {
+      b.remove();
+      send("继续", { resume: true });
+    };
+    box.insertBefore(b, box.firstChild);
+  }
+  if (!box.querySelector(".chip-stop")) {
+    const s = el("button", "chip chip-stop", "不再续写");
+    s.type = "button";
+    s.title = "丢掉这半截回答，本轮就此结束";
+    s.onclick = () => stopChat();
+    box.insertBefore(s, box.querySelector(".chip-resume").nextSibling);
+  }
   box.scrollLeft = 0;
 }
 
 function clearResumeChip() {
-  const b = document.querySelector("#chips .chip-resume");
-  if (b) b.remove();
+  ["#chips .chip-resume", "#chips .chip-stop"].forEach((sel) => {
+    const b = document.querySelector(sel);
+    if (b) b.remove();
+  });
+}
+
+/* ---------------------------------------------------------------- 消息队列
+ * 管家还在回上一条时，孩子往往接着就想说下一句。早先这里只丢一句
+ * 「管家还在回上一条，稍等一下～」把话吞掉——话没了，得重打。
+ * 现在改成排队：轮次正常结束后自动依次发出去；用户主动暂停则冻结，
+ * 等点了「继续」或手动发下一条再动（排队的是孩子的话，不能被静默发掉）。
+ */
+
+/** 队列里撤下一条。按 id 找，不用下标——渲染期间可能已经变过。 */
+function dequeueMsg(id) {
+  const i = state.msgQueue.findIndex((m) => m.id === id);
+  if (i < 0) return;
+  const [gone] = state.msgQueue.splice(i, 1);
+  // 撤下来的附件还回暂存区：本来就是孩子刚要发的，不能跟着队列一起消失
+  if (gone && gone.attach && gone.attach.length) {
+    state.attach = [...(state.attach || []), ...gone.attach];
+    renderAttachList();
+  }
+  renderMsgQueue();
+  toast("已撤下这条");
+}
+
+/** 取队首（不渲染）。返回 null 表示没得发。 */
+function takeQueuedMsg() {
+  const next = state.msgQueue.shift() || null;
+  renderMsgQueue();
+  return next;
+}
+
+function clearMsgQueue() {
+  if (!state.msgQueue.length) return;
+  state.msgQueue = [];
+  renderMsgQueue();
+}
+
+function renderMsgQueue() {
+  const box = $("#msg-queue");
+  if (!box) return;
+  const n = state.msgQueue.length;
+  box.classList.toggle("hidden", n === 0);
+  box.textContent = "";
+  if (!n) return;
+  const label = el("span", "mq-label");
+  label.appendChild(icon("i-clock"));
+  label.appendChild(document.createTextNode(`排队中 ${n}`));
+  box.appendChild(label);
+  state.msgQueue.forEach((m, i) => {
+    const b = el("button", "mq-item");
+    b.type = "button";
+    b.title = "点击撤下这条";
+    b.setAttribute("aria-label", `撤下排队第 ${i + 1} 条：${m.text}`);
+    const txt = el("span", "mq-text", m.text.length > 40 ? `${m.text.slice(0, 40)}…` : m.text);
+    b.appendChild(txt);
+    b.appendChild(icon("i-x"));
+    b.onclick = () => dequeueMsg(m.id);
+    box.appendChild(b);
+  });
+}
+
+/** 排一条待发消息，返回它排在第几位（从 1 数）。 */
+function enqueueMsg(text, attach) {
+  const item = { id: ++state.queueSeq, text, attach: (attach || []).slice() };
+  state.msgQueue.push(item);
+  renderMsgQueue();
+  return state.msgQueue.length;
+}
+
+/** 轮次收尾后把队列推下去：暂停冻结队列（等用户发话），硬停止则照推。 */
+function drainMsgQueue() {
+  if (state.chatPaused && !state.chatStopped) return false;
+  if (state.busy) return false;
+  const next = takeQueuedMsg();
+  if (!next) return false;
+  // 异步发出去，不能 await——这里在 finally 里，await 会把收尾拖住
+  send(next.text, { attach: next.attach });
+  return true;
 }
 
 /** 断网/弱网提示条：离线时明确告知，恢复后自动收起。 */
@@ -2795,6 +2887,49 @@ function pauseChat() {
   }
 }
 
+/** 硬停止：这半截回答不再续写，本轮就此打住，立刻放行队列里的下一条。
+ *
+ *  和 pauseChat 的区别在「这半截还要不要接着听」：暂停是想接着听，所以留着可续写；
+ *  停止是不要了——不存 chatResume，也不给「继续」入口（已经上屏的字保留，
+ *  那是孩子已经看到的内容，删掉比留着更突兀）。
+ *  两种时机都走这里：回答还在生成时叫停，以及已经暂停了但不想再续写。 */
+function stopChat() {
+  const ctx = state.chatCtx;
+  if (state.busy) {
+    state.chatPaused = true;   // 复用「用户主动叫停」：catch 里不当成失败报错
+    state.chatStopped = true;
+    state.chatResume = null;
+    clearResumeChip();
+    if (state.chatAbort) {
+      try { state.chatAbort.abort(); } catch { /* 已结束 */ }
+    }
+  } else if (state.chatPaused || state.chatResume) {
+    // 已经暂停、本轮早结束了：这里没有生成中的流可断，只把悬着的「继续」丢掉。
+    // 队列原本被暂停冻着，这一下也该放行。
+    state.chatStopped = true;
+    state.chatResume = null;
+    clearResumeChip();
+  } else {
+    return; // 既没在生成、也没暂停过：没什么可停的
+  }
+  addSys("回答已停止");
+  chatStatus("已停止");
+  toast("已停止回答");
+  // 规划链可能已经把事务/清单落盘：和暂停一样刷一下看板，别让用户以为白说了。
+  // 只有服务端真的回过事务事件才这么说——规划还没落盘就叫停时不能报喜。
+  if (ctx && ctx.tree) {
+    loadAffairs();
+    if (ctx.affairTouched) addSys("刚才那件事已经记到事务看板了");
+  }
+  // 生成中的那一轮由 finally 收尾（那里会推队列）；已经暂停的这轮没有 finally 可等，
+  // 这里自己推——停止是「此轮打住」，队列不该再被冻着。
+  if (!state.busy) {
+    drainMsgQueue();
+    state.chatStopped = false;
+    state.chatPaused = false;
+  }
+}
+
 /**
  * 发送入口：任何一处没接住的异常都不能把 state.busy 永久锁成 true——
  * 那会让输入框、「新项目/项目/清空」全部卡在"管家还在回复"（曾因 ctx 先用后声明出过这事）。
@@ -2811,6 +2946,7 @@ async function send(preset, opts = {}) {
       state.chatCtx = null;
       document.querySelectorAll("#chat .typing").forEach((n) => n.remove());
       unlockInput();
+      drainMsgQueue(); // 异常卡死时才到这里：收拾完立刻推队列
       chatStatus();
       addSys("这条没发出去，再试一次吧");
     }
@@ -2839,7 +2975,14 @@ async function sendInner(preset, opts = {}) {
     return;
   }
   if (state.busy) {
-    toast("管家还在回上一条，稍等一下～");
+    // 管家还在回上一条：不吞掉这句话，排队等这轮结束（附件跟着一起排）
+    const place = enqueueMsg(text, attach);
+    if (preset === undefined && input) input.value = "";
+    if (attach.length && !state.secret) {
+      state.attach = [];
+      renderAttachList();
+    }
+    toast(`管家还在回上一条，这条排在第 ${place} 位`);
     return;
   }
 
@@ -2848,8 +2991,12 @@ async function sendInner(preset, opts = {}) {
   // 不在这里掐的话，得等新回复的语音做好（十几到几十秒）才会切，
   // 那一整段时间都在放已经过时的内容。
   stopVoice();
+  // 正在录的一段就此打住：这轮已经开始作答，录音再攒下去只会把上一句话
+  // 又灌回输入框（micCancel 的注释一直这么说，但调用点只在登出里，属于漏接）
+  micCancel();
   state.busy = true;
   state.chatPaused = false;
+  state.chatStopped = false; // 新一轮开始：上一轮的"已停止"标记不许带进来
   clearResumeChip(); // 新一轮开始：上一轮的「继续」入口作废
   const abort = new AbortController();
   state.chatAbort = abort;
@@ -2947,19 +3094,27 @@ async function sendInner(preset, opts = {}) {
     flushMd(ctx);
     if (ctx.aiBubble) ctx.aiBubble.classList.remove("streaming");
     if (seq === state.sendSeq) {
+      const stopped = state.chatStopped;
+      const paused = state.chatPaused && !stopped;
       unlockInput();
       // 这一轮没被暂停：正常结束，上一轮的「继续」入口不再有意义
-      if (!state.chatPaused) { state.chatResume = null; clearResumeChip(); }
+      if (!paused) { state.chatResume = null; clearResumeChip(); }
       s3("setPandaMood", "idle");
       if (pandaSvg) setMood(pandaSvg, "normal");
       modeBadge("");
-      if (!state.chatPaused) chatStatus();
+      if (!paused) chatStatus();
       const inp = $("#msg-input");
       if (inp) inp.focus();
       if (state.needGraphRefresh) {
         state.needGraphRefresh = false;
         loadGraph();
       }
+      // 队列要等这条流真正读完、本轮收尾全做完再推：done 事件里 unlockInput 只是
+      // 提前解锁输入，voice 事件还在路上；而 send 会同步改 mood/续写入口，
+      // 排在收尾之前会被后面的收尾代码覆盖。所以只能放最后。
+      // chatStopped 要等推完再清——drain 靠它判断"停止放行、暂停冻结"。
+      drainMsgQueue();
+      state.chatStopped = false;
     }
   }
 }
@@ -5147,6 +5302,7 @@ function bind() {
   on("#forgot-next-btn", forgotNext);
   on("#forgot-reset-btn", forgotReset);
   on("#send-btn", () => send());
+  // 暂停键只在生成中可用（按键本身回答完就收起），两档停止走「停止」chip 与 Esc 双击
   on("#pause-btn", pauseChat);
   on("#attach-btn", () => {
     const input = $("#file-input");
@@ -5254,7 +5410,9 @@ function bind() {
       }
     });
   }
-  // ESC：大图先关（看图为最上层），然后停回答，最后关抽屉
+  // ESC：大图先关（看图为最上层），然后停回答，最后关抽屉。
+  // Esc 双击（200ms 内）走硬停止（这半截不再续写，队列接着往下推）。
+  let lastEsc = 0;
   document.addEventListener("keydown", (e) => {
     if (e.key !== "Escape" || e.isComposing || e.keyCode === 229) return; // 输入法里按 Esc 是取消候选字
     const lb = $("#lightbox");
@@ -5265,7 +5423,18 @@ function bind() {
       const d = $(sel);
       if (d && !d.classList.contains("hidden")) { d.classList.add("hidden"); closed = true; }
     }
-    if (!closed && state.busy) pauseChat();
+    if (!closed && (state.busy || state.chatResume)) {
+      const now = Date.now();
+      const dt = now - lastEsc;
+      lastEsc = now;
+      if (dt < 200 || state.chatResume) {
+        // 双击 Esc / 或本轮已经暂停过了：硬停止，半截回答不再续写，队列接着走
+        stopChat();
+      } else {
+        // 单击 Esc：暂停，半截回答留着可续写
+        pauseChat();
+      }
+    }
   });
   // 窗口变化：迷你条重画；2D 兜底图也要重画——SVG 的 viewBox 按容器宽度算过一次就定死了，
   // 横竖屏切换（或手机从地址栏展开的窄高变成全屏）后节点仍按旧宽度排布，
