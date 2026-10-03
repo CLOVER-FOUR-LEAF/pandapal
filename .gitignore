@@ -34,8 +34,10 @@ data/child_*/
 data/child_xiaodou/history.json
 # TTS 合成出来的语音是二进制缓存，体积大且随时可再生成，一律不入库
 data/child_*/voice_cache/
-# 附件原图/文档是运行时上传的二进制，一次演示就能到十几 MB，同样不入库
-data/child_*/files/
+# 附件原图/文档是运行时上传的二进制，一次演示就能到十几 MB，同样不入库；
+# 演示档的 index.json 是档案元数据（与 graph.json 同类），保留入库
+data/child_*/files/*
+!data/child_xiaodou/files/index.json
 data/logs/
 data/users.json
 data/tokens.json
