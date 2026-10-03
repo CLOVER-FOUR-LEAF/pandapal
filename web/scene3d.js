@@ -645,7 +645,10 @@ export function initScene(containerEl) {
     const mods = await withTimeout(
       Promise.all([
         import("./vendor/three.module.min.js"),
-        import("./vendor/OrbitControls.js"),
+        // ?v=2：OrbitControls 打过本地补丁（滚轮缩放在页面缩放 <100% 时会除以 0），
+        // 而 /static/vendor/ 是按 immutable 长缓存的（max-age=86400），换 URL 才能让
+        // 已经装过 SW / 缓存过旧文件的浏览器真正拿到修复，不用手动清缓存。
+        import("./vendor/OrbitControls.js?v=2"),
         import("./vendor/CSS2DRenderer.js"),
       ]),
       8000,

@@ -104,6 +104,11 @@ async def _security_headers(request: Request, call_next):
     # 给它们 max-age 会让部署后一小时内的旧 app.js 去调新接口
     if request.url.path.startswith("/static/vendor/"):
         resp.headers["Cache-Control"] = "public, max-age=86400, immutable"
+    else:
+        # 显式声明 no-cache（= 每次都带 ETag 回源校验，未变仍是 304）：
+        # 只有 ETag/Last-Modified 时浏览器会按"启发式缓存"直接用本地副本，
+        # 改完 style.css / app.js 刷新看不到变化，就是被这条坑的。
+        resp.headers["Cache-Control"] = "no-cache"
     return resp
 
 
