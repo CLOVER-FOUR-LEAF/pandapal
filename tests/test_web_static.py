@@ -153,6 +153,21 @@ def test_wiring() -> None:
     record("merge_split_btn", 'data-act="split"' in js and "unmergePlanets" in js)
 
 
+def test_parent_streaming() -> None:
+    """家长端全面流式：转达/通知/周报/梦想四路都走 ?stream=1，且有在途序号保护。"""
+    js, css = read("app.js"), read("style.css")
+    record("stream_relay_path", "/api/relay?stream=1" in js and "async function relayStream" in js)
+    record("stream_notice_path", "/api/notice?stream=1" in js)
+    record("stream_weekly_path", "/api/parent/weekly?stream=1" in js)
+    record("stream_dream_path", "/api/dream?stream=1" in js and "function dreamShell" in js)
+    record("relay_hint_typing", "function relayHint" in js and ".relay-body.relay-typing" in css)
+    record("parent_seq_guard", all(f in js for f in ("state.relaySeq", "state.weeklySeq", "state.dreamSeq")))
+    record("parent_seq_logout", all(f"state.{f}++;" in js for f in ("relaySeq", "weeklySeq", "dreamSeq")))
+    # 流式事件里"阶段/节拍不许覆盖已上屏正文"的守卫（relay 与通知各一处）
+    record("beat_no_clobber", js.count("节拍不许覆盖") >= 1 and "&& !texts" in js)
+    record("done_data_unwrap", js.count("doneEv && doneEv.data") >= 4)
+
+
 def test_pause_state_hygiene() -> None:
     js = read("app.js")
     for field in ("chatAbort", "chatPaused", "chatCtx", "chatResume"):
@@ -170,6 +185,7 @@ def main() -> int:
         test_braces_balanced()
         test_es_modules_parse()
         test_wiring()
+        test_parent_streaming()
         test_pause_state_hygiene()
     except Exception as e:  # noqa: BLE001
         record("检查脚本自身", False, repr(e))

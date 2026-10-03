@@ -98,6 +98,9 @@ const state = {
   sceneReady: false,
   sceneTried: false,
   sendSeq: 0,
+  relaySeq: 0,       // 传话筒/通知在途请求序号：新的一轮顶掉旧一轮的流式渲染
+  weeklySeq: 0,      // 周报同上（「重新生成」连点时旧流不许写回）
+  dreamSeq: 0,       // 梦想频道同上
   chatAbort: null,   // 进行中回答的 AbortController（暂停用）
   chatPaused: false, // 本轮是不是被用户主动暂停
   chatCtx: null,     // 当前轮次的渲染上下文（暂停时按它决定「继续」入口）
@@ -1099,6 +1102,9 @@ function logout() {
   state.secret = false;
   state.busy = false;
   state.sendSeq++;
+  state.relaySeq++;   // 家长端三路同样作废在途流：旧账号的内容不许写进新会话
+  state.weeklySeq++;
+  state.dreamSeq++;
   state.graph = { nodes: [], edges: [] };
   state.affairs = [];
   state.timeline = null;
@@ -3755,6 +3761,16 @@ async function toggleRole() {
   await s3("setRole", role);
   await loadGraph(); // 家长视角后端剔除 private 节点及其边
   prefetchGrowth();  // 换个视角看成长雷达是另一份数据
+  // 聊天区里已经上屏的悄悄话：切到家长视角必须一起收走。
+  // 原来只重载图谱，评委从孩子切到家长后，刚才那条悄悄话还明晃晃挂在对话流里，
+  // 直到刷新页面才消失——"家长看不到悄悄话"在演示现场就破功了。
+  if (role === "parent") {
+    document.querySelectorAll("#chat .msg.secret").forEach((m) => m.remove());
+  } else {
+    // 切回孩子视角：整段重画（loadHistory 是追加式的，直接调会重复一遍）
+    api(`/api/history?${q(state.name)}`).then((r) => r.json())
+      .then((d) => renderHistory((d && d.history) || [])).catch(() => {});
+  }
   if (!$("#growth-view").classList.contains("hidden")) loadGrowth();
 
   if (role === "parent") {
@@ -3859,20 +3875,43 @@ async function runRelay() {
   }
   if (btn) btn.disabled = true;
   try {
-    if (state.relayDir === "notice") {
-      await runNotice(text);
-      if (input) input.value = "";
-      return;
-    }
-    const resp = await api("/api/relay", jsonOpts({ name: state.name, direction: state.relayDir, text }));
-    renderRelay(await resp.json());
+    if (state.relayDir === "notice") await runNotice(text);
+    else await relayStream(text);
     if (input) input.value = "";
   } catch (e) {
-    setRelayCol("#relay-t2p", `传话筒暂时用不了：${e.message}`);
+    const msg = state.relayDir === "notice" ? e.message : `传话筒暂时用不了：${e.message}`;
+    setRelayCol("#relay-t2p", msg);
     setRelayCol("#relay-c2t", "");
   } finally {
     if (btn) btn.disabled = false;
   }
+}
+
+/** 转达的流式版：主字段（家长版/消息）逐字上屏，收尾切到结构化渲染。
+ *  阶段/节拍事件走列里的提示行；后端不支持流时 readTextStream 自动吃整段 JSON。 */
+async function relayStream(text) {
+  const seq = ++state.relaySeq;
+  setRelayCol("#relay-t2p", "");
+  setRelayCol("#relay-c2t", "");
+  relayHint("#relay-t2p", "管家正在读这段话…");
+  let typed = "";
+  const doneEv = await readTextStream("/api/relay?stream=1",
+    (tok) => {
+      if (seq !== state.relaySeq) return;
+      typed += tok;
+      setRelayCol("#relay-t2p", typed);
+    },
+    (ev) => {
+      if (seq !== state.relaySeq || typed) return; // 已有正文：节拍不许覆盖
+      if (ev.type === "phase") relayHint("#relay-t2p", ev.text);
+      else if (ev.type === "beat") relayHint("#relay-t2p", `管家还在写（已 ${int(ev.elapsed, 0)}s）…`);
+    },
+    jsonOpts({ name: state.name, direction: state.relayDir, text }));
+  if (seq !== state.relaySeq) return;
+  const data = (doneEv && doneEv.data) || doneEv || {};
+  if (data.parent_text || data.message || data.child_text || data.advice) renderRelay(data);
+  else if (typed) renderRelay({ direction: state.relayDir, parent_text: typed });
+  else throw new Error("管家没有给出内容");
 }
 
 function renderRelay(data) {
@@ -3894,6 +3933,7 @@ function setRelayCol(sel, text, advice) {
   const col = $(sel);
   if (!col) return;
   const body = col.querySelector(".relay-body") || col;
+  body.classList.remove("relay-typing");
   body.textContent = text || "";
   col.classList.toggle("is-empty", !text);
   const old = col.querySelector(".relay-advice");
@@ -3904,6 +3944,16 @@ function setRelayCol(sel, text, advice) {
     adv.appendChild(document.createTextNode(` ${advice}`));
     col.appendChild(adv);
   }
+}
+
+/** 流式期间的提示行（阶段/等待秒数）：弱化样式，第一个 token 到达即被替换 */
+function relayHint(sel, text) {
+  const col = $(sel);
+  if (!col) return;
+  const body = col.querySelector(".relay-body") || col;
+  body.textContent = text || "";
+  body.classList.toggle("relay-typing", !!text);
+  col.classList.toggle("is-empty", !text);
 }
 
 const RELAY_HEADS = {
@@ -3917,11 +3967,44 @@ const RELAY_PLACEHOLDERS = {
   notice: "把学校/机构的通知原文粘进来，管家结合孩子的情况出专属版，并建好事务、清单和提醒…",
 };
 
-/** 通知落地：专属版文案 + 事务/清单/提醒真落盘，结果分两栏展示 */
+/** 通知落地：专属版文案 + 事务/清单/提醒真落盘，结果分两栏展示。
+ *  流式版每个事件背后都是真动作：文案真解析、清单/提醒真写盘，逐项上屏。 */
 async function runNotice(text) {
-  const resp = await api("/api/notice", jsonOpts({ name: state.name, text }));
-  const data = await resp.json();
-  const res = (data && data.results && data.results[0]) || {};
+  const seq = ++state.relaySeq;
+  setRelayCol("#relay-t2p", "");
+  setRelayCol("#relay-c2t", "");
+  relayHint("#relay-t2p", "管家正在读这份通知…");
+  let texts = null, toasted = false;
+  const acts = [];
+  const paintActs = () => {
+    const ok = acts.filter((a) => a.ok).map((a) => a.detail).filter(Boolean).join("；");
+    if (texts) setRelayCol("#relay-c2t", texts.child_text || "", ok || "管家正在建事务…");
+    else if (ok) relayHint("#relay-c2t", ok);
+  };
+  const doneEv = await readTextStream("/api/notice?stream=1",
+    () => { /* 通知没有 token 流：文案随 text 事件一次给全 */ },
+    (ev) => {
+      if (seq !== state.relaySeq) return;
+      if (ev.type === "phase" && !texts) relayHint("#relay-t2p", ev.text);
+      else if (ev.type === "beat" && !texts) relayHint("#relay-t2p", `管家还在办（已 ${int(ev.elapsed, 0)}s）…`);
+      else if (ev.type === "text") {
+        texts = ev;
+        const personal = (ev.personal || []).map((p) => `· ${p}`).join("\n");
+        setRelayCol("#relay-t2p", [ev.parent_text, personal && `只针对${state.name}：\n${personal}`]
+          .filter(Boolean).join("\n\n"));
+        paintActs();
+      } else if (ev.type === "affair") {
+        toasted = true;
+        toast(ev.created ? `管家接下了「${ev.title}」` : `「${ev.title}」已更新`);
+      } else if (ev.type === "action") {
+        acts.push(ev);
+        paintActs();
+      }
+    },
+    jsonOpts({ name: state.name, text }));
+  if (seq !== state.relaySeq) return;
+  const data = (doneEv && doneEv.data) || doneEv || {};
+  const res = (data.results && data.results[0]) || {};
   const personal = (res.personal || []).map((p) => `· ${p}`).join("\n");
   setRelayCol("#relay-t2p", [res.parent_text, personal && `只针对${state.name}：\n${personal}`]
     .filter(Boolean).join("\n\n"));
@@ -3929,11 +4012,12 @@ async function runNotice(text) {
   const done = (res.actions || []).filter((a) => a.ok).map((a) => a.detail).join("；");
   setRelayCol("#relay-c2t", res.child_text || "",
     `${res.created ? "已新建" : "已更新"}事务「${aff.title || ""}」${done ? `：${done}` : ""}`);
-  toast(res.created ? `管家接下了「${aff.title || "这件事"}」` : `「${aff.title || "这件事"}」已更新`);
+  if (!toasted) toast(res.created ? `管家接下了「${aff.title || "这件事"}」` : `「${aff.title || "这件事"}」已更新`);
   loadAffairs();
 }
 
 function setRelayDir(dir) {
+  state.relaySeq++; // 切方向 = 放弃在途渲染：旧流还可能在读，但不许再写这两栏
   state.relayDir = RELAY_HEADS[dir] ? dir : "teacher2parent";
   document.querySelectorAll("#parent-view .seg-btn").forEach((b) => {
     b.classList.toggle("active", b.dataset.direction === state.relayDir);
@@ -3949,19 +4033,39 @@ function setRelayDir(dir) {
   if (btn) btn.textContent = state.relayDir === "notice" ? "交给管家落地" : "翻译转达";
 }
 
-/* 家长周报：按需生成（一次 LLM 调用），不随进入页面自动跑 */
+/* 家长周报：按需生成（流式边写边上屏），不随进入页面自动跑 */
 async function loadWeekly() {
   const box = $("#weekly-out");
   const btn = $("#weekly-btn");
   if (!box) return;
   if (btn) btn.disabled = true;
   box.classList.remove("hidden");
-  box.innerHTML = '<p class="empty-hint">管家正在翻这一周的记录…</p>';
+  const seq = ++state.weeklySeq;
+  box.innerHTML = '<p class="empty-hint" id="weekly-hint">管家正在翻这一周的记录…</p>' +
+    '<p class="weekly-headline" id="weekly-live"></p>';
+  const live = box.querySelector("#weekly-live");
   try {
-    const resp = await api(`/api/parent/weekly?${q(state.name)}`);
-    renderWeekly(box, await resp.json());
+    let typed = "";
+    const doneEv = await readTextStream(`/api/parent/weekly?stream=1&${q(state.name)}`,
+      (tok) => {
+        if (seq !== state.weeklySeq || !live) return;
+        typed += tok;
+        live.textContent = typed;
+      },
+      (ev) => {
+        if (seq !== state.weeklySeq) return;
+        const h = box.querySelector("#weekly-hint");
+        if (!h) return;
+        if (ev.type === "phase") h.textContent = ev.text;
+        else if (ev.type === "beat") h.textContent = `管家还在写（已 ${int(ev.elapsed, 0)}s）…`;
+      });
+    if (seq !== state.weeklySeq) return;
+    const data = (doneEv && doneEv.data) || doneEv || {};
+    if (!data.report) throw new Error("周报没有生成出来");
+    renderWeekly(box, data);
     if (btn) btn.textContent = "重新生成";
   } catch (e) {
+    if (seq !== state.weeklySeq) return;
     box.innerHTML = `<p class="empty-hint">周报暂时生成不了：${escapeHtml(e.message)}</p>`;
   } finally {
     if (btn) btn.disabled = false;
@@ -4198,7 +4302,21 @@ function drawRadar(dims) {
   });
 }
 
-/** 梦想：先看邀请语，孩子说完再正式回答并落记忆 */
+/** 梦想面板的骨架：正文区 + 状态提示行（流式期间显示阶段/等待秒数）。 */
+function dreamShell(out) {
+  out.innerHTML = "";
+  const body = el("div", "dream-body");
+  out.appendChild(body);
+  const status = el("p", "empty-hint dream-status hidden");
+  out.appendChild(status);
+  const setStatus = (t) => {
+    status.textContent = t || "";
+    status.classList.toggle("hidden", !t);
+  };
+  return { body, setStatus };
+}
+
+/** 梦想：先看邀请语，孩子说完再正式回答并落记忆（正文流式逐字上屏） */
 async function runDream() {
   const btn = $("#dream-btn");
   if (btn) btn.disabled = true;
@@ -4209,11 +4327,32 @@ async function runDream() {
     $(".growth-grid").appendChild(out);
   }
   out.classList.remove("hidden");
-  out.textContent = "管家正在翻你的记忆…";
+  const seq = ++state.dreamSeq;
+  const { body, setStatus } = dreamShell(out);
+  body.textContent = "管家正在翻你的记忆…";
   try {
-    const resp = await api("/api/dream", jsonOpts({ name: state.name }));
-    const data = await resp.json();
-    out.textContent = data.text || "跟我说说你的梦想吧。";
+    let typed = "";
+    const doneEv = await readTextStream("/api/dream?stream=1",
+      (tok) => {
+        if (seq !== state.dreamSeq) return;
+        typed += tok;
+        body.textContent = typed;
+        setStatus("");
+      },
+      (ev) => {
+        if (seq !== state.dreamSeq) return;
+        if (ev.type === "phase") {
+          if (typed) setStatus(ev.text);
+          else body.textContent = ev.text;
+        } else if (ev.type === "beat") {
+          setStatus(typed ? `管家还在办（已 ${int(ev.elapsed, 0)}s）…` : `管家还在想（已 ${int(ev.elapsed, 0)}s）…`);
+        }
+      },
+      jsonOpts({ name: state.name }));
+    if (seq !== state.dreamSeq) return;
+    const data = (doneEv && doneEv.data) || doneEv || {};
+    if (!typed && data.text) body.textContent = data.text;
+    setStatus("");
     if (data.llm === false) out.appendChild(degradedNote());
     // 追加输入行：孩子把梦想说出来 → 再发一次带 text 的请求
     const row = el("div", "inbox-actions");
@@ -4239,7 +4378,7 @@ async function runDream() {
     row.appendChild(goBtn);
     input.focus();
   } catch (e) {
-    out.textContent = `梦想频道暂时打不开：${e.message}`;
+    body.textContent = `梦想频道暂时打不开：${e.message}`;
   } finally {
     if (btn) btn.disabled = false;
   }
@@ -4248,19 +4387,49 @@ async function runDream() {
 async function submitDream(text, out, input, btn) {
   if (btn) btn.disabled = true;
   if (input) input.disabled = true;
+  const seq = ++state.dreamSeq;
+  const body = out.querySelector(".dream-body") || out;
+  const status = out.querySelector(".dream-status");
+  const setStatus = (t) => {
+    if (!status) return;
+    status.textContent = t || "";
+    status.classList.toggle("hidden", !t);
+  };
+  const takeMemory = (payload) => {
+    addMemoryChip(payload);
+    mergeGraphLocally(payload);
+    s3("spawnMemory", payload);
+    state.needGraphRefresh = true;
+    growthCache.data = null;
+  };
   try {
-    const resp = await api("/api/dream", jsonOpts({ name: state.name, text }));
-    const data = await resp.json();
-    out.textContent = data.text || "记下了。";
-    if (data.memory) {
-      addMemoryChip(data.memory);
-      mergeGraphLocally(data.memory);
-      s3("spawnMemory", data.memory);
-      await loadGraph();
-    }
+    let typed = "", gotMemory = false;
+    const doneEv = await readTextStream("/api/dream?stream=1",
+      (tok) => {
+        if (seq !== state.dreamSeq) return;
+        typed += tok;
+        body.textContent = typed;
+      },
+      (ev) => {
+        if (seq !== state.dreamSeq) return;
+        if (ev.type === "phase") setStatus(ev.text);
+        else if (ev.type === "beat") setStatus(`管家还在办（已 ${int(ev.elapsed, 0)}s）…`);
+        else if (ev.type === "memory") {
+          gotMemory = true;
+          setStatus("");
+          takeMemory(ev);
+        }
+      },
+      jsonOpts({ name: state.name, text }));
+    if (seq !== state.dreamSeq) return;
+    const data = (doneEv && doneEv.data) || doneEv || {};
+    if (!typed && data.text) body.textContent = data.text;
+    setStatus("");
+    if (data.memory && !gotMemory) takeMemory(data.memory);
+    if (gotMemory || data.memory) await loadGraph();
     toast("梦想已经记进记忆星球了");
   } catch (e) {
-    out.textContent = `这次没说成：${e.message}`;
+    body.textContent = `这次没说成：${e.message}`;
   } finally {
     if (btn) btn.disabled = false;
     if (input) input.disabled = false;
@@ -4315,7 +4484,13 @@ async function loadMemory() {
   try {
     const resp = await api(`/api/memory?${q(state.name)}`);
     const data = await resp.json();
-    if (md) md.textContent = data.memory_md || "（还没有长期记忆）";
+    // 长期记忆本身是 markdown（标题 + 列表），走同一条 marked+DOMPurify 管线渲染，
+    // 原来直接 textContent 灌进去，页面上满屏 "# " 和 "- " 源码符号
+    if (md) {
+      md.classList.add("md");
+      if (data.memory_md) setMd(md, data.memory_md);
+      else md.textContent = "（还没有长期记忆）";
+    }
     if (topicsBox) {
       topicsBox.innerHTML = "";
       const topics = data.topics || [];
