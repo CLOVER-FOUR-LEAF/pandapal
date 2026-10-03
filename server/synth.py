@@ -101,10 +101,16 @@ def assemble_from_results(title: str, pairs: list[tuple[str, str]]) -> dict:
 
 
 def card_to_text(card: dict) -> str:
-    """卡片转纯文本，供记忆沉淀和历史使用。"""
-    parts = [card["title"]]
+    """卡片转 markdown 文本，供记忆沉淀和历史回放使用。
+
+    历史回放走前端 markdown 渲染：用小标题 + 列表排版，重开页面时仍像一张卡片，
+    不再是"。；"连成一整段的长文（tts.to_speech_text 会洗掉这些 markdown 记号）。
+    """
+    parts = [f"**{card['title']}**"]
     for s in card["sections"]:
-        parts.append(f"{s['heading']}：" + "；".join(s["items"]))
+        items = [str(i).strip() for i in s.get("items") or [] if str(i).strip()]
+        parts.append(f"\n**{s['heading']}**")
+        parts.extend(f"- {i}" for i in items)
     if card.get("closing"):
-        parts.append(card["closing"])
+        parts.append(f"\n{card['closing']}")
     return "\n".join(parts)

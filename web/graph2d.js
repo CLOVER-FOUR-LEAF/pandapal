@@ -270,7 +270,7 @@ export function renderFallback(containerEl, graph, opts = {}) {
     line.setAttribute("y2", b.y.toFixed(1));
     const hot = hlEdgeKey.has(`${e.source}>${e.target}`) || hlEdgeKey.has(`${e.target}>${e.source}`);
     line.setAttribute("stroke", hot ? C.hot : C.edge);
-    line.setAttribute("stroke-width", hot ? "2.4" : light ? "1.6" : "1.3");
+    line.setAttribute("stroke-width", hot ? "2.4" : "1.3");
     if (e.rel) line.setAttribute("stroke-dasharray", hot ? "none" : "3 4");
     gEdges.appendChild(line);
     edgeEls.push({ el: line, e, hot });
