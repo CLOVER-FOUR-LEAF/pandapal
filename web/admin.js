@@ -104,6 +104,8 @@ async function loadOverview() {
       ["联网搜索", data.search.configured ? "已配置" : "未配置", "未配置时用必应网页解析兜底"],
       ["TTS 语音", data.tts.available ? "可用" : (data.tts.configured ? "已关闭" : "未配置"),
         `${data.tts.mode === "builtin" ? data.tts.model : data.tts.model_design} · ${data.tts.mode}${data.tts.mode === "builtin" ? ` · ${data.tts.voice}` : ""}`],
+      ["ASR 语音输入", data.asr.available ? "可用" : (data.asr.configured ? "已关闭" : "未配置"),
+        `${data.asr.model} · ${data.asr.language}${data.asr.shared_key ? " · 复用 TTS 的 Key" : ""}`],
       ["LLM 调用", data.logs, "累计留痕条数（记录页可查）"],
       ["后台覆盖项", data.overrides.length, data.overrides.join("、") || "全部走 .env / 默认值"],
     ];
@@ -230,6 +232,10 @@ const TESTS = {
     (r) => `LLM 正常：${r.model} 回复「${r.reply}」（${r.ms}ms）`) },
   tts: { label: "试听", run: (btn) => runTest(btn, "/api/admin/test/tts", {},
     (r) => { playB64(r.audio, r.mime); return `TTS 正常：${r.model} · ${Math.round(r.bytes / 1024)}KB（${r.ms}ms）`; }) },
+  // 识别自检：TTS 念一句再让 ASR 听回来。失败时把上游原文（401/402/429…）直接显示出来，
+  // 否则孩子端只说"没听清"，管理员根本不知道是 Key、额度还是模型名的问题
+  asr: { label: "测试识别", run: (btn) => runTest(btn, "/api/admin/test/asr", {},
+    (r) => `ASR 正常：念「${r.spoken}」→ 听回「${r.text}」（${r.model} · ${r.ms}ms）`) },
 };
 
 async function runTest(btn, path, body, okText) {

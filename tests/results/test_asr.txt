@@ -1,0 +1,15 @@
+$ python tests/test_asr.py
+PASS  test_admin_asr_selfcheck
+PASS  test_api_asr_endpoint
+PASS  test_api_asr_rate_limited
+PASS  test_asr_error_keeps_upstream_status_for_classification
+PASS  test_available_uses_asr_key_then_tts_key
+PASS  test_build_body_matches_official_contract
+PASS  test_language_and_gateway_fall_back_safely
+PASS  test_log_records_call_without_storing_transcript
+PASS  test_sniff_format_accepts_only_wav_mp3
+PASS  test_transcribe_rejects_non_audio_before_calling_upstream
+PASS  test_transcribe_sends_audio_and_returns_text
+PASS  test_transcribe_surfaces_upstream_status_and_never_fabricates
+
+12/12 通过

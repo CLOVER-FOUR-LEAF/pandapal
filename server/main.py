@@ -47,7 +47,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, Field
 
-from . import (actions, affairs, auth, config, executor, files, graph, llm, memory, planner,
+from . import (actions, affairs, asr, auth, config, executor, files, graph, llm, memory, planner,
                prompts, router, sessions, store, suggest, synth, tools, tts, voice)
 
 
@@ -56,6 +56,7 @@ async def _lifespan(_app: FastAPI):
     yield
     await llm.close_shared_clients()
     await tts.close_clients()
+    await asr.close_clients()
 
 
 mimetypes.add_type("application/manifest+json", ".webmanifest")  # PWA 清单，默认会被当成 octet-stream
@@ -87,6 +88,10 @@ async def _security_headers(request: Request, call_next):
         size = int(length)
         if request.url.path == "/api/files":
             cap = config.UPLOAD_MAX_BYTES + 64 * 1024  # 留 multipart 边界与字段开销
+        elif request.url.path == "/api/asr":
+            # 语音识别的体积就是那段录音本身：60 秒 16k wav ≈ 1.9MB，
+            # 套 256KB 的 JSON 闸门会让每一段正常录音都 413（"录了但识别不了"）
+            cap = config.ASR_MAX_BYTES + 64 * 1024
         else:
             cap = 256_000
         if size > cap:
@@ -497,6 +502,28 @@ def _upload_throttle(key: str) -> bool:
         for k in [k for k, v in _UPLOAD_HITS.items()
                   if not v or now - v[-1] >= config.UPLOAD_WINDOW_S]:
             _UPLOAD_HITS.pop(k, None)
+    return ok
+
+
+_ASR_HITS: dict[str, list[float]] = {}
+
+
+def _asr_throttle(key: str) -> bool:
+    """语音识别按账号限频：每次都要上传音频并调上游，和附件上传同一类打点。
+
+    窗口与额度走 config（ASR_MAX_PER_WINDOW），默认比上传宽——语音输入是
+    高频交互动作，卡太紧会让"说一半被限流"变成新的体验坑。
+    """
+    now = time.monotonic()
+    hits = [t for t in _ASR_HITS.get(key, []) if now - t < config.ASR_WINDOW_S]
+    ok = len(hits) < config.ASR_MAX_PER_WINDOW
+    if ok:
+        hits.append(now)
+    _ASR_HITS[key] = hits
+    if len(_ASR_HITS) > 500:
+        for k in [k for k, v in _ASR_HITS.items()
+                  if not v or now - v[-1] >= config.ASR_WINDOW_S]:
+            _ASR_HITS.pop(k, None)
     return ok
 
 
@@ -1981,6 +2008,59 @@ async def api_voice_audio(request: Request, vid: str, name: str = ""):
         raise HTTPException(404, "这段语音已经不在了")
     return FileResponse(path, media_type=tts.mime_for(vid),
                         headers={"Cache-Control": "private, max-age=300"})
+
+
+# ---------------------------------------------------------------- 语音识别（孩子的语音输入）
+
+@app.get("/api/asr")
+async def api_asr_state(request: Request, name: str = ""):
+    """语音输入的可用状态：前端据此写按钮提示与最长录音秒数。
+
+    没配 Key 时如实回 available=false，前端把原因摆在按钮上——而不是像原来
+    那样把按钮整个删掉（删掉只会让人以为"这个产品没这功能"）。
+    """
+    await _auth_session(request, "chat", name)
+    return {
+        "available": asr.available(),
+        "max_seconds": config.ASR_MAX_SECONDS,
+        "language": asr.language(),
+        "languages": list(asr.LANGUAGES),
+    }
+
+
+@app.post("/api/asr")
+async def api_asr(request: Request, name: str = "", file: UploadFile = None):
+    """上传一段录音 → 识别文本（{"text": "..."}）。
+
+    识别放在服务端，是因为浏览器自带的 Web Speech API 依赖 Google 的语音服务，
+    国内一按就静默失败（详见 server/asr.py 顶部）。前端只负责录 + 编成 16k 单声道
+    wav，转写交给小米 MiMo（`mimo-v2.5-asr`）。
+    三道闸：鉴权（能力复用 chat，家长没有）、体积、按账号限频。
+    """
+    user, _sess = await _auth_session(request, "chat", name)
+    if not asr.available():
+        raise HTTPException(503, "语音识别还没开通：让管理员在后台「API 配置」里配一下 Key")
+    if not _asr_throttle(user["username"]):
+        raise HTTPException(429, "语音识别用得太密啦，歇一会儿再说")
+    if file is None or not file.filename:
+        raise HTTPException(400, "没有收到录音")
+    data = await _read_upload_limited(file, config.ASR_MAX_BYTES)
+    if data is None:
+        raise HTTPException(413, f"这段录音太长啦，一次最多 {config.ASR_MAX_SECONDS} 秒")
+    if not data:
+        raise HTTPException(400, "这段录音是空的，再说一遍试试")
+    if not asr.sniff_format(data):
+        raise HTTPException(415, "没认出来这是什么录音格式，换 Chrome / Edge 再试试")
+    try:
+        text = await asr.transcribe(data)
+    except asr.ASRError as e:
+        # 上游原因（Key/额度/音频问题）已由 asr 留痕，/api/logs 与后台「测试识别」可查
+        if asr.account_blocked(e):
+            # 401/402/403 是"这个账号现在用不了识别"（Key 不对 / 没余额 / 没权限）：
+            # 跟孩子说"没听清"等于让他一遍遍重说一件永远失败的事，得把话说到管理员那儿
+            raise HTTPException(503, "语音识别还没开通：让管理员在后台「API 配置」里确认一下")
+        raise HTTPException(502, "这次没听清，再说一遍试试")
+    return {"text": text}
 
 
 # ---------------------------------------------------------------- 附件（多模态上传）

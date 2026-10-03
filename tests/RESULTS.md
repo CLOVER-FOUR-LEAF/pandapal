@@ -12,6 +12,7 @@
 | `test_memory.py` | 记忆层单元：注入预算、检索、归档、缓存 | ❌ | **43/43 通过** | [test_memory.txt](results/test_memory.txt) |
 | `test_router.py` | 意图路由：续写指令、多任务纠偏 | ❌ | **20/20 通过** | [test_router.txt](results/test_router.txt) |
 | `test_web_static.py` | 前端静态一致性：id/图标/括号/关键钩子 | ❌ | **29/29 通过** | [test_web_static.txt](results/test_web_static.txt) |
+| `test_asr.py` | 语音识别：容器魔数、请求体契约、上游失败分类、`/api/asr` 鉴权/体积/限频 | ❌ | **10/10 通过** | [test_asr.txt](results/test_asr.txt) |
 | `test_security.py`（pytest） | 安全回归 | ❌ | **5/5 通过** | [test_security.txt](results/test_security.txt) |
 | `test_panda3d.mjs`（node:test） | 3D 熊猫模块 | ❌ | **4/4 通过** | [test_panda3d.txt](results/test_panda3d.txt) |
 | `test_pause_layout.py` | 无头 Chrome 量暂停键布局 | ❌ | 本机未装 Chrome，自动跳过 | — |
@@ -26,8 +27,12 @@
 .venv/bin/python tests/test_memory.py
 .venv/bin/python tests/test_router.py
 .venv/bin/python tests/test_web_static.py
+.venv/bin/python tests/test_asr.py
 .venv/bin/python -m pytest tests/test_security.py -v
 node tests/test_panda3d.mjs
+
+# 语音识别真链路自检（需真 Key，会花一点额度）：TTS 念一句 → ASR 听回来
+.venv/bin/python tests/test_asr_live.py
 
 # 端到端（需 .env 配好 LLM Key）。本次记录用一份 data/ 的拷贝起服务，避免污染入库的演示档：
 SB=$(mktemp -d) && cp -R data/. "$SB/" && rm -f "$SB/users.json" "$SB/tokens.json"
@@ -99,3 +104,74 @@ PANDA_DATA_DIR="$SB" PANDA_CHILD_PASSWORD=panda123 PANDA_PARENT_PASSWORD=mama123
 - **`test_router.py`（20 项）**：暂停后的「继续」走闲聊直答、不误建事务、跳过多余的 LLM 分类；带新内容的句子照常分类。
 - **`test_web_static.py`（29 项）**：HTML id 与 JS 选择器对应、图标 symbol 存在、括号配平、暂停键/断网条/重试入口/**降级标记**等关键钩子已接上。
 - **`test_security.py`（5 项）**：token 只存哈希、旧明文 token 迁移、XFF 只信本机反代、限频表硬上限、天气城市参数 URL 转义。
+
+---
+
+## 八、语音识别（ASR）接入后的回归复核
+
+> 时间：2026-10-03 ｜ 环境：Windows · Python 3.12
+> 改动：语音输入从「浏览器自带 Web Speech API」换成「前端录音 + 服务端小米 MiMo ASR」——
+> 旧实现在国内一按就静默失败（Chrome 把音频送去 Google）、Firefox/Safari 还会把按钮整个删掉。
+> 新增 `server/asr.py`、`GET|POST /api/asr`，`web/app.js` 的 `setupMic` 重写为 MediaRecorder 链路。
+> 改动后逐套复跑（原始输出：[test_asr.txt](results/test_asr.txt)）：
+
+| 套件 | 本次结果 |
+|---|---|
+| `test_asr.py`（新增） | **12/12 通过** |
+| `test_asr_web.py`（新增，真浏览器） | **3/3 通过** |
+| `test_offline.py` | **82/82 通过**（该套件自身已从文档上面的 74 项长到 82 项） |
+| `test_tts_e2e.py` | **30/30 通过** |
+| `test_memory.py` | **43/43 通过** |
+| `test_router.py` | **20/20 通过** |
+| `test_tts.py` + `test_security.py`（pytest 同跑） | **33/33 通过** |
+| `test_web_static.py` | **48/48 通过**（含 8 个前端模块的 ESM 解析；受限沙箱下 `esm_parse` 会因命名管道被拒而中断整套，需要放宽进程权限） |
+
+`test_asr.py` 覆盖：容器魔数只认 wav/mp3（文件名与 MIME 不可信）、请求体字段与官方文档一致
+（`input_audio` + data URL + `asr_options.language`）、语种/网关/模型越界一律回落、
+上游 401 / 空结果 / 断连一律抛 `ASRError` 而不伪造、**失败分类**（401/402/403 判为"账号用不了识别"→
+503"还没开通"，400/413/5xx 判为"这次没听清"→502）、300KB 录音不被中间件 256KB 的 JSON 闸门挡下、
+空录音 400、认不出的容器 415、超体积 413、家长 403、无 token 401、没配 Key 503、按账号限频、
+后台「测试识别」自检（成功/上游 402 原文回显/非 admin 403）、调用留痕只记时长与字数、
+**不把转写原文写进日志**。
+
+**真链路自检（需真 Key，本次环境没有 Key，未跑）**：`tests/test_asr_live.py` 用项目自己的 TTS
+念一句「明天我想去上机器人课」，再把这段音频喂给 ASR 比对转写。离线套件只能证明"按官方文档
+拼了请求体"，证明不了"这把 Key + 这个网关认这套请求体"——演示/上线前请在配好 Key 的机器上跑一次
+（没配 Key 时它会直接跳过并以 0 退出，不会误报失败）。
+
+### 8.1 真浏览器实测（`test_asr_web.py`，无头 Chrome + 假麦克风）
+
+`web/app.js` 里 MediaRecorder → 解码重采样 → 编 16k wav → multipart 上传 这一段，
+HTTP 层的测试覆盖不到，所以另起一个真浏览器用例（原始输出：[test_asr_web.txt](results/test_asr_web.txt)）：
+
+| 断言 | 结果 |
+|---|---|
+| 探针脚本在页面里跑起来并按 CSP（`script-src 'self'`）以外部脚本加载 | ✅ 收到回传 |
+| 点语音键 → 录 1.2 秒 → 再点一下停 → 输入框被识别文本填上 | ✅ 输入框 = `我明天想去遛熊猫`（假上游返回的那句） |
+| 上传的确实是 16k 单声道 wav | ✅ 容器识别为 `wav`，40364 字节 ≈ 1.26 秒 PCM（与 1.2 秒录音吻合，说明重采样与编码都对） |
+
+做法：沙箱数据目录 + 假 LLM + 假 ASR 上游，uvicorn 在后台线程起真服务；把 `index.html` 注入探针
+脚本后放进临时目录，并把 `config.WEB_DIR` 指过去（`GET /` 是请求时读它，所以页面来自临时副本，
+而 `/static/app.js` 仍是仓库里那份真实前端代码——测的就是它）；Chrome 用
+`--use-fake-device-for-media-stream --use-fake-ui-for-media-stream` 免手动授权；结果由页面
+`fetch('/__probe')` 回传，不靠抓 stdout。没有 Chrome/Edge 时该用例自动跳过。
+
+### 8.2 真账号实测：Key 有效，但 ASR 额度为 0（2026-10-03）
+
+用真实 MiMo Key（本地 `.env`，不入库）打真实网关，得到一条必须记下来的结论：
+
+| 调用 | 结果 |
+|---|---|
+| `GET /v1/models` | ✅ 200，模型列表含 `mimo-v2.5` / `mimo-v2.5-asr` / `mimo-v2.5-pro`（Key 有效） |
+| `mimo-v2.5-tts`（管家朗读） | ✅ 200，真的出音频（21552 / 23616 字节 mp3） |
+| `mimo-v2.5-asr`（语音识别） | ❌ **402 Insufficient account balance** |
+| `mimo-v2.5` / `mimo-v2.5-pro`（文本） | ❌ 402 同样 |
+
+补充实测（真音频、真端点）：`POST /api/asr` 用一段 Windows SAPI 合成的中文语音
+（"明天我想去上机器人课"）走真实 ASGI 栈 → 上游 402 → 接口按新分类返回
+**503 `语音识别还没开通：让管理员在后台「API 配置」里确认一下`**，而不是让孩子一遍遍重说
+"没听清"。上游原文留在 `llm_calls.jsonl`，后台「测试识别」也能直接看到。
+
+**结论**：代码链路是通的（鉴权、路由、请求体都被受理，只卡在计费），**卡点是账号额度**——
+TTS 有免费额度而 ASR/文本没有。充值或开通识别额度后，跑
+`python tests/test_asr_live.py`（或后台点「测试识别」）即可复验是否真的能听回来。

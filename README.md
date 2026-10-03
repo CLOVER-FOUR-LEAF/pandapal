@@ -71,6 +71,7 @@ cp .env.example .env   # 然后填入你的 LLM_API_KEY 等
 | 童年备忘录导出：整份档案打包 zip 交还孩子（家长 403） | `server/family.py` `GET /api/export` |
 | PWA：可添加到主屏幕；断网时档案类数据用缓存撑起，AI 端点不缓存（缓存键按 token 隔离） | `web/sw.js` + `web/manifest.webmanifest` |
 | 多模态附件：上传图片/PDF/Word/Excel/PPT/文本（拖拽、点选或粘贴），图片走视觉、扫描件 PDF 渲染成图、文档抽取正文进上下文；附件跨轮可追问、可管理 | `server/files.py` + `POST /api/files` |
+| 语音输入（小米 MiMo ASR）：浏览器只录音并就地编成 16k 单声道 wav，转写走服务端 `mimo-v2.5-asr` → 文本回填输入框（不清掉已打的字）。**不再用浏览器自带 Web Speech**——Chrome 那条路把音频送到 Google，国内直连不通，旧实现一按就静默失败；现在能不能用只取决于服务端配没配 Key，与浏览器/网络无关，且每类失败都给得出人话原因（没权限/没设备/https 缺失/没开通/没听清）。排查入口：后台「API 配置 → 测试识别」一键 TTS 念一句→ASR 听回来，上游原文直接显示 | `server/asr.py` + `POST /api/asr` + `web/app.js` `micStart` |
 
 **降级不降真**：DAG 规划失败 → 单 LLM 直出卡片（跳过拆解展示，绝不跳过生成）；节点失败 → 标记后继续；联网工具失败/没搜到 → 如实告诉孩子"没查到"，不编造结果。
 
@@ -79,7 +80,7 @@ cp .env.example .env   # 然后填入你的 LLM_API_KEY 等
 - 模型：由 `.env` 中 `LLM_MODEL` 指定（当前用 `grok-4.7`，走 OpenAI 兼容端点；兼容任意 OpenAI 协议端点，也支持 Anthropic Messages 协议）
 - 调用方式：`server/llm.py` 统一封装双协议客户端；一轮规划型对话是 分类→拆解→执行→整理 四段，闲聊可能多一轮联网工具调用，加上轮后的记忆抽取，最多七八次调用
 - 单轮耗时提示：`planner` 与 `synth` 是最重的两段（各自几十秒），界面会在这两段显示「正在拆解要办的事…」「快好了，正在整理成方案…」，属正常等待
-- **赞助商 API 使用清单**：LLM API（见 `.env`，OpenAI 兼容/Anthropic 兼容）、语音合成 [小米 MiMo TTS](https://mimo.mi.com/docs/zh-CN/quick-start/usage-guide/audio/speech-synthesis-v2.5)（`TTS_API_KEY`，可在 admin 后台「API 配置」里改、立即生效；Key 限时免费；留空则整条语音链路静默跳过）、天气 [wttr.in](https://wttr.in)（免费无需 Key）、联网搜索（配置 `SEARCH_API_KEY`+`SEARCH_BASE_URL` 走 Tavily 兼容端点；未配置时用必应网页结果解析，无需 Key）
+- **赞助商 API 使用清单**：LLM API（见 `.env`，OpenAI 兼容/Anthropic 兼容）、语音合成 [小米 MiMo TTS](https://mimo.mi.com/docs/zh-CN/quick-start/usage-guide/audio/speech-synthesis-v2.5)（`TTS_API_KEY`，可在 admin 后台「API 配置」里改、立即生效；Key 限时免费；留空则整条语音链路静默跳过）、语音识别 [小米 MiMo ASR](https://mimo.mi.com/docs/zh-CN/quick-start/usage-guide/audio/Speech-Recognition)（`mimo-v2.5-asr`；`ASR_API_KEY` 留空即复用 `TTS_API_KEY`，同一平台同一把 Key；`ASR_ENABLED=0` 或没 Key 时孩子端的语音键点击会如实说明"还没开通"）、天气 [wttr.in](https://wttr.in)（免费无需 Key）、联网搜索（配置 `SEARCH_API_KEY`+`SEARCH_BASE_URL` 走 Tavily 兼容端点；未配置时用必应网页结果解析，无需 Key）
 
 ## 六、项目结构
 
@@ -111,6 +112,15 @@ cp .env.example .env   # 然后填入你的 LLM_API_KEY 等
 
 # 暂停键布局实测：本机 Chrome 无头模式量桌面/窄屏下输入栏按钮的矩形
 .venv/bin/python tests/test_pause_layout.py
+
+# 语音识别：容器魔数/请求体契约/上游失败分类/端点鉴权体积限频（离线，不花 Key）
+.venv/bin/python tests/test_asr.py
+
+# 语音输入的真浏览器实测：无头 Chrome + 假麦克风，自动登录→录音→停止→等识别结果进输入框
+.venv/bin/python tests/test_asr_web.py
+
+# 语音识别真链路自检（需真 Key，会花一点额度）：项目自己的 TTS 念一句 → ASR 听回来
+.venv/bin/python tests/test_asr_live.py
 
 # 续写指令路由：暂停后点「继续」发来的话必须走闲聊直答，不能误建事务
 .venv/bin/python tests/test_router.py

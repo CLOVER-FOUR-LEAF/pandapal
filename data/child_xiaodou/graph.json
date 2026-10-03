@@ -916,6 +916,40 @@
           "text": "管家教小豆紧张时慢慢做三次深呼吸，一次比一次放松，前一晚按清单点一遍证件、电脑、U盘、零件包和药。"
         }
       ]
+    },
+    {
+      "id": "n_cb6f381f",
+      "label": "大学数学衔接讲义",
+      "domain": "intellect",
+      "type": "interest",
+      "status": "active",
+      "first_seen": "2026-10-03",
+      "last_seen": "2026-10-03",
+      "weight": 1,
+      "private": false,
+      "facts": [
+        {
+          "date": "2026-10-03",
+          "text": "小豆主动发来一份零基础衔接班讲义，内容涵盖幂函数、指数函数、对数函数，以及后续的极限、导数、积分，难度远超四年级水平。"
+        }
+      ]
+    },
+    {
+      "id": "n_d3571ca3",
+      "label": "高数衔接班",
+      "domain": "intellect",
+      "type": "interest",
+      "status": "active",
+      "first_seen": "2026-10-03",
+      "last_seen": "2026-10-03",
+      "weight": 1,
+      "private": false,
+      "facts": [
+        {
+          "date": "2026-10-03",
+          "text": "小豆上传了一份《零基础衔接班》讲义，内容涵盖幂函数、指数对数函数、极限、导数、不定积分与定积分等高等数学内容。"
+        }
+      ]
     }
   ],
   "edges": [

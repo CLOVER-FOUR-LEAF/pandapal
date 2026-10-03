@@ -94,6 +94,31 @@ TTS_PREVIEW_MAX_CHARS = int(os.getenv("TTS_PREVIEW_MAX_CHARS", "40"))
 # 超时基本等于网关抽风，早失败好过把 SSE 吊在那儿。
 TTS_TIMEOUT = float(os.getenv("TTS_TIMEOUT", "30"))
 
+# ---------------------------------------------------------------- 语音识别 ASR
+# 孩子的"语音输入"：浏览器只负责录音，转写交服务端（小米 MiMo Speech Recognition）。
+# 原来是纯前端 Web Speech API——Chrome 那条路把音频送到 Google，国内直连不通，
+# 一按就静默失败（详见 server/asr.py 顶部说明）。改走服务端后，识别能力只跟
+# "有没有配 Key"有关，跟浏览器和网络环境都无关。
+#
+# Key 与 TTS 同平台（都是小米 MiMo）：没单独配 ASR_API_KEY 时直接复用 TTS_API_KEY，
+# 也就是"TTS 能出声，语音输入就能用"，少一个要填的框。
+ASR_API_KEY = os.getenv("ASR_API_KEY", "")
+ASR_BASE_URL = os.getenv("ASR_BASE_URL", "").rstrip("/")
+ASR_MODEL = os.getenv("ASR_MODEL", "")
+# auto | zh | en；孩子说的是中文，默认 zh 识别更稳（后台可改）
+ASR_LANGUAGE = os.getenv("ASR_LANGUAGE", "zh").lower()
+ASR_ENABLED = os.getenv("ASR_ENABLED", "1") not in ("0", "false", "False", "")
+# 单段录音上限（秒）。前端到点自动停，服务端只按体积兜底：16k 单声道 wav 每秒
+# 约 32KB，60 秒 ≈ 1.9MB——真正起作用的是"孩子一口气说不了一分钟"。
+ASR_MAX_SECONDS = int(os.getenv("ASR_MAX_SECONDS", "60"))
+# 请求体上限：给 60 秒 16k wav 留足余量，同时不给"传大文件刷上游"留口子
+ASR_MAX_BYTES = int(os.getenv("ASR_MAX_MB", "4")) * 1024 * 1024
+# 单次识别超时。ASR 是秒级返回，30 秒还没回基本等于网关抽风，早失败好过吊住输入框
+ASR_TIMEOUT = float(os.getenv("ASR_TIMEOUT", "30"))
+# 按账号限频：每次识别都要上传音频 + 调上游，和附件上传同一类打点
+ASR_MAX_PER_WINDOW = int(os.getenv("ASR_MAX_PER_WINDOW", "40"))
+ASR_WINDOW_S = 600
+
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8000"))
 
@@ -150,6 +175,12 @@ SETTINGS_KEYS: dict[str, tuple[str, object, bool]] = {
     "TTS_FORMAT": ("TTS_FORMAT", lambda v: str(v).strip().lower(), False),
     "TTS_MAX_CHARS": ("TTS_MAX_CHARS", lambda v: _as_int(v, 400), False),
     "TTS_CARD_MAX_CHARS": ("TTS_CARD_MAX_CHARS", lambda v: _as_int(v, 120), False),
+    # 语音识别（孩子的语音输入）。ASR_API_KEY 留空 = 复用 TTS_API_KEY，见 asr.api_key()
+    "ASR_API_KEY": ("ASR_API_KEY", lambda v: str(v).strip(), True),
+    "ASR_BASE_URL": ("ASR_BASE_URL", lambda v: str(v).strip().rstrip("/"), False),
+    "ASR_MODEL": ("ASR_MODEL", lambda v: str(v).strip(), False),
+    "ASR_LANGUAGE": ("ASR_LANGUAGE", lambda v: str(v).strip().lower(), False),
+    "ASR_ENABLED": ("ASR_ENABLED", lambda v: _as_bool(v), False),
 }
 
 
