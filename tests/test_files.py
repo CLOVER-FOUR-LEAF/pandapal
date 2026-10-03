@@ -25,6 +25,10 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 os.environ["PANDA_DATA_DIR"] = tempfile.mkdtemp(prefix="panda_files_")
+# 视觉开关也必须隔离：本地 .env 可能写着 LLM_VISION=off（例如配 deepseek-chat 时），
+# 那会让"图片走多模态"的用例全挂，而挂的原因是开发机配置、不是代码。
+# 本文件测的是 auto（代码默认值）下的行为；想要 off 的用例自己覆盖。
+os.environ["LLM_VISION"] = "auto"
 # pytest 单进程里别的测试文件可能已经导入过 server 包（沙箱不同）：先清掉再导入，
 # 否则 config 停在先导入者的目录上，本文件登录 admin 会拿不到账号而 403。
 for _m in [m for m in sys.modules if m == "server" or m.startswith("server.")]:
@@ -251,6 +255,18 @@ def test_store_and_quota() -> None:
     pub = store.public(a)
     record("store_public_hides_text", "text" not in pub and pub["has_text"] is True
            and pub["chars"] == 5, str(pub)[:60])
+    # preview 只给真能当图显示的类型：文本/Excel/PDF 以前也带 preview，前端把它的原图
+    # 塞进 <img>，浏览器解不了就只剩一块空白（图标还被跳过）——"传 Excel 不显示图标"。
+    plain = store.public(a)
+    record("public_preview_only_for_images",
+           plain.get("preview") == "" and plain.get("content", "").endswith("/content"),
+           f"text: preview={plain.get('preview')!r} content={plain.get('content')!r}")
+    img_item = fresh_store("child_img")
+    img_pub = img_item.public(img_item.save(make_png(60, 40), "题图.png", "image/png"))
+    record("public_image_has_preview",
+           img_pub.get("preview", "").endswith("/content")
+           and img_pub.get("preview") == img_pub.get("content"),
+           f"image: preview={img_pub.get('preview')!r}")
     record("store_delete", store.delete(a["id"]) and not store.path_of(a).exists()
            and store.get(a["id"]) is None)
     record("store_delete_missing", store.delete("deadbeefdeadbeef") is False)

@@ -110,12 +110,20 @@ const state = {
   attachPending: [], // 上传中/失败的附件槽位
   recent: [],        // 服务端最近上传的附件（"最近上传"面板用）
   recentOpen: false, // 面板是否展开
+  lightboxFile: null, // 大图浮层里正在看的附件（下载原图要用）
   needGraphRefresh: false,
   relayDir: "teacher2parent",
 };
 
 let pandaSvg = null;
-let micRec = null;
+let micRec = null;      // MediaRecorder（正在录音时非空）
+let micStream = null;   // 麦克风流：用完必须停轨道，否则浏览器标签页一直亮着录音标
+let micTimer = null;    // 最长录音时长的自动停止定时器
+let micPending = false; // 已 stop()、正等 onstop 把最后一块数据交出来
+let micAbort = false;   // 退出登录/切账号时置位：丢掉这一段，不上传
+let micBusy = false;    // 正在识别上一句
+let micMax = 60;        // 单段录音上限（秒），由 GET /api/asr 下发
+let micAvail = true;    // 服务端有没有配好识别 Key（没配就如实说明，不假装能用）
 
 /* ==========================================================================
  * 1. DOM / 字符串 / 图标 / 日期工具
@@ -938,6 +946,9 @@ function resetUserUI() {
   if (fb) fb.setAttribute("aria-expanded", "false");
   state.retryFiles = [];
   renderAttachList();
+  // 图片缓存与大图浮层也是上一个账号的内容：URL 失效之外还要把内存里的 blob 丢掉
+  closeLightbox();
+  attachBlobs.clear();
   const fi = $("#file-input");
   if (fi) fi.value = "";
   set("#briefing-card .panel-body", '<div class="skeleton skeleton-lines"></div>');
@@ -990,7 +1001,7 @@ function resetUserUI() {
   }
   const secretBtn = $("#secret-btn");
   if (secretBtn) secretBtn.setAttribute("aria-pressed", "false");
-  try { if (micRec && micRec.abort) micRec.abort(); } catch { /* 忽略 */ }
+  micCancel();   // 还有没上传的录音就丢掉，别把上一个人的声音带进下一个账号
 }
 
 function logout() {
@@ -1841,13 +1852,14 @@ function renderAttachList() {
   box.classList.remove("hidden");
   items.forEach((f) => {
     const chip = el("span", `attach-chip${f.error ? " error" : ""}${f.uploading ? " uploading" : ""}`);
-    if (f.preview) {
+    if (isPreviewableImage(f)) {
       const img = el("img", "attach-thumb");
       img.alt = "";
       img.loading = "lazy";
-      loadPrivateImage(img, f.preview);
+      loadPrivateImage(img, f.preview || f.content, () => swapImgToIcon(img, f));
       chip.appendChild(img);
     } else {
+      // 非图片（PDF/Word/Excel/文本）：直接给类型图标，不去试解码原图
       chip.appendChild(icon(attachIcon(f)));
     }
     chip.appendChild(el("span", "attach-name", f.name || "文件"));
@@ -2010,15 +2022,114 @@ async function uploadFiles(fileList) {
   if (input) input.focus();
 }
 
-/** 带鉴权的图片加载：<img> 不能带 Authorization 头，所以 fetch 成 blob 再挂上去。 */
-async function loadPrivateImage(img, url) {
+/** 附件原图缓存：url → { blob, size }。
+ *
+ * 缓存是为了点开大图时不用再请求一次原图（列表里的缩略图通常就是刚存下的那张）；
+ * 但绝不复用 objectURL 本身——URL 一旦被 revoke 就永久失效，二次挂到 <img> 上
+ * 会静默变空白（"图时有时无"就是这么来的）。每次上屏生成一个新的。
+ */
+const attachBlobs = new Map();
+
+/**
+ * 带鉴权的图片加载：<img> 不能带 Authorization 头，所以 fetch 成 blob 再挂上去。
+ *
+ * onFail：拿不到图时回调，调用方据此换成文件图标——只留一个破了的小方块
+ * （或干脆空白）会让人以为"文件传丢了"，其实多半只是这张图挂了。
+ *
+ * 两道保险，因为"服务端说是图片"不等于"浏览器解得了"（HEIC、坏图、被截断）：
+ *   1. fetch 失败 / 空 blob 立刻回调；
+ *   2. 挂上去后等一次 load——有些图能取到字节却解码不了，那就同样回落成图标。
+ */
+async function loadPrivateImage(img, url, onFail) {
+  if (!img || !url) { onFail?.(); return; }
+  let objUrl = "";
   try {
-    const resp = await api(url);
-    const blob = await resp.blob();
-    const objUrl = URL.createObjectURL(blob);
+    let blob = (attachBlobs.get(url) || {}).blob;
+    if (!blob) {
+      const resp = await api(url);
+      blob = await resp.blob();
+      if (!blob || !blob.size) throw new Error("空文件");
+      attachBlobs.set(url, { blob });
+    }
+    if (!img.isConnected) return;   // 已经换了一轮/被移除，别白挂
+    objUrl = URL.createObjectURL(blob);
+    // 记在元素上，重绘时由 sweepPendingObjectUrls 统一回收
+    img.dataset.objurl = objUrl;
     img.src = objUrl;
-    img.addEventListener("load", () => URL.revokeObjectURL(objUrl), { once: true });
-  } catch { /* 图加载失败不影响文字 */ }
+    if (typeof img.decode === "function") {
+      await img.decode();           // 解码失败会 reject，走到下面的 onFail
+      if (!img.isConnected) return;
+    }
+  } catch {
+    if (objUrl) { try { URL.revokeObjectURL(objUrl); } catch { /* 忽略 */ } }
+    onFail?.();
+  }
+}
+
+/** 把"没挂上的 <img>"换回文件图标：卡片仍然可读，只是没有预览。 */
+function swapImgToIcon(img, file) {
+  if (!img || !img.isConnected) return;
+  const svg = icon(attachIcon(file));
+  img.replaceWith(svg);
+}
+
+/** 清掉还没用上的 objectURL：暂存区/对话区重绘前叫一次，别让 blob 越攒越多。 */
+function sweepPendingObjectUrls(root) {
+  if (!root) return;
+  if (root._pendingUrls) {
+    root._pendingUrls.forEach((u) => { try { URL.revokeObjectURL(u); } catch { /* 忽略 */ } });
+    root._pendingUrls = null;
+  }
+  root.querySelectorAll("img[data-objurl]").forEach((im) => {
+    try { URL.revokeObjectURL(im.dataset.objurl); } catch { /* 忽略 */ }
+  });
+}
+
+/** 点开大图：附件原图在对话框里只有缩略图那么大，看不清题面/手写答案。 */
+let lightboxUrl = null;
+
+function closeLightbox() {
+  const box = $("#lightbox");
+  if (box) { box.classList.add("hidden"); box.setAttribute("aria-hidden", "true"); }
+  state.lightboxFile = null;
+  if (lightboxUrl) {
+    try { URL.revokeObjectURL(lightboxUrl); } catch { /* 忽略 */ }
+    lightboxUrl = null;
+  }
+  const img = $("#lightbox-img");
+  if (img) img.removeAttribute("src");
+}
+
+/** 显示原图（不裁剪、按屏幕缩放）。blob 已在缓存里就直接用，避免二次下载。 */
+async function openLightbox(file) {
+  const box = $("#lightbox");
+  const img = $("#lightbox-img");
+  const url = fileContentUrl(file);
+  if (!box || !img || !isPreviewableImage(file) || !url) return;
+  try {
+    let blob = (attachBlobs.get(url) || {}).blob;
+    if (!blob) {
+      const resp = await api(url);
+      blob = await resp.blob();
+      attachBlobs.set(url, { blob });
+    }
+    if (lightboxUrl) { try { URL.revokeObjectURL(lightboxUrl); } catch { /* 忽略 */ } }
+    lightboxUrl = URL.createObjectURL(blob);
+    state.lightboxFile = file;
+    img.alt = file.name || "图片";
+    img.src = lightboxUrl;
+    const cap = $("#lightbox-cap");
+    if (cap) {
+      const bits = [file.name || "图片"];
+      if (file.width && file.height) bits.push(`${file.width}×${file.height}`);
+      if (file.size_cn) bits.push(file.size_cn);
+      cap.textContent = bits.join(" · ");
+    }
+    box.classList.remove("hidden");
+    box.setAttribute("aria-hidden", "false");
+  } catch (e) {
+    toast(`这张图打不开了：${e.message}`);
+  }
 }
 
 /** 一轮对话 / 一条历史消息附带的文件卡（点在图片上看大图，其它文件走下载）。 */
@@ -2027,16 +2138,39 @@ function filesRow(files) {
   if (!list.length) return null;
   const row = el("div", "msg-files");
   list.forEach((f) => {
-    const card = el("a", "msg-file");
-    card.href = f.preview || "#";
-    card.setAttribute("aria-label", `${f.name || "文件"}（${attachKindCn(f.kind)}）`);
-    card.onclick = (e) => { e.preventDefault(); downloadAttach(f); };
-    if (f.kind === "image" && f.preview) {
+    const isImage = isPreviewableImage(f);
+    const card = el("a", `msg-file${isImage ? " msg-file-image" : ""}`);
+    card.href = fileContentUrl(f) || "#";
+    card.setAttribute("aria-label", isImage
+      ? `${f.name || "图片"}（点开看大图）`
+      : `${f.name || "文件"}（${attachKindCn(f.kind)}）`);
+    // 图片：先给一个文件图标兜底，图挂上了再把它去掉——上传的就是张坏图时，
+    // 卡片不会变成一个破图占位，而是如实回落到"图片 · 2.1 MB"。
+    let ph = null;
+    if (isImage) {
+      ph = icon("i-image");
+      card.appendChild(ph);
+    }
+    card.onclick = (e) => {
+      e.preventDefault();
+      if (isImage) openLightbox(f); else downloadAttach(f);
+    };
+    if (isImage) {
       const img = el("img");
-      img.alt = "";
+      img.alt = f.name || "图片";
       img.loading = "lazy";
-      loadPrivateImage(img, f.preview);
+      loadPrivateImage(img, fileContentUrl(f), () => img.remove());
+      img.addEventListener("load", () => { ph?.remove(); ph = null; }, { once: true });
       card.appendChild(img);
+      // 缩略图本身可点开大图；旁边再给一个明确的"下载原图"入口，
+      // 否则想存下来的人只能先点开大图、再点浮层里的按钮，多一步。
+      const dl = el("button", "msg-file-dl");
+      dl.type = "button";
+      dl.setAttribute("aria-label", `下载原图 ${f.name || "图片"}`);
+      dl.title = "下载原图";
+      dl.appendChild(icon("i-download"));
+      dl.onclick = (e) => { e.preventDefault(); e.stopPropagation(); downloadAttach(f); };
+      card.appendChild(dl);
     } else {
       card.appendChild(icon(attachIcon(f)));
     }
@@ -4033,38 +4167,292 @@ async function renderChips(chips) {
   box.scrollLeft = 0;
 }
 
-function setupMic() {
+/* ---- 语音输入：浏览器只负责录音，识别在服务端（小米 MiMo ASR） ----
+ *
+ * 为什么不再是 window.webkitSpeechRecognition：那条路在 Chrome/Edge 上是把音频
+ * 送到 Google 的语音服务，国内直连不通，一按就 network / service-not-allowed；
+ * Firefox / Safari 干脆没这个接口，旧代码会把按钮整个删掉——评委看到的就是
+ * "点了没反应"或者"根本没这个功能"。改成 MediaRecorder 录音 + POST /api/asr 之后，
+ * 能不能用只取决于"服务端配没配 Key"，跟浏览器和网络环境都无关。
+ */
+
+/** 录音上行链路是否具备（安全上下文 + getUserMedia + MediaRecorder），不具备时给出人话原因。 */
+function micCapability() {
+  const Rec = window.MediaRecorder || window.webkitMediaRecorder;
+  if (!window.isSecureContext) {
+    return { ok: false, why: "麦克风只在 https 或 localhost 下才能用：请用 https 打开这个页面" };
+  }
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    return { ok: false, why: "这个浏览器不给网页用麦克风，换 Chrome / Edge 试试" };
+  }
+  if (!Rec) return { ok: false, why: "这个浏览器不支持网页录音，换 Chrome / Edge 试试" };
+  return { ok: true, why: "" };
+}
+
+/** 录制容器：优先 opus/webm，其次 mp4/aac（Safari）。拿到什么容器都行——
+ *  上传前统一解成 16k 单声道 wav，上游只认 wav/mp3。 */
+function pickMicMime() {
+  const Rec = window.MediaRecorder || window.webkitMediaRecorder;
+  if (!Rec || !Rec.isTypeSupported) return "";
+  const cands = ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus",
+                 "audio/mp4", "audio/mpeg"];
+  return cands.find((m) => Rec.isTypeSupported(m)) || "";
+}
+
+/** 解出 PCM。decodeAudioData 要一个 AudioContext，复用播放语音的那个。 */
+async function decodeAudioBlob(blob) {
+  const AC = window.AudioContext || window.webkitAudioContext;
+  const ctx = getAudioCtx() || (AC ? new AC() : null);
+  if (!ctx || !ctx.decodeAudioData) throw new Error("这个浏览器解不了录音");
+  return ctx.decodeAudioData(await blob.arrayBuffer());
+}
+
+/** 重采样到 16k 单声道。优先 OfflineAudioContext：它自带带限重采样（48k→16k
+ *  直接抽取会混叠，糊掉辅音，识别率掉得比想象中多），顺手把多声道混成单声道。
+ *  老浏览器没有这个接口时退回"取平均 + 线性插值"：精度差一点，但不会因此用不了。 */
+async function resampleToMono(buf, rate) {
+  const OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+  if (OAC) {
+    try {
+      const off = new OAC(1, Math.max(1, Math.ceil(buf.duration * rate)), rate);
+      const src = off.createBufferSource();
+      src.buffer = buf;
+      src.connect(off.destination);
+      src.start();
+      return (await off.startRendering()).getChannelData(0);
+    } catch (e) {
+      console.warn("[mic] OfflineAudioContext 重采样失败，退回线性插值：", e && e.message);
+    }
+  }
+  let mono = buf.getChannelData(0);
+  if (buf.numberOfChannels > 1) {
+    mono = new Float32Array(buf.length);
+    for (let c = 0; c < buf.numberOfChannels; c++) {
+      const d = buf.getChannelData(c);
+      for (let i = 0; i < d.length; i++) mono[i] += d[i] / buf.numberOfChannels;
+    }
+  }
+  const ratio = buf.sampleRate / rate;
+  const n = Math.max(1, Math.floor(mono.length / ratio));
+  const out = new Float32Array(n);
+  for (let i = 0; i < n; i++) out[i] = mono[Math.floor(i * ratio)] || 0;
+  return out;
+}
+
+/** Float32 单声道 → 16bit PCM 的 WAV 字节。 */
+function encodeWav(pcm, rate) {
+  const view = new DataView(new ArrayBuffer(44 + pcm.length * 2));
+  const w = (o, s) => { for (let i = 0; i < s.length; i++) view.setUint8(o + i, s.charCodeAt(i)); };
+  w(0, "RIFF"); view.setUint32(4, 36 + pcm.length * 2, true); w(8, "WAVEfmt ");
+  view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+  view.setUint32(24, rate, true); view.setUint32(28, rate * 2, true);
+  view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+  w(36, "data"); view.setUint32(40, pcm.length * 2, true);
+  for (let i = 0; i < pcm.length; i++) {
+    const s = Math.max(-1, Math.min(1, pcm[i] || 0));
+    view.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+  }
+  return new Blob([view.buffer], { type: "audio/wav" });
+}
+
+/** Blob（webm/mp4/ogg 都行）→ 16kHz 单声道 16bit WAV。
+ *  自己转的原因：上游只收 wav/mp3，而 MediaRecorder 不产出这两种；让服务端依赖
+ *  ffmpeg 不是我们想背的运维负担，而在浏览器里解码 + 重采样几毫秒就做完了，
+ *  顺手把上行体积压到 32KB/s（60 秒约 1.9MB）。 */
+async function blobToWav(blob) {
+  const rate = 16000;
+  const buf = await decodeAudioBlob(blob);
+  return encodeWav(await resampleToMono(buf, rate), rate);
+}
+
+const MIC_ERR_TEXT = {
+  NotAllowedError: "麦克风权限没给：点地址栏左边的锁，允许麦克风再试一次",
+  PermissionDeniedError: "麦克风权限没给：点地址栏左边的锁，允许麦克风再试一次",
+  NotFoundError: "没找到麦克风，插一个或者换台设备试试",
+  DevicesNotFoundError: "没找到麦克风，插一个或者换台设备试试",
+  NotReadableError: "麦克风被别的程序占着（会议 / 录音软件），关掉再试",
+  TrackStartError: "麦克风被别的程序占着（会议 / 录音软件），关掉再试",
+  SecurityError: "浏览器拦了麦克风：请用 https 或 localhost 打开这个页面",
+  AbortError: "录音被打断了，再试一次",
+};
+
+function micErrorText(e) {
+  const name = (e && e.name) || "";
+  if (MIC_ERR_TEXT[name]) return MIC_ERR_TEXT[name];
+  const msg = (e && e.message) || "";
+  if (name === "NotSupportedError" || /decode|解不了/.test(msg)) {
+    return "这个浏览器解不了录音，换 Chrome / Edge 试试";
+  }
+  return msg || "语音识别没成功，再试一次";
+}
+
+/** 松开麦克风：停轨道 + 停定时器。用完必调，否则标签页上的录音标一直亮。 */
+function micRelease() {
+  if (micTimer) { clearTimeout(micTimer); micTimer = null; }
+  if (micStream) {
+    try { micStream.getTracks().forEach((t) => t.stop()); } catch { /* 忽略 */ }
+    micStream = null;
+  }
+}
+
+function micPaint(recording) {
   const btn = $("#mic-btn");
-  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SR || !btn) {
-    if (btn) btn.remove();
+  if (!btn) return;
+  btn.classList.toggle("recording", !!recording);
+  btn.setAttribute("aria-pressed", recording ? "true" : "false");
+}
+
+/** 结束这一段录音（到点自动停和手动停都走这里）。abort=true 表示这段不要了。 */
+function micStop(abort) {
+  if (abort) micAbort = true;
+  const rec = micRec;
+  if (rec && rec.state === "recording") {
+    try {
+      micPending = true;
+      rec.stop();   // 数据在 onstop 里交出来，真正的上传在那边发起
+    } catch {
+      // stop() 失败（浏览器已经替你停了）：别把"待收尾"永远挂住，
+      // 否则 micStart 会一直以为上一段还没结束，语音键就此点不动了
+      micPending = false;
+    }
+  }
+  micRelease();
+  micPaint(false);
+}
+
+/** 退出登录 / 切账号：丢掉正在录的这段，不上传、不再回调。 */
+function micCancel() {
+  micAbort = true;
+  micStop(true);
+}
+
+/** 识别结果写进输入框：**接着**已有内容写，不再清掉孩子已经打的字（旧实现会整段覆盖）。 */
+function micFill(text) {
+  const input = $("#msg-input");
+  if (!input) return;
+  const cur = input.value.trim();
+  input.value = cur ? `${cur}${/[，。！？,.!?]$/.test(cur) ? "" : " "}${text}` : text;
+  input.focus();
+  toast("听清了，确认一下再发送", 2200);
+}
+
+async function micUpload(chunks, mime) {
+  if (!chunks || !chunks.length) { toast("没录到声音，凑近一点再说一遍"); return; }
+  let raw;
+  try {
+    raw = new Blob(chunks, mime ? { type: mime } : {});
+  } catch { raw = new Blob(chunks); }
+  if (raw.size < 1200) { toast("这段太短啦，说完再点一下语音键"); return; }
+  micBusy = true;
+  const btn = $("#mic-btn");
+  if (btn) btn.classList.add("mic-wait");
+  try {
+    // 少数浏览器（Safari）本来就录出 mp3：直接上行，省一次解码
+    const wav = /audio\/mpeg/.test(raw.type) ? raw : await blobToWav(raw);
+    const fd = new FormData();
+    fd.append("file", wav, /audio\/mpeg/.test(wav.type) ? "voice.mp3" : "voice.wav");
+    const r = await api(`/api/asr?${q(state.name || "")}`, { method: "POST", body: fd });
+    const d = await r.json().catch(() => ({}));
+    const text = String((d && d.text) || "").trim();
+    if (!text) { toast("没听清，再说一遍试试"); return; }
+    micFill(text);
+  } catch (e) {
+    console.warn("[mic] 识别失败：", e && e.name, e && e.message);
+    toast(micErrorText(e));
+  } finally {
+    micBusy = false;
+    if (btn) btn.classList.remove("mic-wait");
+  }
+}
+
+async function micStart() {
+  const cap = micCapability();
+  if (!cap.ok) { toast(cap.why); return; }
+  if (!micAvail) { toast("语音识别还没开通：先打字跟我说吧"); return; }
+  if (micPending || micBusy) { toast("稍等一下，上一句还在处理"); return; }
+  micAbort = false;
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
+    });
+  } catch (e) {
+    console.warn("[mic] 拿不到麦克风：", e && e.name, e && e.message);
+    toast(micErrorText(e));
     return;
   }
-  btn.classList.remove("hidden");
-  micRec = new SR();
-  micRec.lang = "zh-CN";
-  micRec.interimResults = true;
-  let recording = false;
-  micRec.onresult = (e) => {
-    let text = "";
-    for (const r of e.results) text += r[0].transcript;
-    const input = $("#msg-input");
-    if (input) input.value = text;
+  micStream = stream;
+  const Rec = window.MediaRecorder || window.webkitMediaRecorder;
+  const mime = pickMicMime();
+  try {
+    micRec = mime ? new Rec(stream, { mimeType: mime }) : new Rec(stream);
+  } catch (e) {
+    console.warn("[mic] 建 MediaRecorder 失败：", e && e.name, e && e.message);
+    micRelease();
+    toast("这个浏览器录不了音，换 Chrome / Edge 试试");
+    return;
+  }
+  const chunks = [];
+  micRec.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+  micRec.onerror = (e) => {
+    console.warn("[mic] 录音出错：", e && e.name, e && e.message);
+    micAbort = true;
+    micPending = false;
+    micStop(true);
+    toast("录音出错了，再试一次");
   };
-  const stop = () => {
-    recording = false;
-    btn.classList.remove("recording");
-    btn.setAttribute("aria-pressed", "false");
+  micRec.onstop = () => {
+    micPending = false;
+    micRelease();
+    micPaint(false);
+    if (micAbort) return;   // 退出登录/切账号期间录的这段直接丢
+    micUpload(chunks, mime);
   };
-  micRec.onend = stop;
-  micRec.onerror = stop;
+  try {
+    micRec.start();
+  } catch (e) {
+    console.warn("[mic] 录音起不来：", e && e.name, e && e.message);
+    micRelease();
+    toast("麦克风起不来，再试一次");
+    return;
+  }
+  micPaint(true);
+  toast(`我在听，说完再点一下（最多 ${micMax} 秒）`, 2400);
+  micTimer = setTimeout(() => {
+    toast("到时间啦，我先去识别", 1800);
+    micStop(false);
+  }, micMax * 1000);
+}
+
+/** 拉一次服务端识别状态：能不能用、单段最长多少秒。 */
+async function fetchAsrState() {
+  try {
+    const r = await api(`/api/asr?${q(state.name || "")}`);
+    const d = await r.json().catch(() => ({}));
+    micAvail = !!d.available;
+    micMax = Number(d.max_seconds) > 0 ? Number(d.max_seconds) : 60;
+  } catch {
+    // 探测失败不挡输入：真按了再让 /api/asr 回真实原因（403/503 都是人话）
+    micAvail = true;
+  }
+  const btn = $("#mic-btn");
+  if (btn && !micAvail) btn.title = "语音识别还没开通：让管理员在后台「API 配置」里配一下 Key";
+}
+
+function setupMic() {
+  const btn = $("#mic-btn");
+  if (!btn) return;
+  const cap = micCapability();
+  // 不能用的原因写在 title 上、点击时如实说出来——而不是像旧代码那样删掉按钮：
+  // 删掉只会让人以为"这个产品没有语音输入"，说清楚才知道是浏览器/环境的问题。
+  btn.title = cap.ok ? "语音输入：点一下开始说，再点一下结束"
+                     : `语音输入暂时用不了：${cap.why}`;
+  setHidden("#mic-btn", (state.authRole || "child") === "parent"); // 家长不能发消息，自然也不能说
   btn.onclick = () => {
-    if (recording) { micRec.stop(); return; }
-    recording = true;
-    btn.classList.add("recording");
-    btn.setAttribute("aria-pressed", "true");
-    try { micRec.start(); } catch { stop(); }
+    if (micRec && micRec.state === "recording") { micStop(false); return; }
+    micStart();
   };
+  fetchAsrState();
 }
 
 function toggleSecret() {
@@ -4288,10 +4676,12 @@ function bind() {
       }
     });
   }
-  // ESC：回答进行中先停回答（和主流 agent 一致），否则关抽屉
+  // ESC：大图先关（看图为最上层），然后停回答，最后关抽屉
   document.addEventListener("keydown", (e) => {
     if (e.key !== "Escape" || e.isComposing || e.keyCode === 229) return; // 输入法里按 Esc 是取消候选字
-    // 先关开着的抽屉；没有可关的，回答进行中才是停回答
+    const lb = $("#lightbox");
+    if (lb && !lb.classList.contains("hidden")) { closeLightbox(); return; }
+    // 再关开着的抽屉；没有可关的，回答进行中才是停回答
     let closed = false;
     for (const sel of ["#node-drawer", "#affair-detail"]) {
       const d = $(sel);

@@ -67,9 +67,12 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 # 前端无内联脚本/事件处理器（启动层也是独立的 static/splash.js），CSP 收口到 'self'；
 # style 留 'unsafe-inline'（app.js 大量 el.style 赋值、启动层内联样式），img 放 data:（favicon 是内嵌 SVG）。
+# img 还必须放 blob:：附件原图（带 token 的 /api/files/<id>/content）拿不到裸 URL，
+# 前端一律 fetch 成 Blob 再用 createObjectURL 挂到 <img> 上。少了 blob: 就会被 CSP
+# 拦掉——表现是"多模态的图片一张都显示不出来"，而控制台只报一行 CSP 违规。
 _CSP = (
     "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
-    "img-src 'self' data:; connect-src 'self'; font-src 'self'; "
+    "img-src 'self' data: blob:; connect-src 'self'; font-src 'self'; "
     "object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
 )
 

@@ -635,6 +635,10 @@ async def _run(client: httpx.AsyncClient) -> None:
            r.status_code == 200 and "script-src 'self'" in csp
            and r2.status_code == 200 and "immutable" in cc,
            f"csp={'y' if csp else 'n'} vendor_cache={cc[:36]}")
+    # 附件原图只能走 fetch+blob（token 不能进 URL），img-src 少了 blob: 就一张都显示不出来
+    img_src = re.search(r"img-src([^;]*)", csp)
+    record("csp_allows_blob_images", bool(img_src) and "blob:" in img_src.group(1),
+           (img_src.group(1).strip() if img_src else "no img-src"))
 
     # 12. XFF 信任收窄：回环/私网可信，公网/非法值不信
     record("xff_trust",
