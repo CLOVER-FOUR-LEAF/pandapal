@@ -2391,7 +2391,12 @@ button:disabled, .btn:disabled, .icon-btn:disabled, .chip:disabled {
 .tag.tag-admin { color: var(--amber); }
 
 .admin-table {
-  border-radius: var(--r-lg); overflow: hidden;
+  border-radius: var(--r-lg); overflow: hidden auto;
+  /* 账号/档案/数据文件三张表都是"越翻越长"的列表。原来只写 overflow:hidden
+     又没有高度上限，条目一多就把整页撑得很长——限高 + 纵向滚动，
+     表下方的内容不用翻半天才够得着。 */
+  max-height: min(52dvh, 520px);
+  overscroll-behavior: contain;
   background: var(--card); border: 1px solid var(--line);
   box-shadow: var(--shadow-card);
 }

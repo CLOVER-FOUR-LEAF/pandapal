@@ -15,6 +15,7 @@ PORT=8017
 echo "==> 同步代码到 ${REMOTE}:~/${APP_DIR}"
 rsync -avz --delete \
   --exclude='.git/' --exclude='.venv/' --exclude='__pycache__/' \
+  --exclude='.claude/' --exclude='.pytest_cache/' \
   --exclude='.DS_Store' --exclude='*.log' \
   --exclude='.env' --exclude='.env.*' \
   --exclude='data/logs/' --exclude='data/users.json' \
