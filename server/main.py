@@ -47,8 +47,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, Field
 
-from . import (actions, affairs, auth, config, executor, files, graph, llm, memory, planner,
-               prompts, router, sessions, store, stt, suggest, synth, tools, tts, voice)
+from . import (actions, affairs, auth, config, dream, executor, files, graph, llm, memory,
+               planner, prompts, router, sessions, store, stt, suggest, synth, tools, tts, voice)
 
 
 @asynccontextmanager
@@ -1630,6 +1630,10 @@ async def _chat_settle(sess, ctx: dict):
                     gdata["secret"] = True
                 if gdata.get("added_nodes") or gdata.get("added_edges") or gdata.get("updated"):
                     await out.put(_sse({"type": "memory", **gdata}))
+            # 做梦：沉淀落盘后、轮后空闲时整理记忆——daily 里反复出现的事
+            # 晋升进 MEMORY.md。悄悄话轮不触发（私密内容连"整理"都不沾）
+            if not is_secret:
+                _bg(asyncio.create_task(_dream_guarded(sess)))
 
         # 按这一轮的实际情况换一批快捷话题（确定性规则，不额外调 LLM）
         if not is_secret:
@@ -1653,6 +1657,13 @@ async def _chat_settle(sess, ctx: dict):
             pending -= 1
             continue
         yield chunk
+
+
+async def _dream_guarded(sess) -> None:
+    try:
+        await dream.maybe_dream(sess.store)
+    except Exception as e:  # noqa: BLE001 做梦是锦上添花，不许惊动对话
+        print(f"[dream] 整理失败：{e}")
 
 
 def _now_text() -> str:
