@@ -40,6 +40,41 @@ def looks_like_continuation(message: str) -> bool:
     return bool(text) and len(text) <= 12 and bool(_CONTINUE_RE.match(text))
 
 
+# ---- FastTriage：免 LLM 快速路 -------------------------------------------------
+# 分类是每条消息的第一跳（p50 ~2s、p90 6.8s、失败率 19%，还占着会话锁）。
+# 绝大多数孩子的话是纯闲聊——一个办事/转达/更新/讲解/待办信号词都不带；
+# 这种消息不需要 LLM 就知道该走 chat，省掉第一跳。
+# 保守原则：命中任一 hint 就 veto 回 LLM，宁可少快也不错快。
+
+# 所有需要 LLM 定夺的信号集合：任何一条命中都不许走快速路
+_ALL_HINTS = _NEW_HINTS + _UPDATE_HINTS + _RELAY_HINTS + _EXPLAIN_HINTS + _TODO_HINTS
+_FAST_MAX_LEN = 120  # 超长的消息信息量大，交给 LLM 看全文
+
+# 情绪是陪伴产品的第一性信号：快速路也带一只小词典，
+# 不至于把「今天好难过」标成 normal（负面情绪优先于正面）
+_MOOD_SAD = ("难过", "伤心", "委屈", "想哭", "哭了", "好烦", "讨厌", "无聊", "郁闷", "不开心")
+_MOOD_NERVOUS = ("紧张", "害怕", "好怕", "担心", "焦虑", "好慌", "慌")
+_MOOD_HAPPY = ("开心", "太棒了", "高兴", "太好了", "哈哈", "好玩", "喜欢", "耶")
+
+
+def _fast_mood(message: str) -> str:
+    for mood, hints in (("sad", _MOOD_SAD), ("nervous", _MOOD_NERVOUS),
+                        ("happy", _MOOD_HAPPY)):
+        if any(h in message for h in hints):
+            return mood
+    return "normal"
+
+
+def _fast_path(message: str) -> dict | None:
+    """零信号词的短闲聊 → 直接判 chat，不花一次 LLM 分类。"""
+    if len(message) > _FAST_MAX_LEN:
+        return None
+    if any(h in message for h in _ALL_HINTS):
+        return None
+    return {"intent": "chat", "mood": _fast_mood(message),
+            "affair_id": None, "reason": "快速通道"}
+
+
 def looks_like_todos(message: str) -> bool:
     """确定性兜底：拆成片段后，含待办词的片段 ≥2 个就视为多任务。LLM 漏判时用它纠偏。"""
     parts = [p for p in _TODO_SPLIT.split(message.lower()) if p.strip()]
@@ -67,6 +102,9 @@ async def classify(message: str, affairs_brief: str = "") -> dict:
     if looks_like_continuation(message):
         # 续写指令不需要分类：直接闲聊直答，省一次 LLM 调用，也不会误建事务
         return {"intent": "chat", "mood": "normal", "affair_id": None, "reason": "续写指令"}
+    fast = _fast_path(message)
+    if fast is not None:
+        return fast
     try:
         data = await asyncio.wait_for(llm.complete_json(
             [{"role": "user", "content": prompts.ROUTER.format(

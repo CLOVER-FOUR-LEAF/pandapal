@@ -65,11 +65,45 @@ def test_fallback_still_works() -> None:
     record("router_prompt_has_rule", "续写指令" in prompts.ROUTER)
 
 
+def test_fast_triage() -> None:
+    """零信号词的短闲聊走免 LLM 快速路；带任何办事/待办信号的一律 veto 回 LLM。"""
+    calls = {"n": 0}
+    saved = llm.complete_json
+
+    async def fake(messages, **kw):
+        calls["n"] += 1
+        return {"intent": "new_affair", "mood": "normal", "affair_id": None, "reason": "模型"}
+
+    llm.complete_json = fake
+    try:
+        d = asyncio.run(router.classify("我今天踢球可开心了"))
+        record("fast_chat", d["intent"] == "chat" and d["reason"] == "快速通道", str(d))
+        record("fast_skips_llm", calls["n"] == 0, f"llm 调用={calls['n']}")
+        # 快速路也认情绪：陪伴产品不能把好难过标成 normal
+        d = asyncio.run(router.classify("今天好难过，不想说话"))
+        record("fast_mood_sad", d["intent"] == "chat" and d["mood"] == "sad", str(d))
+        # veto：办事信号回 LLM
+        calls["n"] = 0
+        asyncio.run(router.classify("帮我写个请假条"))
+        record("veto_action_goes_llm", calls["n"] == 1)
+        # veto：待办词回 LLM（作业写完可能是在汇报事务进展）
+        calls["n"] = 0
+        asyncio.run(router.classify("我的作业写完了"))
+        record("veto_todo_goes_llm", calls["n"] == 1)
+        # veto：长消息回 LLM
+        calls["n"] = 0
+        asyncio.run(router.classify("啦啦啦" * 50))
+        record("veto_long_goes_llm", calls["n"] == 1)
+    finally:
+        llm.complete_json = saved
+
+
 def main() -> int:
     try:
         test_looks_like_continuation()
         test_classify_continuation_is_chat()
         test_fallback_still_works()
+        test_fast_triage()
     except Exception as e:  # noqa: BLE001
         record("测试脚本自身", False, repr(e))
     passed = sum(1 for _, ok, _ in RESULTS if ok)
