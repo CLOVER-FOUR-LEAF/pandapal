@@ -76,7 +76,7 @@ const ACTION_KIND = {
 };
 const MODE_LABEL = { plan: "规划链", todo: "拆解待办", affair: "事务更新", relay: "传话筒", explain: "讲给你听", chat: "" };
 // planner / synth 各要几十秒，没有阶段提示就像卡死——这里给一句人话顶着
-const PHASE_LABEL = { planning: "正在拆解要办的事…", executing: "正在一件件办…", synthesizing: "快好了，正在整理成方案…" };
+const PHASE_LABEL = { planning: "正在拆解要办的事…", executing: "正在一件件办…", synthesizing: "快好了，正在整理成方案…", checking: "管家在自查一遍…" };
 
 const KIND_ICON = { travel: "i-planet", goal: "i-growth", health: "i-heart", interest: "i-spark", study: "i-book", habit: "i-clock", event: "i-cal" };
 
@@ -4142,9 +4142,19 @@ function setupMic() {
     } catch (e) {
       starting = false;
       const name = e && e.name;
-      toast(name === "NotAllowedError" || name === "SecurityError" ? MIC_ERR_TEXT["not-allowed"]
-            : name === "NotFoundError" ? MIC_ERR_TEXT["audio-capture"]
-            : `麦克风起不来（${name || "未知原因"}）`);
+      if (name === "NotAllowedError" || name === "SecurityError") {
+        // 分清是哪一层拒的：站点权限 denied 用户自己在地址栏左边就能改；
+        // 已 granted 还被拒 = 系统层/服务器策略头拦的（macOS 隐私设置、反代
+        // Permissions-Policy），浏览器里怎么点都没用——提示要对准那一层。
+        let p = "";
+        try { p = (await navigator.permissions.query({ name: "microphone" })).state; } catch { /* 不支持 */ }
+        toast(p === "granted"
+          ? "站点已允许但系统层没放行——去系统设置里给浏览器开麦克风权限"
+          : MIC_ERR_TEXT["not-allowed"]);
+      } else {
+        toast(name === "NotFoundError" ? MIC_ERR_TEXT["audio-capture"]
+              : `麦克风起不来（${name || "未知原因"}）`);
+      }
       return;
     }
     let ctx = null;
@@ -4225,11 +4235,13 @@ function setupMic() {
       uiStop();
       const code = e && e.error;
       const msg = MIC_ERR_TEXT[code];
-      if (MIC_SR_DEAD.has(code)) {
-        // 内置识别服务是死的（Chrome 国内必报 network）：这次点击别浪费，
-        // 当场换成服务端识别接着录
+      if (MIC_SR_DEAD.has(code) || code === "not-allowed") {
+        // 内置识别这条路过不了：服务死（network/系统禁用）或权限线不同
+        // （Chrome 的 speechRecognition 内容与麦克风是两条权限——SR 报
+        // not-allowed 时 getUserMedia 完全可能是通的）。这次点击别浪费，
+        // 当场换成服务端识别接着录；B 真被拒时它自己会给出准确的提示。
         srDead = true;
-        toast(`${msg}——改用管家服务端识别`);
+        if (code !== "not-allowed") toast(`${msg}——改用管家服务端识别`);
         startServer();
       } else if (msg) {
         toast(msg);  // aborted / bad-grammar 不在表里：主动收尾，不算错

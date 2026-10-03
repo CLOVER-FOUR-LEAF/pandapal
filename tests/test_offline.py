@@ -94,6 +94,9 @@ async def fake_complete_json(messages, *, max_tokens=1200, caller="unknown"):
         ]}
     if caller == "draft":
         return {"title": "离线自我介绍", "body": "大家好，我是小豆，每周六上午都上机器人课。"}
+    if caller == "supervise":
+        # 判官默认放行：主流断言不掺"重出一版"的随机性
+        return {"verdict": "done"}
     if caller == "paper_outline":
         return {"title": "我的巡线小车调试记", "sections": [
             {"heading": "研究背景", "points": ["为什么想记录"]},
@@ -724,6 +727,29 @@ async def _run(client: httpx.AsyncClient) -> None:
            and any(e.get("status") == "error" for e in evs)
            and any(e.get("status") == "done" for e in evs),
            f"out={out[:60]}")
+
+    # 卡片判官三态：done 放行、continue 带意见、判官倒下也放行（自检不是门禁）
+    real_cj2 = llm.complete_json
+    card_fake = {"title": "t", "emoji": "x",
+                 "sections": [{"heading": "h", "items": ["i"]}]}
+    try:
+        async def judge_done(m, **k):
+            return {"verdict": "done"}
+        async def judge_cont(m, **k):
+            return {"verdict": "continue", "hint": "没回应主题"}
+        async def judge_dead(m, **k):
+            raise RuntimeError("判官倒了")
+        llm.complete_json = judge_done
+        record("supervise_done_pass",
+               await _main._supervise_card(sess, "帮我准备", card_fake) == "")
+        llm.complete_json = judge_cont
+        record("supervise_continue_hint",
+               "没回应主题" in await _main._supervise_card(sess, "帮我准备", card_fake))
+        llm.complete_json = judge_dead
+        record("supervise_dead_pass",
+               await _main._supervise_card(sess, "帮我准备", card_fake) == "")
+    finally:
+        llm.complete_json = real_cj2
 
 
     # 10. 扩展端点：增长雷达 / 梦想 / 传话筒 / PATCH / 时间轴切片 / 日志分页 / 流式晨报问候

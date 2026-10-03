@@ -1470,6 +1470,30 @@ async def _chat_stream(sess, raw_message: str, ctx: dict, resume: ResumeReq | No
                     sess.store, message, use_synth=False,
                     attach_ctx=_attach_digest(_file_store(sess), attachments),
                     extra_rule=write_rule)
+            # 出卡前自检：判官说"没回应上"就带意见重出一次（有真实节点结果的
+            # 重跑汇总，没有的重跑直出）；原卡保底——重出失败不退化成没卡
+            hint = await _supervise_card(sess, message, card)
+            if hint:
+                await emit({"type": "phase", "phase": "checking"})
+                retry_rule = (write_rule
+                              + f"\n- 上一版没实质回应孩子的话（{hint}），这一版修正它")
+                try:
+                    ok_nodes = ([n for n in plan["nodes"]
+                                 if statuses.get(n["id"]) != "error"]
+                                if plan else [])
+                    if ok_nodes:
+                        card2 = await asyncio.wait_for(
+                            synth.synthesize(sess.store, message, results,
+                                             _attach_digest(_file_store(sess), attachments),
+                                             retry_rule), _RETRY_BUDGET)
+                    else:
+                        card2 = await asyncio.wait_for(
+                            synth.direct_card(sess.store, message,
+                                              _attach_digest(_file_store(sess), attachments),
+                                              retry_rule), _DIRECT_BUDGET)
+                    card = card2
+                except Exception:  # noqa: BLE001
+                    pass
             reply_text = synth.card_to_text(card)
 
             # ③ 实际去执行：加提醒 / 生成清单 / 请家长确认。
@@ -1757,6 +1781,28 @@ def _clean_affair_title(message: str) -> str:
 
 _SYNTH_BUDGET = 75.0   # 汇总：实测最慢 52.6s，留余量
 _DIRECT_BUDGET = 25.0  # 直出：实测 ~5s
+_SUPERVISE_BUDGET = 12.0   # 卡片判官：一句话判"回应上没有"，不该比出卡更久
+_RETRY_BUDGET = 30.0       # 判不过的重出预算：比完整汇总短，失败还能退回原卡
+
+
+async def _supervise_card(sess, message: str, card: dict) -> str:
+    """轻量自检（参考 OpenPanda supervise.go 的 done/continue 判官）：
+
+    三档降级保"有卡片"，不保"卡片对题"——判官看一眼"实质回应孩子的话了吗"。
+    返回 "" 放行；非空是判官给的一句话修改意见，调用方带它重出一次。
+    判官超时/倒下返回 ""——自检是增益不是门禁，绝不为它扣住卡片。
+    """
+    try:
+        verdict = await asyncio.wait_for(llm.complete_json(
+            [{"role": "user", "content": prompts.CARD_JUDGE.format(
+                name=sess.name, message=message,
+                card=synth.card_to_text(card)[:1500])}],
+            max_tokens=300, caller="supervise"), _SUPERVISE_BUDGET)
+    except Exception:  # noqa: BLE001
+        return ""
+    if str(verdict.get("verdict") or "") == "continue":
+        return str(verdict.get("hint") or "没实质回应孩子的需求")[:120]
+    return ""
 
 
 async def _card_with_fallback(store, message: str, *, results: dict | None = None,
