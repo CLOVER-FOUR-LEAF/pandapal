@@ -80,6 +80,10 @@ async def transcribe(audio: bytes, mime: str = "audio/wav", *,
         try:
             resp.raise_for_status()
         except httpx.HTTPStatusError as e:
+            # 402 余额不足是常态（TTS 免费额度不覆盖 ASR）——给孩子一句人话，
+            # 别把上游 JSON 原文吐进 toast
+            if e.response.status_code == 402:
+                raise STTError("服务端的语音识别额度用完了") from e
             raise STTError(f"HTTP {e.response.status_code}：{e.response.text[:200]}") from e
         text = str(resp.json()["choices"][0]["message"].get("content") or "").strip()
     except Exception as e:  # noqa: BLE001
