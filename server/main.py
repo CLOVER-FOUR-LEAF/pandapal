@@ -2602,6 +2602,13 @@ async def api_logs(request: Request, limit: int = 50, offset: int = 0):
     return await asyncio.to_thread(llm.read_logs, limit, offset)
 
 
+@app.get("/api/logs/verify")
+async def api_logs_verify(request: Request):
+    """校验留痕哈希链：任何一行被改/删/换序都能查出来。仅 admin。"""
+    _need(_user(request), "logs")
+    return await asyncio.to_thread(llm.verify_chain)
+
+
 @app.get("/api/health")
 async def api_health():
     return {"ok": True, "llm_configured": bool(config.LLM_API_KEY), "protocol": config.LLM_PROTOCOL}

@@ -181,11 +181,52 @@ async def main() -> int:
                                      timeout=30) as client:
             await _run(client)
     finally:
-        _restore(saved)
+        _restore(saved)   # log_call 真身回来，_audit_checks 用它写真实链
+        try:
+            _audit_checks()
+        except Exception as e:  # noqa: BLE001
+            record("audit_checks", False, repr(e))
         _cleanup()
     passed = sum(1 for _, ok, _ in RESULTS if ok)
     print(f"\n{passed}/{len(RESULTS)} 通过")
     return 0 if passed == len(RESULTS) else 1
+
+
+def _audit_checks() -> None:
+    """哈希链回归（在 _restore 之后跑，log_call 已是真身）：
+    写 3 行 → verify 全对；篡改中间一行 → 指认出具体行号。"""
+    p = llm.LOG_DIR / "llm_calls.jsonl"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    old = p.read_text(encoding="utf-8") if p.exists() else None
+    llm._CHAIN_LINE = None
+    try:
+        p.write_text("", encoding="utf-8")
+        for c in ("audit1", "audit2", "audit3"):
+            llm.log_call(c, True, 1.0)
+        v = llm.verify_chain()
+        record("audit_chain_ok", v["ok"] and v["total"] == 3, str(v))
+        recs = [json.loads(line) for line in
+                p.read_text(encoding="utf-8").splitlines()]
+        record("audit_chain_field", all(r.get("chain") for r in recs)
+               and recs[1]["chain"] != recs[2]["chain"], "")
+        # 篡改第二行的 ok 字段 → 验出在第 2 行
+        recs[1]["ok"] = False
+        lines = [json.dumps(r, ensure_ascii=False) for r in recs]
+        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        v2 = llm.verify_chain()
+        record("audit_tamper_detected",
+               not v2["ok"] and v2["bad_at"] == 1, str(v2))
+        # 删掉一行 → 链断处同样被指认
+        p.write_text("\n".join(lines[:1] + lines[2:]) + "\n", encoding="utf-8")
+        v3 = llm.verify_chain()
+        record("audit_delete_detected",
+               not v3["ok"] and v3["bad_at"] == 1, str(v3))
+    finally:
+        llm._CHAIN_LINE = None
+        if old is not None:
+            p.write_text(old, encoding="utf-8")
+        else:
+            p.unlink(missing_ok=True)
 
 
 async def _run(client: httpx.AsyncClient) -> None:
@@ -729,6 +770,11 @@ async def _run(client: httpx.AsyncClient) -> None:
            f"total={lg.get('total')} limit={lg.get('limit')}")
     lg2 = await get_json(client, "/api/logs?limit=999999")
     record("logs_limit_clamped", lg2.get("limit") == 200, f"limit={lg2.get('limit')}")
+    # 哈希链校验端点：log_call 此时是假身（不落盘），空文件也应返回合法结构
+    vfy = await get_json(client, "/api/logs/verify")
+    record("logs_verify_endpoint",
+           isinstance(vfy.get("ok"), bool) and isinstance(vfy.get("total"), int),
+           f"verify={vfy}")
 
     # 流式晨报/问候：token* → done（done 带本地数据）；LLM 假身只会吐两个 token
     gev = await get_sse(client, f"/api/greeting{q}&stream=1")

@@ -86,6 +86,57 @@ def _err_text(e: BaseException | None) -> str:
     return f"{name}: {msg}" if msg else name
 
 
+# 留痕审计哈希链（参考 OpenPanda internal/security/audit.go）：
+# 每行记录带前一行内容的 sha256——改一行、删中间行、换序都会被 verify_chain 发现。
+# 调用留痕由此从"日志"升级成"防篡改证据链"：评委拿它验"输出确为真生成"。
+_log_lock = threading.Lock()
+_CHAIN_LINE: str | None = None  # 进程内缓存的上一行链哈希；None=启动后还没写过
+
+
+def _prev_chain() -> str:
+    """上一行的链上哈希；冷启动从文件尾读最后一行的 chain 续上，文件为空则从创世头开始。"""
+    global _CHAIN_LINE
+    if _CHAIN_LINE is None:
+        _CHAIN_LINE = ""
+        try:
+            lines = (LOG_DIR / "llm_calls.jsonl").read_text(encoding="utf-8").splitlines()
+            if lines:
+                _CHAIN_LINE = str(json.loads(lines[-1]).get("chain") or "")
+        except (OSError, json.JSONDecodeError):
+            _CHAIN_LINE = ""
+    return _CHAIN_LINE
+
+
+def _chain_of(prev: str, rec: dict) -> str:
+    """rec（不含 chain 字段）的规范 JSON + 前一行哈希 → 本行哈希。"""
+    canon = json.dumps(rec, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256((prev + canon).encode("utf-8")).hexdigest()
+
+
+def verify_chain() -> dict:
+    """逐行重算链哈希校验留痕完整性。返回 {ok, total, bad_at, reason}（bad_at=-1 全对）。"""
+    try:
+        lines = (LOG_DIR / "llm_calls.jsonl").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return {"ok": True, "total": 0, "bad_at": -1, "reason": ""}
+    prev = ""
+    for i, line in enumerate(lines):
+        try:
+            rec = json.loads(line)
+            got = str(rec.pop("chain", ""))
+        except (json.JSONDecodeError, AttributeError):
+            return {"ok": False, "total": len(lines), "bad_at": i,
+                    "reason": f"第 {i + 1} 行不是合法 JSON"}
+        if not got:
+            return {"ok": False, "total": len(lines), "bad_at": i,
+                    "reason": f"第 {i + 1} 行没有 chain 字段（链启用前的旧留痕，或被剥掉了）"}
+        if got != _chain_of(prev, rec):
+            return {"ok": False, "total": len(lines), "bad_at": i,
+                    "reason": f"第 {i + 1} 行链哈希对不上（内容被改、或有行被删/换序）"}
+        prev = got
+    return {"ok": True, "total": len(lines), "bad_at": -1, "reason": ""}
+
+
 def log_call(caller: str, ok: bool, ms: float, err: str = "", tokens: int | None = None,
              *, cand: "_Cand | None" = None, usage: dict | None = None,
              truncated: bool = False) -> None:
@@ -96,6 +147,7 @@ def log_call(caller: str, ok: bool, ms: float, err: str = "", tokens: int | None
     usage 是 provider 回报的真实 token 计数（缺省不记）；truncated 标记
     输出撞到长度上限，评委一眼能看出"这条回复本来可能更长"。
     """
+    global _CHAIN_LINE
     try:
         LOG_DIR.mkdir(parents=True, exist_ok=True)
         rec = {
@@ -118,8 +170,11 @@ def log_call(caller: str, ok: bool, ms: float, err: str = "", tokens: int | None
             rec["truncated"] = True
         if err:
             rec["err"] = err[:200]
-        with open(LOG_DIR / "llm_calls.jsonl", "a", encoding="utf-8") as f:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        with _log_lock:
+            rec["chain"] = _chain_of(_prev_chain(), rec)
+            with open(LOG_DIR / "llm_calls.jsonl", "a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            _CHAIN_LINE = rec["chain"]
     except OSError:
         pass
 
