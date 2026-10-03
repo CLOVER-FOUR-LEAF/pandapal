@@ -288,25 +288,96 @@ const jsonOpts = (body) => ({
 });
 const q = (name) => `name=${encodeURIComponent(name || "")}`;
 
+/** fetch 流式读取能力探测：Response.body.getReader 在老 Safari（<14.1）、
+ *  微信/钉钉等内嵌 WebView 里不存在——那里曾经整段 await resp.text()，
+ *  一条 SSE 流攒到全部结束才解析，表现就是"发完消息卡住、刷新才有字"。 */
+const FETCH_STREAM_OK = (() => {
+  try {
+    const b = typeof Response === "function" ? new Response("x").body : null;
+    return !!(b && typeof b.getReader === "function");
+  } catch { return false; }
+})();
+
+/**
+ * 打开一条 SSE 文本流，返回 async-iterable<string>（解码后的文本块）。
+ * 优先 fetch + ReadableStream；不支持时退化到 XHR：其 responseText 随数据
+ * 到达而增长，onprogress 里按已读偏移切增量——任何浏览器都是真流式。
+ * 错误语义与 api() 对齐：非 2xx 抛带 .status 的 Error；signal 中止抛 AbortError。
+ */
+async function* streamText(path, opts = {}) {
+  if (FETCH_STREAM_OK) {
+    const resp = await api(path, opts);
+    if (!resp.body || !resp.body.getReader) { yield await resp.text(); return; }
+    const reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) return;
+        yield dec.decode(value, { stream: true });
+      }
+    } finally {
+      // 上游 return（换会话丢弃旧流）时把底层连接也停掉，别让它挂着读到完
+      try { await reader.cancel(); } catch { /* 已结束 */ }
+    }
+  }
+  // —— XHR 增量读降级 ——
+  const xhr = new XMLHttpRequest();
+  const chunks = [];
+  let seen = 0, status = 0, ended = false, err = null, wake = null;
+  const poke = () => { const w = wake; wake = null; if (w) w(); };
+  const push = () => {
+    const s = xhr.responseText.slice(seen);
+    seen = xhr.responseText.length;
+    if (s) chunks.push(s);
+    poke();
+  };
+  xhr.open(opts.method || "GET", BASE + path);
+  Object.keys(opts.headers || {}).forEach((k) => xhr.setRequestHeader(k, opts.headers[k]));
+  if (state.token) xhr.setRequestHeader("Authorization", `Bearer ${state.token}`);
+  xhr.onprogress = () => { if (!status || (status >= 200 && status < 300)) push(); };
+  xhr.onload = () => {
+    if (status && (status < 200 || status >= 300)) {
+      let msg = "";
+      try { const d = JSON.parse(xhr.responseText); msg = d && (d.detail || d.message || d.error); } catch { /* 非 JSON */ }
+      if (!msg) {
+        if (status === 401) msg = "用户名或密码不对";
+        else if (status === 403) msg = "当前账号没有这个权限";
+        else if (status === 429) msg = "管家还在回上一条，稍等一下哦";
+        else if (status >= 500) msg = "管家后端打了个喷嚏，稍后再试";
+        else msg = "这一步没成功，换个说法再试试";
+      }
+      err = new Error(msg); err.status = status;
+    } else push();
+    ended = true; poke();
+  };
+  xhr.onreadystatechange = () => { if (xhr.readyState >= 2 && !status) status = xhr.status; };
+  xhr.onerror = () => { err = new Error("网络好像断了，检查连接再试试～"); ended = true; poke(); };
+  xhr.onabort = () => { const e = new Error("已中止"); e.name = "AbortError"; err = e; ended = true; poke(); };
+  const signal = opts.signal;
+  if (signal) {
+    if (signal.aborted) xhr.abort();
+    else signal.addEventListener("abort", () => xhr.abort(), { once: true });
+  }
+  xhr.send(opts.body || null);
+  for (;;) {
+    if (chunks.length) { yield chunks.shift(); continue; }
+    if (err) throw err;
+    if (ended) return;
+    await new Promise((r) => { wake = r; });
+  }
+}
+
 /**
  * 读 GET 的 SSE 文本流（晨报/问候的 `?stream=1`）：每来一段 token 回调 onToken，
  * 返回 done 事件的载荷（含看板/提醒等本地数据）。服务端不支持流时退化为整段 JSON。
+ * 底层走 streamText：没有 fetch 流式的浏览器里靠 XHR 增量读，照样逐字出。
  */
-async function readTextStream(resp, onToken, onEvent) {
-  if (!resp.body || !resp.body.getReader) {
-    const data = await resp.json().catch(() => ({}));
-    if (data.text) onToken(data.text);
-    if (data.voice) onEvent?.({ type: "voice", ...data.voice });
-    return data;
-  }
-  const reader = resp.body.getReader();
-  const decoder = new TextDecoder();
-  let buf = "";
-  let done = {};
-  for (;;) {
-    const { done: end, value } = await reader.read();
-    if (end) break;
-    buf += decoder.decode(value, { stream: true });
+async function readTextStream(path, onToken, onEvent, opts = {}) {
+  let buf = "", all = "", done = {};
+  for await (const text of streamText(path, opts)) {
+    all += text;
+    buf += text;
     let idx;
     while ((idx = buf.indexOf("\n\n")) >= 0) {
       const raw = buf.slice(0, idx).replace(/\r/g, "");
@@ -321,6 +392,18 @@ async function readTextStream(resp, onToken, onEvent) {
       else if (ev.type === "done") done = ev;
       else if (ev.type === "error") throw new Error(ev.message || "生成失败");
     }
+  }
+  // 服务端没流式时回的是整段 JSON：整个体连一个 "data:" 帧都不是
+  const t = all.trim();
+  if (t && !t.startsWith("data:")) {
+    try {
+      const data = JSON.parse(t);
+      if (data && typeof data === "object") {
+        if (data.text) onToken(data.text);
+        if (data.voice) onEvent?.({ type: "voice", ...data.voice });
+        return data;
+      }
+    } catch { /* 非 JSON 体 */ }
   }
   return done;
 }
@@ -1147,8 +1230,7 @@ async function loadBriefing() {
 
   try {
     // 流式：正文逐字出，done 事件再补看板/截止/建议（首屏不必等整段 LLM）
-    const resp = await api(`/api/briefing?${q(state.name)}&stream=1`);
-    const done = await readTextStream(resp, (tok) => {
+    const done = await readTextStream(`/api/briefing?${q(state.name)}&stream=1`, (tok) => {
       swapIn();
       full += tok;
       textEl.textContent = full;
@@ -1690,8 +1772,7 @@ async function loadGreeting() {
   let data = {};
   try {
     // 流式：token 一到就上屏，比整段等完再 typewrite 更早出字
-    const resp = await api(`/api/greeting?${q(state.name)}&stream=1`);
-    data = await readTextStream(resp, (tok) => {
+    data = await readTextStream(`/api/greeting?${q(state.name)}&stream=1`, (tok) => {
       full += tok;
       if (span) span.textContent = full;
     }, onStreamEvent);
@@ -2566,7 +2647,7 @@ async function sendInner(preset, opts = {}) {
   const ctx = { seq, typing: null, aiBubble: resume ? resume.bubble : null,
                 aiRaw: resume ? resume.raw : "", resumeBase: resume ? resume.raw : "",
                 question: resume ? resume.question : payload, tree: null, affairTouched: false,
-                userRow: null };
+                userRow: null, phaseText: "正在想…", lastEvAt: Date.now(), tick: null };
   if (!resume) {
     ctx.userRow = addMsg("me", text, secret, secret ? null : attach);
   }
@@ -2583,6 +2664,14 @@ async function sendInner(preset, opts = {}) {
 
   ctx.typing = addTyping();
   state.chatCtx = ctx; // 暂停时要按当前轮次的状态决定「继续」入口与看板刷新
+  // 等待计时：规划/执行/汇总之间会有十几秒无事件的真空，字幕报"已等 Ns"
+  // 是最便宜的活证——没它整段时间界面像卡死（服务端 beat 事件是另一道保险，
+  // 顺便顶住网关对静默流的空闲断开）。
+  ctx.tick = setInterval(() => {
+    if (!state.busy || ctx.seq !== state.sendSeq || !ctx.phaseText) return;
+    const quiet = Math.floor((Date.now() - (ctx.lastEvAt || Date.now())) / 1000);
+    if (quiet >= 8) chatStatus(`${ctx.phaseText} · ${quiet}s`, true);
+  }, 1000);
   const dropTyping = () => {
     if (ctx.typing) { ctx.typing.remove(); ctx.typing = null; }
   };
@@ -2593,8 +2682,7 @@ async function sendInner(preset, opts = {}) {
   // 续写：把被打断那一轮的原问题与半截回答带回去（服务端据此接着往下说）
   if (resume) body.resume = { question: resume.question, partial: resume.raw };
   try {
-    const resp = await api("/api/chat", { ...jsonOpts(body), signal: abort.signal });
-    await readSSE(resp, ctx, dropTyping);
+    await readSSE("/api/chat", { ...jsonOpts(body), signal: abort.signal }, ctx, dropTyping);
   } catch (e) {
     dropTyping();
     if (state.chatPaused || e.name === "AbortError") {
@@ -2627,6 +2715,7 @@ async function sendInner(preset, opts = {}) {
   } finally {
     if (state.chatAbort === abort) state.chatAbort = null;
     if (state.chatCtx === ctx) state.chatCtx = null;
+    if (ctx.tick) { clearInterval(ctx.tick); ctx.tick = null; }
     dropTyping();
     flushMd(ctx);
     if (ctx.aiBubble) ctx.aiBubble.classList.remove("streaming");
@@ -2648,34 +2737,15 @@ async function sendInner(preset, opts = {}) {
   }
 }
 
-async function readSSE(resp, ctx, dropTyping) {
-  if (!resp.body || !resp.body.getReader) {
-    const raw = await resp.text();
-    raw.split(/\r?\n/).forEach((line) => {
-      if (!line.startsWith("data:")) return;
-      try { handleEvent(JSON.parse(line.slice(5)), ctx, dropTyping); } catch { /* 坏行 */ }
-    });
-    return;
-  }
-  const reader = resp.body.getReader();
-  const decoder = new TextDecoder();
+async function readSSE(path, opts, ctx, dropTyping) {
   let buf = "";
-  for (;;) {
-    let chunk;
-    try {
-      chunk = await reader.read();
-    } catch (e) {
-      // 用户暂停会 abort 掉底层连接，reader.read() 抛 AbortError：静默收尾
-      if (state.chatPaused || (e && e.name === "AbortError")) break;
-      throw e;
-    }
-    const { done, value } = chunk;
-    if (done) break;
+  for await (const text of streamText(path, opts)) {
     if (ctx.seq !== state.sendSeq) {
-      try { await reader.cancel(); } catch { /* 忽略 */ }
-      break; // 已退出登录/换了新会话：中止读取，避免写进旧消息
+      // 已退出登录/换了新会话：中止读取，避免写进旧消息
+      // （for-await 的 return 会触发 streamText 里的连接清理）
+      return;
     }
-    buf += decoder.decode(value, { stream: true });
+    buf += text;
     let idx;
     while ((idx = buf.indexOf("\n\n")) >= 0) {
       const raw = buf.slice(0, idx).replace(/\r/g, "");
@@ -2944,7 +3014,13 @@ function toggleVoice() {
 function handleEvent(ev, ctx, dropTyping) {
   if (!ev || !ev.type) return;
   if (ctx && ctx.seq !== undefined && ctx.seq !== state.sendSeq) return; // 过期会话的事件丢弃
+  if (ctx && ev.type !== "beat") ctx.lastEvAt = Date.now(); // beat 只证明连接活着，不算"有进展"
   switch (ev.type) {
+    // 服务端保活节拍：规划/汇总之间十几秒无事件时证明流没死（见 _chat_stream）
+    case "beat":
+      if (ctx) ctx.lastBeatAt = Date.now();
+      break;
+
     case "files": {
       // 附件的权威元数据（含抽取结果）：把文件卡挂到本轮用户消息上
       const box = $("#chat");
@@ -2959,7 +3035,8 @@ function handleEvent(ev, ctx, dropTyping) {
     case "mode":
       dropTyping();
       modeBadge(MODE_LABEL[ev.mode] ?? ev.mode);
-      chatStatus(MODE_LABEL[ev.mode] ? `${MODE_LABEL[ev.mode]} · 进行中` : "回复中…", true);
+      ctx.phaseText = MODE_LABEL[ev.mode] ? `${MODE_LABEL[ev.mode]} · 进行中` : "回复中…";
+      chatStatus(ctx.phaseText, true);
       if (ev.mood) setMoodAll(ev.mood === "normal" ? (ev.mode === "plan" ? "working" : "speaking") : ev.mood);
       else if (ev.mode === "plan") setMoodAll("working");
       break;
@@ -2970,7 +3047,7 @@ function handleEvent(ev, ctx, dropTyping) {
 
     case "phase": {
       const txt = PHASE_LABEL[ev.phase];
-      if (txt) chatStatus(txt, true);
+      if (txt) { ctx.phaseText = txt; chatStatus(txt, true); }
       break;
     }
 
@@ -2991,7 +3068,8 @@ function handleEvent(ev, ctx, dropTyping) {
       dropTyping();
       s3("clearPlanSatellites");
       ctx.tree = addPlanTree(ev.title, ev.nodes || []);
-      chatStatus(PHASE_LABEL.executing, true);
+      ctx.phaseText = PHASE_LABEL.executing;
+      chatStatus(ctx.phaseText, true);
       s3("spawnPlanSatellites", (ev.nodes || []).map((n) => ({
         id: n.id, title: n.title, depends_on: n.depends_on || [],
       })));
@@ -3003,7 +3081,10 @@ function handleEvent(ev, ctx, dropTyping) {
       }
       updatePlanNode(ctx.tree, ev);
       s3("setPlanNode", ev.id, ev.status);
-      if (ev.status === "running" && ev.title) chatStatus(`正在办：${ev.title}`, true);
+      if (ev.status === "running" && ev.title) {
+        ctx.phaseText = `正在办：${ev.title}`;
+        chatStatus(ctx.phaseText, true);
+      }
       break;
 
     case "action":
@@ -3067,6 +3148,7 @@ function handleEvent(ev, ctx, dropTyping) {
     case "done":
       dropTyping();
       flushMd(ctx);
+      ctx.phaseText = null;
       if (ctx.aiBubble) ctx.aiBubble.classList.remove("streaming");
       unlockInput();
       s3("setPandaMood", "idle");
@@ -3092,6 +3174,7 @@ function handleEvent(ev, ctx, dropTyping) {
     case "error":
       dropTyping();
       flushMd(ctx);
+      ctx.phaseText = null;
       if (ctx.aiBubble) ctx.aiBubble.classList.remove("streaming");
       addMsg("ai", `唔……${ev.message || "出了点小问题，再试一次吧"}`);
       setMoodAll("worried");
