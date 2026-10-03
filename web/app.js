@@ -121,7 +121,7 @@ const state = {
 };
 
 let pandaSvg = null;
-let micRec = null;      // 当前活跃的识别器 / 录音器：发送、退出登录时按得住（见 resetComposer）
+let micRec = null;      // 当前活跃的识别器 / 录音器：发送、退出登录时按得住（见 micCancel）
 
 /* ==========================================================================
  * 1. DOM / 字符串 / 图标 / 日期工具
@@ -5010,6 +5010,15 @@ function setupMic() {
       await startServer();
     }
   };
+}
+
+/** 发送/退出登录时按得住正在录的一段：丢弃不转写、不上传。
+ *  两条识别路径的活跃实例都认 abort()：原生 SR 走 end 事件清 cur/UI，
+ *  服务端录音的 rec.abort() 自己 teardown + uiStop。 */
+function micCancel() {
+  const rec = micRec;
+  micRec = null;
+  try { rec && rec.abort && rec.abort(); } catch { /* 已停止 */ }
 }
 
 function toggleSecret() {

@@ -242,6 +242,15 @@ def test_parent_streaming() -> None:
     record("done_data_unwrap", js.count("doneEv && doneEv.data") >= 4)
 
 
+def test_logout_path_defined() -> None:
+    """logout/resetUserUI 链路调用的函数必须真实存在——micCancel 被语音重构
+    删掉而调用点留了下来，退出死在半路（token 已清但视图不切回登录页）。"""
+    js = read("app.js")
+    record("micCancel_defined", "function micCancel" in js)
+    record("micCancel_wired", "micCancel();" in reset_src())
+    record("logout_shows_login", 'show("login")' in js)
+
+
 def test_pause_state_hygiene() -> None:
     js = read("app.js")
     for field in ("chatAbort", "chatPaused", "chatCtx", "chatResume"):
@@ -262,6 +271,7 @@ def main() -> int:
         test_wiring()
         test_fonts()
         test_parent_streaming()
+        test_logout_path_defined()
         test_pause_state_hygiene()
     except Exception as e:  # noqa: BLE001
         record("检查脚本自身", False, repr(e))
