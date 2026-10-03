@@ -32,8 +32,8 @@ def read(name: str) -> str:
 def test_ids_resolve() -> None:
     html, js = read("index.html"), read("app.js")
     html_ids = set(re.findall(r'\bid="([^"]+)"', html))
-    # 运行时动态建出来的容器（抽屉/梦想卡/底部 tab 栏），HTML 里本来就没有
-    dynamic = {"affair-detail", "dream-out", "tabbar"}
+    # 运行时动态建出来的容器（抽屉/梦想卡/底部 tab 栏/星球聚合询问卡），HTML 里本来就没有
+    dynamic = {"affair-detail", "dream-out", "tabbar", "merge-ask"}
     used = set(re.findall(r'\$\("#([A-Za-z0-9_-]+)"\)', js))
     missing = sorted(i for i in used if i not in html_ids and i not in dynamic)
     record("js_ids_exist_in_html", not missing, f"缺失={missing}")
@@ -190,6 +190,57 @@ def test_wiring() -> None:
            and "if (isPreviewableImage(f))" in js
            and "if (f.preview) {" not in js)
     record("attach_content_url", "function fileContentUrl" in js and "f.content || f.preview" in js)
+    # 星球聚合：3D 导出合并/展开/询问钩子，app 侧询问卡 + 2D 折叠 + 抽屉"展开"入口
+    s3 = read("scene3d.js")
+    record("merge_exports", all(k in s3 for k in
+           ("mergePlanets", "unmergePlanets", "setMergePromptHandler", "getMergedGroups")))
+    record("merge_chain_detect", "findMergeChains" in s3 and "AGG_MIN" in s3)
+    record("merge_ask_card", "askMergePlanets" in js and ".merge-ask {" in css)
+    record("merge_2d_fold", "memberOf.get(e.source)" in js and "maybeAskMerge2D" in js)
+    record("merge_split_btn", 'data-act="split"' in js and "unmergePlanets" in js)
+
+
+def test_fonts() -> None:
+    """Anthropic 风格字体：自托管 @font-face + 双栈（UI 无衬线 / 管家的话衬线）。"""
+    css = read("style.css")
+    record("font_faces_declared", css.count("@font-face") == 4
+           and '"DM Sans"' in css and '"Source Serif 4"' in css)
+    files = sorted(p.name for p in (WEB / "fonts").glob("*.woff2"))
+    record("font_files_present", files == [
+        "dm-sans-latin-ext.woff2", "dm-sans-latin.woff2",
+        "source-serif-4-latin-ext.woff2", "source-serif-4-latin.woff2"], str(files))
+    record("font_files_nonempty", all((WEB / "fonts" / f).stat().st_size > 10000 for f in files))
+    record("font_stack_dm_sans", '--font: "DM Sans",' in css.replace("\n", " ").replace("  ", " "))
+    record("serif_stack_cjk_fallback", "--font-serif:" in css
+           and '"Songti SC"' in css and '"SimSun"' in css)
+    # 输出面统一块：管家写的每一段都走衬线（覆盖全部输出容器）
+    block = re.search(r"输出面排版.*?font-family: var\(--font-serif\);", css, re.S)
+    record("output_serif_block", bool(block))
+    for sel in (".md,", "#briefing-card .panel-body,", "#affair-board .panel-body,",
+                ".drawer-body,", ".relay-body", ".inbox-detail", ".weekly-out,",
+                ".topic-body", ".growth-comment", ".card-title", ".dream-body",
+                "#panda-bubble"):
+        record(f"serif_covers_{sel.split(',')[0].strip('.#')}", sel in css)
+    record("output_guard_sans", ":is(button, .btn, .chip" in css
+           and ".empty-hint," in css and "font-family: var(--font);" in css)
+    # 登录标题是品牌面，单独在组件规则里走衬线
+    record("serif_on_login-title",
+           bool(re.search(r"\.login-title\s*\{[^}]*font-family:\s*var\(--font-serif\)", css, re.S)))
+
+
+def test_parent_streaming() -> None:
+    """家长端全面流式：转达/通知/周报/梦想四路都走 ?stream=1，且有在途序号保护。"""
+    js, css = read("app.js"), read("style.css")
+    record("stream_relay_path", "/api/relay?stream=1" in js and "async function relayStream" in js)
+    record("stream_notice_path", "/api/notice?stream=1" in js)
+    record("stream_weekly_path", "/api/parent/weekly?stream=1" in js)
+    record("stream_dream_path", "/api/dream?stream=1" in js and "function dreamShell" in js)
+    record("relay_hint_typing", "function relayHint" in js and ".relay-body.relay-typing" in css)
+    record("parent_seq_guard", all(f in js for f in ("state.relaySeq", "state.weeklySeq", "state.dreamSeq")))
+    record("parent_seq_logout", all(f"state.{f}++;" in js for f in ("relaySeq", "weeklySeq", "dreamSeq")))
+    # 流式事件里"阶段/节拍不许覆盖已上屏正文"的守卫（relay 与通知各一处）
+    record("beat_no_clobber", js.count("节拍不许覆盖") >= 1 and "&& !texts" in js)
+    record("done_data_unwrap", js.count("doneEv && doneEv.data") >= 4)
 
 
 def test_pause_state_hygiene() -> None:
@@ -210,6 +261,8 @@ def main() -> int:
         test_comment_parens_balanced()
         test_es_modules_parse()
         test_wiring()
+        test_fonts()
+        test_parent_streaming()
         test_pause_state_hygiene()
     except Exception as e:  # noqa: BLE001
         record("检查脚本自身", False, repr(e))

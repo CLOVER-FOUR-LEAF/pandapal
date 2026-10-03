@@ -223,7 +223,7 @@ async def _do_draft(child_dir: Path, affair: dict, action: dict) -> dict:
     request = str(action.get("request") or action.get("text") or affair.get("title") or "").strip()
     context = str(action.get("context") or "").strip() or "（无前置素材，靠记忆与常识写）"
     mem_store = MemoryStore(child_dir)
-    mem = await asyncio.to_thread(mem_store.active_block)
+    mem = await asyncio.to_thread(mem_store.active_block, request or None)
     if _LONG_FORM.search(request):
         # 论文/报告这类长文稿一次调用写不好：提纲 → 各节并行写 → 拼成 markdown。
         # 产物是"能交差的成稿"，不是"怎么写"的建议——这是 draft 的完整形态。
@@ -273,7 +273,7 @@ async def revise_draft(child_dir: Path, a_store: AffairStore, draft: dict,
     if not old_body:
         raise ValueError("这份文稿没有内容，没法改")
     mem_store = MemoryStore(child_dir)
-    mem = await asyncio.to_thread(mem_store.active_block)
+    mem = await asyncio.to_thread(mem_store.active_block, f"{title} {instruction or ''}".strip() or None)
     new_body = str(await llm.complete(
         [
             {"role": "system", "content": "你是文书修改模块，只输出改后的完整文稿。"},

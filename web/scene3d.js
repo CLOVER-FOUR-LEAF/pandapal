@@ -33,7 +33,7 @@ const DOMAINS = {
 const DOMAIN_KEYS = Object.keys(DOMAINS);
 const OTHER_DOMAIN = { hex: 0x8fa7a0, css: "#8fa7a0", ch: "", name: "其他" };
 const STATUS_NAME = { active: "进行中", done: "已完成", dropped: "已放下" };
-const TYPE_NAME = { person: "人物", interest: "兴趣", trait: "特质", goal: "目标", event: "事件", health: "健康" };
+const TYPE_NAME = { person: "人物", interest: "兴趣", trait: "特质", goal: "目标", event: "事件", health: "健康", cluster: "星系" };
 
 const AMBER = 0xf0a24a;
 const BAMBOO = 0x3fae74;
@@ -88,6 +88,7 @@ const cfg = {
   timeline: null,
   filter: { domain: "", status: "" },
   onClick: null,
+  onMergePrompt: null,
   mood: "idle",
 };
 
@@ -888,6 +889,10 @@ function build(container, hiddenCanvas, OrbitControls, CSS2D, pandaMod, post) {
     nodes: new Map(), // id -> ns
     order: [], // ns 列表（稳定）
     selfId: null,
+    merged: new Map(),      // memberId -> aggId（被收进大星球的小星）
+    aggOffered: new Set(),  // 本轮已问过的链签名，避免反复打扰
+    aggTimer: 0,
+    bloomKick: 0,           // 聚合/散开时的 bloom 脉冲
     sim: { alpha: 0 },
     w: 0, h: 0, dpr: 1,
     running: false, raf: 0, last: 0, time: 0,
@@ -897,6 +902,7 @@ function build(container, hiddenCanvas, OrbitControls, CSS2D, pandaMod, post) {
     ready: false,
     failed: false,
     fps: { active: 0, frames: 0, done: false },
+    lowQ: false,
     lastInteract: -1e9,
     dragging: false,
     pointer: { x: 0, y: 0, ndcX: 0, ndcY: 0, inside: false, dirty: false, downX: 0, downY: 0, downT: 0, down: false, type: "mouse" },
@@ -1132,7 +1138,7 @@ function measure() {
   const w = Math.floor(el.clientWidth || 0);
   const h = Math.floor(el.clientHeight || 0);
   const many = R.order.length > 60;
-  const dpr = Math.min(typeof devicePixelRatio === "number" ? devicePixelRatio : 1, many ? 1.5 : 2);
+  const dpr = R.lowQ ? 1 : Math.min(typeof devicePixelRatio === "number" ? devicePixelRatio : 1, many ? 1.5 : 2);
   if (w === R.w && h === R.h && dpr === R.dpr) return;
   R.w = w;
   R.h = h;
@@ -1214,7 +1220,22 @@ function fpsCheck(dt) {
     f.done = true;
     const fps = f.frames / Math.max(0.001, f.time);
     if (fps < 20) triggerFallback("帧率不足");
+    else if (fps < 34) degradeQuality(fps);
   }
+}
+
+/** 中等帧率（20~34）：不整锅端去 2D，先降特效保流畅——关后处理泛光、压分辨率、减光晕 */
+function degradeQuality(fps) {
+  try {
+    R.composer = null;
+    R.bloom = null;
+    R.bloomKick = 0;
+    R.lowQ = true;
+    R.haloBoost = 0.55;
+    R.labelBudget = Math.min(R.labelBudget, 5);
+    if (R.dpr > 1) { R.dpr = 1; R.renderer.setPixelRatio(1); measure(); }
+    console.info(`[scene3d] 帧率 ${fps.toFixed(0)}，已降级特效（关泛光/降分辨率）`);
+  } catch (_) {}
 }
 
 function triggerFallback(reason) {
@@ -1265,12 +1286,30 @@ function syncGraph(initial) {
     }
     styleNode(ns);
   }
-  // 移除
+  // 移除（聚合球不在原始数据里，单独维护生命周期）
   for (const ns of R.order) {
-    if (!seen.has(ns.id) && !ns.dying) {
+    if (!seen.has(ns.id) && !ns.dying && !ns.isAgg) {
       ns.dying = true;
       ns.visTarget = 0;
     }
+  }
+
+  // 聚合球：剔除已从图谱消失的成员；不足两颗就自动散开
+  for (const id of [...R.merged.keys()]) {
+    const m = R.nodes.get(id);
+    if (!m || m.dying) R.merged.delete(id);
+  }
+  for (const ns of R.order) {
+    if (!ns.isAgg || ns.dying) continue;
+    ns.aggIds = (ns.aggIds || []).filter((id) => R.merged.get(id) === ns.id);
+    if (ns.aggIds.length < 2) {
+      unmergePlanets(ns.id);
+      continue;
+    }
+    const d = aggregateData(ns.aggIds);
+    d.id = ns.id;
+    ns.data = d;
+    styleNode(ns);
   }
 
   // 新节点初始位置：邻居附近 / 领域锚点附近
@@ -1300,6 +1339,7 @@ function syncGraph(initial) {
   rebuildEdges();
   applyVisibility();
   if (added.length && R.order.length > 60) measure();
+  queueMergeOffer();
 }
 
 function buildAdjacency(edges) {
@@ -1353,6 +1393,8 @@ function createNodeState(n) {
     appear: 0, appearDelay: 0, dying: false,
     pulseUntil: 0, pulseColor: AMBER, spawnedAt: 0,
     labelOn: false, labelCls: "", sig: "",
+    isAgg: false, aggIds: null, swarm: null,
+    mergeFly: null, mergeTo: null, mergeK: null, flareUntil: 0,
   };
 }
 
@@ -1463,7 +1505,11 @@ function rebuildEdges() {
   const list = [];
   const seenPair = new Set();
   for (const e of cfg.graph.edges) {
-    const s = idOf(e.source), t = idOf(e.target);
+    let s = idOf(e.source), t = idOf(e.target);
+    if (s === t) continue;
+    s = R.merged.get(s) || s;
+    t = R.merged.get(t) || t;
+    if (s === t) continue; // 链内部的边收进大星球后消失
     const a = R.nodes.get(s), b = R.nodes.get(t);
     if (!a || !b || a === b || a.dying || b.dying) continue;
     const k = s < t ? s + "\u0001" + t : t + "\u0001" + s;
@@ -1504,6 +1550,7 @@ function applyVisibility() {
   for (const ns of R.order) {
     const n = ns.data;
     let vis = !ns.dying;
+    if (vis && R.merged.has(ns.id) && !ns.mergeFly) vis = false; // 已收进大星球
     if (vis && parent && n.private) vis = false;
     if (vis && tl && n.first_seen) {
       const fsn = str(n.first_seen).slice(0, tl.len);
@@ -1600,6 +1647,25 @@ function renderFrame(dt) {
   R.clusterCounts.fill(0);
   let anyDead = false;
   for (const ns of R.order) {
+    // 聚合飞行：小星沿弧线收向大星球，边飞边缩小
+    const f = ns.mergeFly;
+    if (f) {
+      f.t += dt / f.dur;
+      const tgt = ns.mergeTo && !ns.mergeTo.dying ? ns.mergeTo.p : ns.p;
+      if (f.t >= 1) {
+        ns.mergeFly = null;
+        ns.mergeK = null;
+        ns.p.copy(tgt);
+        ns.vis = 0;
+        ns.visTarget = 0;
+        addBurst(tgt, domainOf(ns.data.domain).hex, Math.max(0.6, ns.r * 1.6));
+      } else if (f.t > 0) {
+        const k = easeInOut(Math.min(1, f.t));
+        ns.p.lerpVectors(f.from, tgt, k);
+        ns.p.addScaledVector(f.arc, Math.sin(k * Math.PI) * 0.7);
+        ns.mergeK = k;
+      }
+    }
     ns.vis += (ns.visTarget - ns.vis) * (dt === 0 ? 1 : k6);
     ns.dim += (ns.dimTarget - ns.dim) * (dt === 0 ? 1 : k6);
     if (ns.appearDelay > 0) ns.appearDelay -= dt;
@@ -1625,8 +1691,9 @@ function renderFrame(dt) {
       const rem = (ns.pulseUntil - tms) / RECALL_MS;
       pulse = (0.5 + 0.5 * Math.sin(time * 9)) * Math.min(1, rem * 3);
     }
+    const flare = ns.flareUntil > tms ? Math.min(1, (ns.flareUntil - tms) / 1400) : 0;
     const hov = R.hover === ns ? 1 : 0;
-    const s = ns.r * ap * (0.35 + 0.65 * ns.vis) * (1 + 0.18 * pulse + 0.1 * hov);
+    const s = ns.r * ap * (0.35 + 0.65 * ns.vis) * (ns.mergeK ? 1 - ns.mergeK * 0.85 : 1) * (1 + 0.18 * pulse + 0.1 * hov);
     ns.mesh.scale.setScalar(s);
     ns.mesh.rotation.y += dt * ns.spin;
     const op = ns.baseOpacity * ns.vis * ns.dim;
@@ -1635,14 +1702,14 @@ function renderFrame(dt) {
     ns.mesh.visible = op > 0.01;
     ns.atmoMat.uniforms.uOpacity.value = 0.85 * op;
     const breathe = 1 + 0.06 * Math.sin(time * 1.6 + ns.p.x);
-    ns.halo.scale.setScalar(s * (4.2 + 2.4 * pulse + hov) * breathe);
+    ns.halo.scale.setScalar(s * (4.2 + 2.4 * pulse + hov + 2.4 * flare) * breathe);
     if (pulse > 0) {
       ns.halo.material.color.copy(ns.tint).lerp(R.amber, 0.6 * pulse);
     } else if (ns.haloTinted) {
       ns.halo.material.color.copy(ns.tint);
     }
     ns.haloTinted = pulse > 0;
-    ns.halo.material.opacity = Math.min(1, (ns.haloBase + 0.5 * pulse + 0.2 * hov) * ns.vis * ns.dim * R.haloBoost);
+    ns.halo.material.opacity = Math.min(1, (ns.haloBase + 0.5 * pulse + 0.2 * hov + 0.55 * flare) * ns.vis * ns.dim * R.haloBoost);
     if (ns.ring) {
       ns.ring.scale.setScalar(s * 2.9);
       ns.ring.material.opacity = 0.9 * ns.vis * ns.dim;
@@ -1651,6 +1718,13 @@ function renderFrame(dt) {
     if (ns.priv) {
       ns.priv.scale.setScalar(s * 3.4);
       ns.priv.material.opacity = 0.75 * ns.vis * ns.dim;
+    }
+    if (ns.swarm) {
+      // 大星球的卫星环：代表收起来的小星在绕转
+      ns.swarm.rotation.y += dt * 0.85;
+      ns.swarm.rotation.x = 0.5 + Math.sin(time * 0.4) * 0.08;
+      ns.swarm.scale.setScalar(Math.max(0.001, s * 2.1));
+      ns.swarm.material.opacity = 0.55 * ns.vis * ns.dim;
     }
     ns.label.position.y = s + 0.3;
   }
@@ -1674,6 +1748,16 @@ function renderFrame(dt) {
   updateLabels(tms);
   updatePlan(dt, tms, time);
   updateBursts(dt);
+
+  if (R.bloom) {
+    if (R.bloomKick > 0.001) {
+      R.bloom.strength = (THEMES.dark.bloom || 0.6) + R.bloomKick * 0.7;
+      R.bloomKick *= Math.exp(-dt * 1.9);
+    } else if (R.bloomKick !== 0) {
+      R.bloomKick = 0;
+      R.bloom.strength = THEMES.dark.bloom || 0.6;
+    }
+  }
 
   R.dust.rotation.y += dt * 0.01;
   R.galaxy.rotation.y += dt * 0.006;
@@ -1893,6 +1977,7 @@ function disposeNode(ns) {
   ns.halo.material.dispose();
   if (ns.ring) ns.ring.material.dispose();
   if (ns.priv) ns.priv.material.dispose();
+  if (ns.swarm) { ns.swarm.geometry.dispose(); ns.swarm.material.dispose(); }
   if (ns.el.parentNode) ns.el.parentNode.removeChild(ns.el);
 }
 
@@ -2112,6 +2197,245 @@ function updateBursts(dt) {
     }
   }
 }
+
+// ============================================================
+// 12b. 星球聚合：一条线上连太多小星 → 询问后收成大星球
+// ============================================================
+
+const AGG_MIN = 5;          // 链上多少颗小星才提议聚合
+const AGG_OFFER_DELAY = 2400;
+
+function aggKey(ids) { return ids.slice().sort().join(","); }
+
+/** 活的、未聚合的普通节点邻接表（链检测用；中心"自己"不参与合并） */
+function liveAdjacency() {
+  const ok = (id) => {
+    const ns = R.nodes.get(id);
+    return ns && !ns.dying && !ns.isAgg && !R.merged.has(id);
+  };
+  const adj = new Map();
+  for (const e of cfg.graph.edges) {
+    const s = idOf(e.source), t = idOf(e.target);
+    if (s === t || !ok(s) || !ok(t)) continue;
+    if (!adj.has(s)) adj.set(s, []);
+    if (!adj.has(t)) adj.set(t, []);
+    adj.get(s).push(t);
+    adj.get(t).push(s);
+  }
+  return { adj, ok };
+}
+
+/**
+ * 找"一条线"：度恰好为 2 的节点连成中段，两端挂上度 1 的叶子。
+ * 交叉路口（度≥3）和中心节点算边界，不进合并集合，免得把半张图收进去。
+ */
+function findMergeChains() {
+  const { adj, ok } = liveAdjacency();
+  const deg = (id) => (adj.get(id) || []).length;
+  const mid = new Set();
+  for (const id of adj.keys()) if (deg(id) === 2 && id !== R.selfId) mid.add(id);
+  const seen = new Set();
+  const chains = [];
+  for (const seed of mid) {
+    if (seen.has(seed)) continue;
+    const comp = [];
+    const stack = [seed];
+    seen.add(seed);
+    while (stack.length) {
+      const cur = stack.pop();
+      comp.push(cur);
+      for (const nb of adj.get(cur) || []) {
+        if (mid.has(nb) && !seen.has(nb)) { seen.add(nb); stack.push(nb); }
+      }
+    }
+    const set = new Set(comp);
+    for (const id of comp) {
+      for (const nb of adj.get(id) || []) {
+        if (!set.has(nb) && deg(nb) === 1 && nb !== R.selfId) set.add(nb);
+      }
+    }
+    if (set.size >= AGG_MIN) chains.push([...set]);
+  }
+  chains.sort((a, b) => b.length - a.length);
+  return chains;
+}
+
+/** syncGraph 后延迟评估：有长链就通知 app 弹询问卡（每条链本轮只问一次） */
+function queueMergeOffer() {
+  if (!R || typeof cfg.onMergePrompt !== "function") return;
+  clearTimeout(R.aggTimer);
+  R.aggTimer = setTimeout(() => {
+    if (!R || !R.ready) return;
+    const cand = findMergeChains().find((ids) => !R.aggOffered.has(aggKey(ids)));
+    if (!cand) return;
+    const key = aggKey(cand);
+    R.aggOffered.add(key);
+    const labels = cand.map((id) => { const ns = R.nodes.get(id); return str(ns && ns.data.label || id); }).slice(0, 4);
+    try { cfg.onMergePrompt({ key, ids: cand, count: cand.length, labels }); } catch (_) {}
+  }, AGG_OFFER_DELAY);
+}
+
+/** 由成员节点合成大星球的数据（非破坏性：原始节点数据不动，只是视觉上藏起来） */
+function aggregateData(ids) {
+  const members = ids.map((id) => R.nodes.get(id)).filter((ns) => ns && !ns.dying);
+  const domTally = new Map();
+  let weight = 0, lastSeen = "", firstSeen = "9999", priv = false, act = 0, done = 0;
+  const facts = [];
+  for (const ns of members) {
+    const d = ns.data;
+    const w = +d.weight || 1;
+    weight += w;
+    domTally.set(d.domain, (domTally.get(d.domain) || 0) + w);
+    if (str(d.last_seen) > lastSeen) lastSeen = str(d.last_seen);
+    if (d.first_seen && str(d.first_seen) < firstSeen) firstSeen = str(d.first_seen);
+    if (d.private) priv = true;
+    if (d.status === "done") done++; else if (d.status !== "dropped") act++;
+    for (const f of d.facts || []) facts.push(f);
+  }
+  let domain = members.length ? members[0].data.domain : "ethics";
+  let best = -1;
+  for (const [k, v] of domTally) if (v > best) { best = v; domain = k; }
+  facts.sort((a, b) => str(b && b.date).localeCompare(str(a && a.date)));
+  return {
+    id: "agg:" + hashStr(aggKey(ids)).toString(36),
+    label: `${members.length} 颗小星的星系`,
+    domain, type: "cluster",
+    status: act ? "active" : done ? "done" : "dropped",
+    weight: weight + members.length * 6,
+    private: priv,
+    first_seen: firstSeen === "9999" ? lastSeen : firstSeen,
+    last_seen: lastSeen,
+    facts: facts.slice(0, 8),
+    members: ids.slice(),
+    member_count: members.length,
+  };
+}
+
+/** 大星球周围的卫星环：一颗颗小光点绕转，提示"这里面收着小星" */
+function makeSwarm(count, hex) {
+  const pos = new Float32Array(count * 3);
+  for (let i = 0; i < count; i++) {
+    const a = (i / count) * Math.PI * 2;
+    const rr = 1 + ((i * 37) % 10) / 26;
+    pos[i * 3] = Math.cos(a) * rr;
+    pos[i * 3 + 1] = Math.sin(a * 2 + i) * 0.2;
+    pos[i * 3 + 2] = Math.sin(a) * rr;
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+  const mat = regAdditive(new THREE.PointsMaterial({
+    map: R.tex.glow, color: hex, size: 0.15, transparent: true,
+    depthWrite: false, blending: THREE.AdditiveBlending, sizeAttenuation: true, fog: false,
+  }));
+  const pts = new THREE.Points(geo, mat);
+  pts.rotation.x = 0.5;
+  pts.rotation.z = -0.35;
+  return pts;
+}
+
+function ensureAggNode(ids) {
+  const data = aggregateData(ids);
+  let ns = R.nodes.get(data.id);
+  if (!ns) {
+    ns = createNodeState(data);
+    ns.isAgg = true;
+    ns.swarm = makeSwarm(Math.min(ids.length, 14), domainOf(data.domain).hex);
+    ns.group.add(ns.swarm);
+    R.nodes.set(data.id, ns);
+    R.order.push(ns);
+  } else {
+    ns.dying = false;
+    ns.data = data;
+  }
+  ns.aggIds = ids.slice();
+  styleNode(ns); // 半径/贴图/光晕/标签都按合成数据重算——新建分支不调用就是颗白点
+  const c = R.v4.set(0, 0, 0);
+  let n = 0;
+  for (const id of ids) { const m = R.nodes.get(id); if (m) { c.add(m.p); n++; } }
+  if (n) ns.p.copy(c.multiplyScalar(1 / n));
+  ns.mob = 0.55;
+  return ns;
+}
+
+export const setMergePromptHandler = safe(function setMergePromptHandler(cb) {
+  cfg.onMergePrompt = typeof cb === "function" ? cb : null;
+});
+
+/** 用户确认后：小星沿弧线飞进大星球，大星球延迟弹出 + 光晕爆发 */
+export const mergePlanets = safe(function mergePlanets(ids) {
+  if (!R || !R.ready || !Array.isArray(ids)) return null;
+  const members = ids
+    .map((id) => R.nodes.get(id))
+    .filter((ns) => ns && !ns.dying && !ns.isAgg && !R.merged.has(ns.id));
+  if (members.length < 2) return null;
+  const agg = ensureAggNode(members.map((ns) => ns.id));
+  const tms = nowMs();
+  const target = agg.p.clone();
+  members.forEach((ns, i) => {
+    R.merged.set(ns.id, agg.id);
+    R.v1.subVectors(target, ns.p);
+    R.v2.set(-R.v1.z, R.v1.y * 0.4 + 0.7, R.v1.x);
+    if (R.v2.lengthSq() < 0.01) R.v2.set(0, 1, 0);
+    ns.mergeFly = { t: -i * 0.05, dur: 0.9, from: ns.p.clone(), arc: R.v2.clone().normalize() };
+    ns.mergeTo = agg;
+    ns.mob = 0;
+    ns.pulseUntil = 0;
+  });
+  agg.appear = 0;
+  agg.appearDelay = 0.45 + members.length * 0.05;
+  agg.flareUntil = tms + 1700;
+  R.bloomKick = 1;
+  R.sim.alpha = Math.max(R.sim.alpha, 0.35);
+  applyVisibility();
+  rebuildEdges();
+  addBurst(target, domainOf(agg.data.domain).hex, agg.r * 3.4);
+  if (!R.running) updateRunning();
+  return { id: agg.id, ids: agg.aggIds.slice(), label: agg.data.label, count: agg.aggIds.length };
+});
+
+/** 点开大星球选"展开"：小星从中心弹回原位，聚合球退场 */
+export const unmergePlanets = safe(function unmergePlanets(cid) {
+  if (!R || !R.ready) return false;
+  const agg = R.nodes.get(idOf(cid));
+  if (!agg || !agg.isAgg) return false;
+  const c = agg.p.clone();
+  const hex = domainOf(agg.data.domain).hex;
+  let i = 0;
+  for (const id of agg.aggIds || []) {
+    R.merged.delete(id);
+    const ns = R.nodes.get(id);
+    if (!ns || ns.dying) continue;
+    ns.mergeFly = null;
+    ns.mergeTo = null;
+    ns.mergeK = null;
+    ns.p.set(c.x + (Math.random() - 0.5) * 1.1, c.y + (Math.random() - 0.5) * 1.1, c.z + (Math.random() - 0.5) * 1.1);
+    ns.mob = 1;
+    ns.appear = 0;
+    ns.appearDelay = i * 0.05;
+    addBurst(ns.p, domainOf(ns.data.domain).hex, ns.r * 1.9);
+    i++;
+  }
+  agg.aggIds = [];
+  agg.dying = true;
+  agg.visTarget = 0;
+  if (R.hover === agg) R.hover = null;
+  R.bloomKick = Math.max(R.bloomKick, 0.7);
+  addBurst(c, hex, agg.r * 3);
+  R.sim.alpha = Math.max(R.sim.alpha, 0.5);
+  applyVisibility();
+  rebuildEdges();
+  if (!R.running) updateRunning();
+  return true;
+});
+
+export const getMergedGroups = safe(function getMergedGroups() {
+  if (!R) return [];
+  const out = [];
+  for (const ns of R.order) {
+    if (ns.isAgg && !ns.dying) out.push({ id: ns.id, ids: (ns.aggIds || []).slice(), label: ns.data.label, count: (ns.aggIds || []).length });
+  }
+  return out;
+});
 
 // ============================================================
 // 13. 任务规划卫星
@@ -2429,11 +2753,14 @@ export const highlightRecall = safe(function highlightRecall(payload) {
   for (const x of Array.isArray(payload.nodes) ? payload.nodes : []) {
     let ns = R.nodes.get(idOf(x));
     if (!ns && x && x.label) ns = R.order.find((o) => o.data.label === x.label);
+    if (ns && R.merged.has(ns.id)) ns = R.nodes.get(R.merged.get(ns.id)) || ns;
     if (ns && !ns.dying) { ns.pulseUntil = until; hit.add(ns.id); }
   }
   for (const e of Array.isArray(payload.edges) ? payload.edges : []) {
     if (!e) continue;
-    const s = idOf(e.source), t = idOf(e.target);
+    let s = idOf(e.source), t = idOf(e.target);
+    s = R.merged.get(s) || s;
+    t = R.merged.get(t) || t;
     const k = s < t ? s + "\u0001" + t : t + "\u0001" + s;
     const ed = R.edgeList.find((x) => x.k === k);
     if (ed) {
@@ -2511,7 +2838,8 @@ export const clearPlanSatellites = safe(function clearPlanSatellites() {
 
 export const focusNode = safe(function focusNode(nodeId) {
   if (!R || !R.ready) return;
-  const ns = R.nodes.get(idOf(nodeId));
+  const nid = idOf(nodeId);
+  const ns = R.nodes.get(R.merged.get(nid) || nid);
   if (!ns || ns.dying || ns.visTarget === 0) return;
   R.focusId = ns.id;
   ns.pulseUntil = nowMs() + 1800;

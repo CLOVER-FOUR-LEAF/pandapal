@@ -70,6 +70,38 @@ def _seed(child_dir: Path) -> None:
     ], "edges": []}, ensure_ascii=False), encoding="utf-8")
 
 
+async def fake_stream(messages, *, max_tokens=1200, temperature=0.7, caller="unknown"):
+    """分节流式假身：周报按【一句话】【进展】…逐块吐，别的 caller 随便给两个 token。"""
+    if caller == "weekly":
+        for part in ["【一句话】\n", "秋游准备得不错。", "\n【进展】\n- 秋游清单备齐了\n",
+                     "【要盯】\n- 感冒还没好\n", "【周末建议】\n陪孩子早睡\n",
+                     "【夸夸】\n你自己记得收拾书包"]:
+            yield part
+        return
+    for tok in ("我在听，", "慢慢说。"):
+        yield tok
+
+
+async def _sse_get(client, path: str, headers: dict) -> tuple[list[dict], str]:
+    events = []
+    async with client.stream("GET", path, headers=headers) as resp:
+        ctype = resp.headers.get("content-type", "")
+        async for line in resp.aiter_lines():
+            if line.startswith("data:"):
+                events.append(json.loads(line[5:]))
+    return events, ctype
+
+
+async def _sse_post(client, path: str, headers: dict, body: dict) -> tuple[list[dict], str]:
+    events = []
+    async with client.stream("POST", path, headers=headers, json=body) as resp:
+        ctype = resp.headers.get("content-type", "")
+        async for line in resp.aiter_lines():
+            if line.startswith("data:"):
+                events.append(json.loads(line[5:]))
+    return events, ctype
+
+
 async def _login(client, user, pw) -> str:
     r = await client.post("/api/auth/login", json={"username": user, "password": pw})
     return r.json().get("token", "")
@@ -102,6 +134,23 @@ async def _run(client: httpx.AsyncClient) -> None:
     r = await client.get("/api/parent/weekly", headers=C)
     record("weekly_child_403", r.status_code == 403, f"status={r.status_code}")
 
+    # 1b. 周报流式：phase → token* → done；分节文本解析回结构化报告
+    events, ctype = await _sse_get(client, "/api/parent/weekly?stream=1", P)
+    types = [e.get("type") for e in events]
+    rep_s = ((next((e for e in events if e.get("type") == "done"), {}).get("data") or {})
+             .get("report") or {})
+    record("weekly_stream",
+           ctype.startswith("text/event-stream") and types and types[0] == "phase"
+           and "token" in types and types[-1] == "done"
+           and rep_s.get("headline") == "秋游准备得不错。"
+           and rep_s.get("highlights") == ["秋游清单备齐了"]
+           and rep_s.get("watch") == ["感冒还没好"]
+           and rep_s.get("suggestion") == "陪孩子早睡"
+           and rep_s.get("praise") == "你自己记得收拾书包"
+           and rep_s.get("llm") is True,
+           f"events={types} rep={str(rep_s)[:70]}")
+    record("weekly_stream_no_secret", all(SECRET not in p for p in PROMPTS.get("weekly", [])))
+
     # 2. 周报降级：LLM 挂了也给统计说实话
     async def boom(*a, **k):
         raise llm.LLMError("offline")
@@ -133,6 +182,24 @@ async def _run(client: httpx.AsyncClient) -> None:
     record("notice_dedup", res2.get("created") is False
            and (res2.get("affair") or {}).get("id") == aff.get("id"), str(res2.get("affair", {}).get("id")))
 
+    # 4b. 通知流式：phase → text → affair → action* → done；事件顺序即真实进度
+    events, ctype = await _sse_post(client, "/api/notice?stream=1", P,
+                                    {"text": "提醒：周五秋游别忘了带午餐和水。"})
+    types = [e.get("type") for e in events]
+    t_ev = next((e for e in events if e.get("type") == "text"), {})
+    acts = [e for e in events if e.get("type") == "action"]
+    done_ev = next((e for e in events if e.get("type") == "done"), {})
+    res_s = ((done_ev.get("data") or {}).get("results") or [{}])[0]
+    kinds = [a.get("kind") for a in acts if a.get("ok")]
+    record("notice_stream",
+           ctype.startswith("text/event-stream") and types[0] == "phase"
+           and "text" in types and "affair" in types and "action" in types
+           and types[-1] == "done"
+           and t_ev.get("parent_text") and "checklist" in kinds and "reminder" in kinds
+           and (res_s.get("affair") or {}).get("source") == "notice",
+           f"events={types} kinds={kinds}")
+    record("notice_stream_no_secret", all(SECRET not in p for p in PROMPTS.get("notice", [])))
+
     # 5. 越权：家长不能给别家孩子发、不能批量；孩子没有 notice 能力
     r = await client.post("/api/notice", headers=P, json={"name": OTHER, "text": "别家的通知内容"})
     record("notice_other_403", r.status_code == 403, f"status={r.status_code}")
@@ -162,8 +229,9 @@ async def _run(client: httpx.AsyncClient) -> None:
 
 
 async def main() -> int:
-    saved = {k: getattr(llm, k) for k in ("complete_json", "log_call")}
+    saved = {k: getattr(llm, k) for k in ("complete_json", "stream", "log_call")}
     llm.complete_json = fake_complete_json
+    llm.stream = fake_stream
     llm.log_call = lambda *a, **k: None
     try:
         transport = httpx.ASGITransport(app=app)
