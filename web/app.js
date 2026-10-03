@@ -3933,13 +3933,16 @@ async function loadLogs() {
     calls.forEach((c) => {
       const row = el("div", "log-row");
       const ok = c.ok;
+      // usage 是 provider 回报的真实计数（有就优先展示）；tokens 是本地估算，兜底用
+      const usageTxt = c.usage ? `${c.usage.in}/${c.usage.out} tok`
+        : c.tokens !== undefined ? `~${escapeHtml(c.tokens)} tok` : "";
       row.innerHTML =
         `<span class="ts">${escapeHtml(String(c.ts || "").slice(5))}</span>
          <span class="caller">${escapeHtml(c.caller || "")}</span>
-         <span>${escapeHtml(c.model || "")}${c.protocol ? `<span class="ts"> ·${escapeHtml(c.protocol)}</span>` : ""}</span>
+         <span title="${escapeHtml(c.endpoint || "")}">${escapeHtml(c.model || "")}${c.protocol ? `<span class="ts"> ·${escapeHtml(c.protocol)}</span>` : ""}</span>
          <span>${c.ms !== undefined ? `${escapeHtml(c.ms)}ms` : "—"}</span>
          <span>${ok
-           ? `<span class="ok">成功</span>${c.tokens !== undefined ? ` <span class="ts">${escapeHtml(c.tokens)} tok</span>` : ""}`
+           ? `<span class="ok">成功</span>${usageTxt ? ` <span class="ts">${usageTxt}</span>` : ""}${c.truncated ? ` <span class="bad">截断</span>` : ""}`
            : `<span class="bad">失败</span> <span class="err">${escapeHtml(c.err || "")}</span>`}</span>`;
       box.appendChild(row);
     });
@@ -4033,6 +4036,18 @@ async function renderChips(chips) {
   box.scrollLeft = 0;
 }
 
+// SpeechRecognition 错误码 → 一句能看懂的话。原来 onerror 只静默 stop：
+// Chrome 的识别走 Google 服务器（国内网络下必报 network）、权限在系统层
+// 被拒时报 not-allowed——两者都是"点了没反应"，不说清楚只会以为按钮坏了。
+const MIC_ERR_TEXT = {
+  "not-allowed": "麦克风没授权——在浏览器（或系统设置）里允许录音再试",
+  "service-not-allowed": "语音识别被系统禁用了（macOS 检查「Siri 与听写」）",
+  "network": "语音识别连不上：Chrome 走 Google 语音服务，国内网络用不了（换 Safari 或 Edge）",
+  "no-speech": "没听到声音，凑近点再说一次？",
+  "audio-capture": "找不到能用的麦克风",
+  "language-not-supported": "这个浏览器不支持中文语音识别",
+};
+
 function setupMic() {
   const btn = $("#mic-btn");
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -4041,29 +4056,43 @@ function setupMic() {
     return;
   }
   btn.classList.remove("hidden");
-  micRec = new SR();
-  micRec.lang = "zh-CN";
-  micRec.interimResults = true;
   let recording = false;
-  micRec.onresult = (e) => {
-    let text = "";
-    for (const r of e.results) text += r[0].transcript;
-    const input = $("#msg-input");
-    if (input) input.value = text;
-  };
+  let cur = null;   // 当前活跃实例；旧实例晚到的 onend/onerror 不许碰新会话的状态
   const stop = () => {
     recording = false;
     btn.classList.remove("recording");
     btn.setAttribute("aria-pressed", "false");
   };
-  micRec.onend = stop;
-  micRec.onerror = stop;
+  const start = () => {
+    // 每次都起新实例：识别器出错/中止后可能停在"已启动"的内部状态，
+    // 拿同一个对象再 start() 会同步抛 InvalidStateError——"点了没反应"的来源之一。
+    const rec = new SR();
+    rec.lang = "zh-CN";
+    rec.interimResults = true;
+    rec.onresult = (e) => {
+      let text = "";
+      for (const r of e.results) text += r[0].transcript;
+      const input = $("#msg-input");
+      if (input) input.value = text;
+    };
+    rec.onend = () => { if (cur === rec) { cur = null; stop(); } };
+    rec.onerror = (e) => {
+      if (cur !== rec) return;
+      cur = null;
+      stop();
+      const msg = MIC_ERR_TEXT[e && e.error];
+      if (msg) toast(msg);  // aborted / bad-grammar 不在表里：主动收尾，不算错
+    };
+    cur = rec;
+    micRec = rec;         // 全局引用：发送/退出登录时按得住（见 resetComposer）
+    rec.start();
+  };
   btn.onclick = () => {
-    if (recording) { micRec.stop(); return; }
+    if (recording) { stop(); cur?.stop(); return; }  // 先清 UI 再 stop，识别器卡住时按钮也不一直红着
     recording = true;
     btn.classList.add("recording");
     btn.setAttribute("aria-pressed", "true");
-    try { micRec.start(); } catch { stop(); }
+    try { start(); } catch { stop(); toast("语音识别起不来，换个浏览器试试"); }
   };
 }
 

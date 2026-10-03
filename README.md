@@ -66,6 +66,7 @@ cp .env.example .env   # 然后填入你的 LLM_API_KEY 等
 | 记忆本页：主题分组+时间线+长期记忆 | `web/` + `GET /api/memory` |
 | 管家朗读（小米 MiMo TTS）：回复定型后合成语音，`voice` 事件落在 `done` 之后不拖慢正文；口播稿先洗成口语（去 markdown/emoji、日期时间口语化、限长收尾）；方案卡只念一句引导稿；对话音优先级高于问候/晨报，发新消息的瞬间就掐断 | `server/tts.py` + `server/voice.py` |
 | 音色档案 `voice.json`：默认清纯甜美女声（voicedesign 按文字生成音色），可一键切内置音色；孩子直接跟管家说"换个温柔的声音"，由管家自行扩写成音色提示词并落档（确定性正则锚点，不动意图分类） | `server/prompts.py` `VOICE_DESIGN` + `POST /api/voice/preview` |
+| LLM 可靠性三层：错误分级退避重试（429 换 Key、5xx/断网指数退避）、双口径熔断器（Key 级 401/403/429 与端点级 5xx/网络分开记账）、异构兜底端点（`LLM_API_KEY3`+`LLM_BASE_URL2` 可切另一家服务商）；流式只在未吐 token 前重试防回复重复 | `server/llm.py` |
 | 家长周报（本周事务进展+新变化统计→LLM 写成一页纸；悄悄话只计数不进 prompt；LLM 挂了只报统计） | `server/family.py` `GET /api/parent/weekly` |
 | 通知落地「一份通知，千家千版」：学校/机构通知 → 按孩子记忆出专属版 + 自动建事务/清单/提醒；admin 可批量下发 | `server/family.py` `POST /api/notice` |
 | 童年备忘录导出：整份档案打包 zip 交还孩子（家长 403） | `server/family.py` `GET /api/export` |
@@ -78,6 +79,7 @@ cp .env.example .env   # 然后填入你的 LLM_API_KEY 等
 
 - 模型：由 `.env` 中 `LLM_MODEL` 指定（当前用 `grok-4.7`，走 OpenAI 兼容端点；兼容任意 OpenAI 协议端点，也支持 Anthropic Messages 协议）
 - 调用方式：`server/llm.py` 统一封装双协议客户端；一轮规划型对话是 分类→拆解→执行→整理 四段，闲聊可能多一轮联网工具调用，加上轮后的记忆抽取，最多七八次调用
+- 可靠性：瞬时错误（断网/超时/5xx）同候选指数退避重试；429 优先换 Key；连续失败熔断 30s 跳过死端点；`LLM_API_KEY3`+`LLM_BASE_URL2`/`LLM_MODEL2`/`LLM_PROTOCOL2` 可配异构兜底服务商，主端点整体停服也能活。留痕里逐次尝试可见，并记录 provider 回报的真实 token 用量与截断标记
 - 单轮耗时提示：`planner` 与 `synth` 是最重的两段（各自几十秒），界面会在这两段显示「正在拆解要办的事…」「快好了，正在整理成方案…」，属正常等待
 - **赞助商 API 使用清单**：LLM API（见 `.env`，OpenAI 兼容/Anthropic 兼容）、语音合成 [小米 MiMo TTS](https://mimo.mi.com/docs/zh-CN/quick-start/usage-guide/audio/speech-synthesis-v2.5)（`TTS_API_KEY`，可在 admin 后台「API 配置」里改、立即生效；Key 限时免费；留空则整条语音链路静默跳过）、天气 [wttr.in](https://wttr.in)（免费无需 Key）、联网搜索（配置 `SEARCH_API_KEY`+`SEARCH_BASE_URL` 走 Tavily 兼容端点；未配置时用必应网页结果解析，无需 Key）
 
@@ -105,6 +107,9 @@ cp .env.example .env   # 然后填入你的 LLM_API_KEY 等
 
 # 家庭侧服务离线自检：周报/通知落地/批量下发/导出 + 悄悄话不进 prompt + 越权 403
 .venv/bin/python tests/test_family.py
+
+# LLM 可靠性层自检：错误分级/退避/熔断/兜底/usage 记账（全离线 mock）
+.venv/bin/python tests/test_llm_resilience.py
 
 # 前端静态一致性：id/图标/括号配平，暂停键与断网条等关键钩子是否接上
 .venv/bin/python tests/test_web_static.py

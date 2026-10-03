@@ -3,15 +3,28 @@
 通过环境变量切换：
   LLM_PROTOCOL=openai     -> POST {LLM_BASE_URL}/chat/completions
   LLM_PROTOCOL=anthropic  -> POST {LLM_BASE_URL}/v1/messages
-备用 Key：LLM_API_KEY2 在主 Key 失败时自动顶替。
+
+可靠性三层（参考 OpenPanda internal/entry 与 internal/defense 的设计）：
+  1) 候选端点：LLM_API_KEY2 是同端点备用 Key；LLM_API_KEY3 是异构兜底——
+     配上 LLM_BASE_URL2/LLM_MODEL2/LLM_PROTOCOL2 就能在主端点整体不可用时
+     切到另一家服务商。备用 Key 防限流，兜底端点防停服。
+  2) 退避重试：瞬时错误（断网/超时/连接重置）与 5xx 在同一候选内指数退避
+     重试；429 限流按 Key 计，优先换下一个候选，无路可换才原地等窗口。
+  3) 熔断器：Key 级故障（401/403/429）记到候选身上，端点级故障（5xx/网络）
+     记到 (protocol, base_url, model) 上——连续失败就开路冷却，
+     不再让每一次对话都白等一个注定失败的超时。
 """
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import threading
 import time
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import NamedTuple
+from urllib.parse import urlparse
 
 import httpx
 
@@ -73,20 +86,36 @@ def _err_text(e: BaseException | None) -> str:
     return f"{name}: {msg}" if msg else name
 
 
-def log_call(caller: str, ok: bool, ms: float, err: str = "", tokens: int | None = None) -> None:
-    """每次 LLM 调用留痕（评委可查 API 调用记录，证明真生成）。"""
+def log_call(caller: str, ok: bool, ms: float, err: str = "", tokens: int | None = None,
+             *, cand: "_Cand | None" = None, usage: dict | None = None,
+             truncated: bool = False) -> None:
+    """每次 LLM 调用留痕（评委可查 API 调用记录，证明真生成）。
+
+    cand 是本次实际命中的候选端点：兜底端点接管时，日志里看到的就是真实
+    服务商/模型，而不是配置里的主端点——failover 在留痕里必须可见才算数。
+    usage 是 provider 回报的真实 token 计数（缺省不记）；truncated 标记
+    输出撞到长度上限，评委一眼能看出"这条回复本来可能更长"。
+    """
     try:
         LOG_DIR.mkdir(parents=True, exist_ok=True)
         rec = {
             "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
             "caller": caller,
-            "protocol": config.LLM_PROTOCOL,
-            "model": config.LLM_MODEL,
+            "protocol": cand.protocol if cand else config.LLM_PROTOCOL,
+            "model": cand.model if cand else config.LLM_MODEL,
             "ms": round(ms),
             "ok": ok,
         }
+        if cand is not None:
+            host = urlparse(cand.base_url).hostname or ""
+            if host:
+                rec["endpoint"] = host
         if tokens is not None:
             rec["tokens"] = tokens
+        if usage:
+            rec["usage"] = usage
+        if truncated:
+            rec["truncated"] = True
         if err:
             rec["err"] = err[:200]
         with open(LOG_DIR / "llm_calls.jsonl", "a", encoding="utf-8") as f:
@@ -125,11 +154,177 @@ def read_logs(limit: int = 50, offset: int = 0) -> dict:
     return {"calls": out, "total": total, "limit": limit, "offset": offset}
 
 
-def _keys() -> list[str]:
-    keys = [k for k in (config.LLM_API_KEY, config.LLM_API_KEY2) if k]
-    if not keys:
+# ---------------------------------------------------------------- 候选端点
+class _Cand(NamedTuple):
+    """一次 LLM 调用的候选端点：协议 + 地址 + 模型 + Key 四元组。"""
+    protocol: str
+    base_url: str
+    model: str
+    key: str
+
+
+def _candidates() -> list[_Cand]:
+    """按优先级列出候选端点。config 会被后台运行时改写，所以每次调用现取。
+
+    主端点的两把 Key 是同端点候选（共享限流与故障域）；LLM_API_KEY3 配上
+    才追加异构兜底——URL/模型/协议没单独配时回落到主端点的值，只换 Key。
+    """
+    out = [
+        _Cand(config.LLM_PROTOCOL, config.LLM_BASE_URL, config.LLM_MODEL, k)
+        for k in (config.LLM_API_KEY, config.LLM_API_KEY2) if k
+    ]
+    if config.LLM_API_KEY3:
+        out.append(_Cand(
+            config.LLM_PROTOCOL2 or config.LLM_PROTOCOL,
+            config.LLM_BASE_URL2 or config.LLM_BASE_URL,
+            config.LLM_MODEL2 or config.LLM_MODEL,
+            config.LLM_API_KEY3))
+    if not out:
         raise LLMError("未配置 LLM_API_KEY，请填写 .env 或设置环境变量")
-    return keys
+    return out
+
+
+def _kid(cand: _Cand) -> str:
+    """熔断器里的 Key 标识：不持原文，哈希一段就够区分。"""
+    return hashlib.sha256(cand.key.encode()).hexdigest()[:16]
+
+
+def _eid(cand: _Cand) -> str:
+    """熔断器里的端点标识：同地址同模型是一个故障域。"""
+    return f"{cand.protocol}|{cand.base_url}|{cand.model}"
+
+
+# ---------------------------------------------------------------- 熔断器
+# 移植自 OpenPanda internal/defense/circuit.go 的状态机：
+# closed（默认放行）→ 连续失败到阈值 open（冷却期内一律拒绝）→ 冷却过后
+# half-open 放一条探测，探测成功回 closed、失败回 open；探测在飞期间其他
+# 调用不得进入，被遗弃的探测（超过冷却还没回报）按再次断开处理。
+class _Breaker:
+    def __init__(self, threshold: int, cooldown_s: float):
+        self.threshold = max(threshold, 1)
+        self.cooldown = max(cooldown_s, 0.0)
+        # key -> [连续失败次数, 断开时刻, half-open 探测开始时刻]
+        self._states: dict[str, list] = {}
+        self._lock = threading.Lock()
+
+    def allow(self, key: str) -> bool:
+        """本调用方是否可以试这个 key。half-open 只放一条探测：第一个到来者
+        领走探测名额，其余在探测出结果前都被拒。"""
+        now = time.monotonic()
+        with self._lock:
+            st = self._states.get(key)
+            if st is None or st[1] is None:
+                return True
+            if st[2] is None:
+                # open：冷却期到点放一条探测
+                if now - st[1] >= self.cooldown:
+                    st[2] = now
+                    return True
+                return False
+            # half-open：已有探测在飞；被遗弃的探测（超冷却未回报）按再次断开处理
+            if now - st[2] >= self.cooldown:
+                st[1], st[2] = now, None
+            return False
+
+    def still_blocked(self, key: str) -> bool:
+        """只读观察"现在还用不用试它"：不消耗 half-open 的探测名额。
+        用于给候选列表排序筛选——只是看看，并不真要用它。"""
+        now = time.monotonic()
+        with self._lock:
+            st = self._states.get(key)
+            if st is None or st[1] is None:
+                return False
+            if st[2] is not None:
+                return True
+            return now - st[1] < self.cooldown
+
+    def record_success(self, key: str) -> None:
+        with self._lock:
+            self._states.pop(key, None)
+
+    def record_failure(self, key: str) -> None:
+        now = time.monotonic()
+        with self._lock:
+            st = self._states.setdefault(key, [0, None, None])
+            st[0] += 1
+            # half-open 探测失败立即再断；否则累计到阈值才断
+            if st[2] is not None or st[0] >= self.threshold:
+                st[1], st[2] = now, None
+
+
+# Key 级故障（401/403/429：凭证无效/被限流）与端点级故障（5xx/网络不可达）
+# 分开记账：一把 Key 被吊销不该连累同端点的另一把 Key；反过来一个端点真
+# 挂了，两把 Key 也不该各白试一轮才轮到兜底。
+_KEY_BREAKER = _Breaker(threshold=3, cooldown_s=30.0)
+_ENDPOINT_BREAKER = _Breaker(threshold=4, cooldown_s=30.0)
+
+
+def _blocked(cand: _Cand) -> bool:
+    """只读判断：候选现在是否被熔断拦住（不领探测名额）。"""
+    return (_ENDPOINT_BREAKER.still_blocked(_eid(cand))
+            or _KEY_BREAKER.still_blocked(_kid(cand)))
+
+
+def _allowed(cand: _Cand) -> bool:
+    """正式申请名额：端点在前，端点被拒就不浪费 Key 的探测名额。"""
+    return _ENDPOINT_BREAKER.allow(_eid(cand)) and _KEY_BREAKER.allow(_kid(cand))
+
+
+def _record_ok(cand: _Cand) -> None:
+    _KEY_BREAKER.record_success(_kid(cand))
+    _ENDPOINT_BREAKER.record_success(_eid(cand))
+
+
+def _failure_kind(e: BaseException) -> str | None:
+    """把异常归到熔断口径："key"（凭证/限流）/"endpoint"（服务端/网络）/None（不计）。
+
+    4xx（除 401/403/429）是请求本身的问题，不是端点病了，不喂熔断器；
+    200 却返回坏 JSON（解析失败/字段缺失）按端点故障计——能通但返回
+    畸形内容同样是端点异常。
+    """
+    if isinstance(e, httpx.HTTPStatusError):
+        st = getattr(e.response, "status_code", 0) or 0
+        if st in (401, 403, 429):
+            return "key"
+        return "endpoint" if st >= 500 else None
+    if isinstance(e, httpx.TransportError):
+        return "endpoint"
+    if isinstance(e, (json.JSONDecodeError, KeyError)):
+        return "endpoint"
+    return None
+
+
+def _record_fail(cand: _Cand, e: BaseException) -> None:
+    kind = _failure_kind(e)
+    if kind == "key":
+        _KEY_BREAKER.record_failure(_kid(cand))
+    elif kind == "endpoint":
+        _ENDPOINT_BREAKER.record_failure(_eid(cand))
+
+
+# ---------------------------------------------------------------- 退避重试
+_TRANSIENT_RETRIES = 2   # 同一候选内，瞬时/5xx 的退避重试次数
+_RETRY_BACKOFF_S = 0.6   # 退避基数：0.6s → 1.2s
+_RATE_LIMIT_WAIT_S = 1.5  # 429 且没有下一个候选可换时，原地等一个窗口
+
+
+def _retry_wait(e: BaseException, attempt: int, is_last: bool) -> float | None:
+    """这个错误值不值得在本候选内退避重试：返回等待秒数；None = 换下一个候选。
+
+    429 单独处理：限流一般按 Key/分钟计，换一把 Key 比原地等划算；只有
+    已经是最后一个候选（没有可换的）才原地等一个窗口。其余 4xx 重试无意义。
+    """
+    if isinstance(e, httpx.HTTPStatusError):
+        st = getattr(e.response, "status_code", 0) or 0
+        if st == 429:
+            return _RATE_LIMIT_WAIT_S if is_last and attempt < 1 else None
+        if st >= 500:
+            return _RETRY_BACKOFF_S * (2 ** attempt) if attempt < _TRANSIENT_RETRIES else None
+        return None
+    # httpx.TransportError 覆盖连接失败/读超时/断流等"没拿到结论"的错误
+    if isinstance(e, httpx.TransportError):
+        return _RETRY_BACKOFF_S * (2 ** attempt) if attempt < _TRANSIENT_RETRIES else None
+    return None
 
 
 def _split_system(messages: list[dict]) -> tuple[list[str], list[dict]]:
@@ -181,36 +376,6 @@ def _anthropic_messages(rest: list[dict]) -> list[dict]:
                     "type": "base64", "media_type": mime, "data": str(part.get("data") or "")}})
         out.append({"role": msg.get("role", "user"),
                     "content": blocks or [{"type": "text", "text": "（这条消息没有可读内容）"}]})
-    return out
-
-
-def _openai_messages(messages: list[dict]) -> list[dict]:
-    """把统一结构翻译成 OpenAI 的 messages：图片块转成 image_url + data URL。
-
-    不翻译直接透传会被端点 400 拒掉（{"type":"image"} 是 Anthropic 的格式）。
-    冷门类型同样如实说明，不静默丢图。
-    """
-    out = []
-    for msg in messages:
-        content = msg.get("content")
-        if not isinstance(content, list):
-            out.append(msg)
-            continue
-        parts = []
-        for part in content:
-            if not isinstance(part, dict):
-                continue
-            if part.get("type") == "text":
-                parts.append({"type": "text", "text": str(part.get("text") or "")})
-            elif part.get("type") == "image":
-                mime = str(part.get("mime") or "image/png")
-                if mime not in _ANTHROPIC_IMAGE_MIME:
-                    parts.append({"type": "text", "text": f"（不支持的图片类型 {mime}，已跳过）"})
-                    continue
-                url = f"data:{mime};base64,{part.get('data') or ''}"
-                parts.append({"type": "image_url", "image_url": {"url": url}})
-        out.append({"role": msg.get("role", "user"),
-                    "content": parts or [{"type": "text", "text": "（这条消息没有可读内容）"}]})
     return out
 
 
@@ -288,26 +453,39 @@ def estimate_tokens(messages: list[dict]) -> int:
     return int(chars / 1.6) + count_images(messages) * 800 + 8
 
 
-async def _openai_request(client: httpx.AsyncClient, key: str, body: dict) -> httpx.Response:
+def _usage_of(payload: dict, protocol: str) -> dict | None:
+    """从响应体里取出 provider 回报的真实 token 计数；没报就返回 None（日志里不记）。"""
+    u = payload.get("usage")
+    if not isinstance(u, dict):
+        return None
+    if protocol == "anthropic":
+        i, o = u.get("input_tokens"), u.get("output_tokens")
+    else:
+        i, o = u.get("prompt_tokens"), u.get("completion_tokens")
+    if not isinstance(i, int) and not isinstance(o, int):
+        return None
+    return {"in": i if isinstance(i, int) else 0,
+            "out": o if isinstance(o, int) else 0}
+
+
+async def _openai_request(client: httpx.AsyncClient, cand: _Cand, body: dict) -> httpx.Response:
     return await client.post(
-        f"{config.LLM_BASE_URL}/chat/completions",
-        headers={"Authorization": f"Bearer {key}"},
+        f"{cand.base_url}/chat/completions",
+        headers={"Authorization": f"Bearer {cand.key}"},
         json=body,
     )
 
 
-def _anthropic_url() -> str:
+def _anthropic_url(base: str) -> str:
     """BASE_URL 以 /v1 结尾时不再重复拼（B1：流式与非流式共用同一规则）。"""
-    base = config.LLM_BASE_URL
     return f"{base}/messages" if base.endswith("/v1") else f"{base}/v1/messages"
 
 
-async def _anthropic_request(client: httpx.AsyncClient, key: str, body: dict) -> httpx.Response:
-    url = _anthropic_url()
+async def _anthropic_request(client: httpx.AsyncClient, cand: _Cand, body: dict) -> httpx.Response:
     return await client.post(
-        url,
+        _anthropic_url(cand.base_url),
         headers={
-            "x-api-key": key,
+            "x-api-key": cand.key,
             "anthropic-version": "2023-06-01",
             "content-type": "application/json",
         },
@@ -322,62 +500,101 @@ async def complete(
     temperature: float = 0.7,
     caller: str = "unknown",
 ) -> str:
-    """非流式补全，返回文本。主备 Key 各尝试一次。"""
-    t0 = time.monotonic()
-    last_err: Exception | None = None
+    """非流式补全，返回文本。
+
+    遍历候选端点（主 Key → 备 Key → 异构兜底）；熔断中的候选直接跳过——
+    已知死掉的端点不配让这次对话白等一个超时。每个候选内部对瞬时错误
+    （断网/超时/5xx）指数退避重试，429 优先换候选、无路可换才等窗口。
+    每次尝试单独留痕：失败重试和 failover 在 logs 里逐条可见。
+    """
     try:
-        keys = _keys()
+        candidates = _candidates()
     except LLMError as e:
         log_call(caller, False, 0, _err_text(e))  # 没配 Key 的失败也留痕，logs 页能看到原因
         raise
+    # 只走没被熔断拦住的候选；全熔断时强制照旧尝试——可能已恢复的服务好过
+    # 确定失败（forced 下不走 allow() 门禁，探测成功同样会还清熔断账）
+    live = [c for c in candidates if not _blocked(c)]
+    todo, forced = (live, False) if live else (candidates, True)
     client = shared_client()
     toks = estimate_tokens(messages)  # 附图/长文本时日志里能看出这轮有多重
-    for key in keys:
-        try:
-            if config.LLM_PROTOCOL == "anthropic":
-                system, rest = _split_system(messages)
-                resp = await _anthropic_request(client, key, {
-                    "model": config.LLM_MODEL,
+    last_err: Exception | None = None
+    vision_dead = False  # 有候选明确拒收图片：结束时交给上层走"去图重试"的如实降级
+    for i, cand in enumerate(todo):
+        if not forced and not _allowed(cand):
+            continue  # 并发下重新确认：half-open 只放一条探测
+        is_last = i == len(todo) - 1
+        retries = 0
+        while True:
+            at0 = time.monotonic()
+            try:
+                if cand.protocol == "anthropic":
+                    system, rest = _split_system(messages)
+                    resp = await _anthropic_request(client, cand, {
+                        "model": cand.model,
+                        "max_tokens": max_tokens,
+                        "temperature": temperature,
+                        "system": "\n\n".join(system),
+                        "messages": _anthropic_messages(rest),
+                    })
+                    resp.raise_for_status()
+                    data = resp.json()
+                    out = "".join(b.get("text", "") for b in data.get("content", []))
+                    log_call(caller, True, (time.monotonic() - at0) * 1000, tokens=toks,
+                             cand=cand, usage=_usage_of(data, "anthropic"),
+                             truncated=data.get("stop_reason") == "max_tokens")
+                    _record_ok(cand)
+                    return out
+                body = {
+                    "model": cand.model,
+                    "messages": _openai_messages(messages),
                     "max_tokens": max_tokens,
                     "temperature": temperature,
-                    "system": "\n\n".join(system),
-                    "messages": _anthropic_messages(rest),
-                })
-                resp.raise_for_status()
-                data = resp.json()
-                out = "".join(b.get("text", "") for b in data.get("content", []))
-                log_call(caller, True, (time.monotonic() - t0) * 1000, tokens=toks)
+                    "stream": False,
+                }
+                if config.LLM_REASONING_EFFORT:
+                    body["reasoning_effort"] = config.LLM_REASONING_EFFORT
+                out, truncated, usage = "", False, None
+                for budget in (max_tokens, min(max_tokens * 3, 8192)):
+                    # 推理模型可能把预算全花在 reasoning_content 上（finish_reason=length
+                    # 且 content 为空）——放大预算补一次
+                    body["max_tokens"] = budget
+                    resp = await _openai_request(client, cand, body)
+                    resp.raise_for_status()
+                    data = resp.json()
+                    choice = data["choices"][0]
+                    out = choice["message"]["content"] or ""
+                    truncated = choice.get("finish_reason") == "length"
+                    usage = _usage_of(data, "openai") or usage
+                    if out.strip() or not truncated:
+                        break
+                log_call(caller, True, (time.monotonic() - at0) * 1000, tokens=toks,
+                         cand=cand, usage=usage, truncated=truncated)
+                _record_ok(cand)
                 return out
-            body = {
-                "model": config.LLM_MODEL,
-                "messages": _openai_messages(messages),
-                "max_tokens": max_tokens,
-                "temperature": temperature,
-                "stream": False,
-            }
-            if config.LLM_REASONING_EFFORT:
-                body["reasoning_effort"] = config.LLM_REASONING_EFFORT
-            out = ""
-            for budget in (max_tokens, min(max_tokens * 3, 8192)):
-                # 推理模型可能把预算全花在 reasoning_content 上（finish_reason=length
-                # 且 content 为空）——放大预算补一次
-                body["max_tokens"] = budget
-                resp = await _openai_request(client, key, body)
-                resp.raise_for_status()
-                choice = resp.json()["choices"][0]
-                out = choice["message"]["content"] or ""
-                if out.strip() or choice.get("finish_reason") != "length":
+            except Exception as e:  # noqa: BLE001 重试与候选切换需要捕获一切
+                if _vision_rejected(e, messages):
+                    # 本候选的模型没长眼睛：换下一个候选试试（异构兜底也许就是视觉模型），
+                    # 全都不行才上报，让上层去掉图片重试并如实说明
+                    log_call(caller, False, (time.monotonic() - at0) * 1000,
+                             f"视觉被拒: {_err_text(e)}", cand=cand)
+                    last_err, vision_dead = e, True
                     break
-            log_call(caller, True, (time.monotonic() - t0) * 1000, tokens=toks)
-            return out
-        except Exception as e:  # noqa: BLE001 主备切换需要捕获一切
-            if _vision_rejected(e, messages):
-                # 换 key 也不会让模型长出眼睛：立刻上报，交给上层去掉图片重试并如实说明
-                log_call(caller, False, (time.monotonic() - t0) * 1000, f"视觉被拒: {e}")
-                raise LLMVisionUnsupported(str(e)) from e
-            last_err = e
-    log_call(caller, False, (time.monotonic() - t0) * 1000, _err_text(last_err))
-    raise LLMError(f"LLM 调用失败: {_err_text(last_err)}")
+                last_err = e
+                wait = _retry_wait(e, retries, is_last)
+                if wait is not None:
+                    retries += 1
+                    log_call(caller, False, (time.monotonic() - at0) * 1000,
+                             f"{_err_text(e)}（{wait:.1f}s 后重试）", cand=cand)
+                    await asyncio.sleep(wait)
+                    continue
+                log_call(caller, False, (time.monotonic() - at0) * 1000,
+                         _err_text(e), cand=cand)
+                _record_fail(cand, e)
+                break
+    if vision_dead:
+        raise LLMVisionUnsupported(str(last_err or "模型不支持视觉输入"))
+    raise LLMError(f"LLM 调用失败: {_err_text(last_err) or '所有候选端点均被熔断'}")
 
 
 async def stream(
@@ -389,36 +606,45 @@ async def stream(
 ) -> AsyncIterator[str]:
     """流式补全，逐段产出文本。协议细节对外屏蔽。
 
-    主备 Key 各尝试一次：只在还没产出任何 token 前才允许换 Key，
-    已吐出部分内容后失败则直接抛错（重发会造成回复重复）。
+    候选遍历、熔断与退避规则同 complete()。额外硬约束：只要已经吐出
+    过任何 token，失败就直接抛错——重发会把已显示的内容再流一遍，
+    孩子面前回复重复比报错更难看。
     """
-    t0 = time.monotonic()
-    last_err: Exception | None = None
     try:
-        keys = _keys()
+        candidates = _candidates()
     except LLMError as e:
         log_call(caller, False, 0, _err_text(e))
         raise
+    live = [c for c in candidates if not _blocked(c)]
+    todo, forced = (live, False) if live else (candidates, True)
     client = shared_client()
     toks = estimate_tokens(messages)
-    for key in keys:
+    last_err: Exception | None = None
+    vision_dead = False
+    for i, cand in enumerate(todo):
+        if not forced and not _allowed(cand):
+            continue
+        is_last = i == len(todo) - 1
+        retries = 0
         budget = max_tokens
         while True:
-            got = False
+            at0 = time.monotonic()
+            got = False   # 本候选本尝试已产出过可见 token
             finish = None
+            usage = None
             try:
-                if config.LLM_PROTOCOL == "anthropic":
+                if cand.protocol == "anthropic":
                     system, rest = _split_system(messages)
                     req = client.stream(
                         "POST",
-                        _anthropic_url(),
+                        _anthropic_url(cand.base_url),
                         headers={
-                            "x-api-key": key,
+                            "x-api-key": cand.key,
                             "anthropic-version": "2023-06-01",
                             "content-type": "application/json",
                         },
                         json={
-                            "model": config.LLM_MODEL,
+                            "model": cand.model,
                             "max_tokens": budget,
                             "temperature": temperature,
                             "system": "\n\n".join(system),
@@ -428,7 +654,7 @@ async def stream(
                     )
                 else:
                     body = {
-                        "model": config.LLM_MODEL,
+                        "model": cand.model,
                         "messages": _openai_messages(messages),
                         "max_tokens": budget,
                         "temperature": temperature,
@@ -438,8 +664,8 @@ async def stream(
                         body["reasoning_effort"] = config.LLM_REASONING_EFFORT
                     req = client.stream(
                         "POST",
-                        f"{config.LLM_BASE_URL}/chat/completions",
-                        headers={"Authorization": f"Bearer {key}"},
+                        f"{cand.base_url}/chat/completions",
+                        headers={"Authorization": f"Bearer {cand.key}"},
                         json=body,
                     )
                 async with req as resp:
@@ -454,13 +680,28 @@ async def stream(
                             chunk = json.loads(payload)
                         except json.JSONDecodeError:
                             continue
-                        if config.LLM_PROTOCOL == "anthropic":
+                        if cand.protocol == "anthropic":
                             if chunk.get("type") == "content_block_delta":
                                 text = chunk.get("delta", {}).get("text", "")
                                 if text:
                                     got = True
                                     yield text
+                            elif chunk.get("type") == "message_start":
+                                u = chunk.get("message", {}).get("usage") or {}
+                                if isinstance(u.get("input_tokens"), int):
+                                    usage = {"in": u["input_tokens"], "out": 0}
+                            elif chunk.get("type") == "message_delta":
+                                if chunk.get("delta", {}).get("stop_reason") == "max_tokens":
+                                    finish = "length"
+                                u = chunk.get("usage") or {}
+                                if usage is not None and isinstance(u.get("output_tokens"), int):
+                                    usage["out"] = u["output_tokens"]
                         else:
+                            u = chunk.get("usage")
+                            if isinstance(u, dict):
+                                # 结尾 chunk：choices 为空、usage 给总数（端点自愿回报才记）
+                                usage = {"in": u.get("prompt_tokens") or 0,
+                                         "out": u.get("completion_tokens") or 0}
                             for choice in chunk.get("choices", []):
                                 if choice.get("finish_reason"):
                                     finish = choice["finish_reason"]
@@ -468,26 +709,43 @@ async def stream(
                                 if text:
                                     got = True
                                     yield text
-                log_call(caller, got, (time.monotonic() - t0) * 1000,
-                         "" if got else "流式响应为空", tokens=toks)
+                log_call(caller, got, (time.monotonic() - at0) * 1000,
+                         "" if got else "流式响应为空", tokens=toks,
+                         cand=cand, usage=usage, truncated=(finish == "length"))
                 if got:
+                    _record_ok(cand)
                     return
                 last_err = LLMError("流式响应为空")
                 if finish == "length" and budget < 8192:
                     # 推理模型把预算全花在 reasoning_content 上了——没吐任何 token，可安全重试
                     budget = min(budget * 3, 8192)
                     continue
+                # 空流不进熔断账：连上了、流完了、只是没内容，属暧昧事件而非端点死亡
                 break
-            except Exception as e:  # noqa: BLE001 主备切换需要捕获一切
+            except Exception as e:  # noqa: BLE001 重试与候选切换需要捕获一切
                 if got:
-                    raise  # 已经吐了 token，换 Key 重发会让回复重复
+                    _record_ok(cand)  # 已吐过内容的断流不算端点死亡
+                    raise  # 换候选重发会让回复重复
                 if _vision_rejected(e, messages):
-                    log_call(caller, False, (time.monotonic() - t0) * 1000, f"视觉被拒: {e}")
-                    raise LLMVisionUnsupported(str(e)) from e
+                    log_call(caller, False, (time.monotonic() - at0) * 1000,
+                             f"视觉被拒: {_err_text(e)}", cand=cand)
+                    last_err, vision_dead = e, True
+                    break
                 last_err = e
+                wait = _retry_wait(e, retries, is_last)
+                if wait is not None:
+                    retries += 1
+                    log_call(caller, False, (time.monotonic() - at0) * 1000,
+                             f"{_err_text(e)}（{wait:.1f}s 后重试）", cand=cand)
+                    await asyncio.sleep(wait)
+                    continue
+                log_call(caller, False, (time.monotonic() - at0) * 1000,
+                         _err_text(e), cand=cand)
+                _record_fail(cand, e)
                 break
-    log_call(caller, False, (time.monotonic() - t0) * 1000, _err_text(last_err))
-    raise LLMError(f"LLM 流式调用失败: {last_err}")
+    if vision_dead:
+        raise LLMVisionUnsupported(str(last_err or "模型不支持视觉输入"))
+    raise LLMError(f"LLM 流式调用失败: {_err_text(last_err) or '所有候选端点均被熔断'}")
 
 
 def extract_json(text: str) -> dict:
