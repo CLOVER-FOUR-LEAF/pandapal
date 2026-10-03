@@ -136,6 +136,77 @@
           "kind": "parent_confirm",
           "title": "西安西客松参赛：需要家长帮忙确认的事",
           "detail": "管家已把行程与清单准备好，请家长确认交通与报名相关事项。"
+        },
+        {
+          "kind": "reminder",
+          "text": "出发前再确认一次车次和票价，以12306或航空公司官方为准。"
+        },
+        {
+          "kind": "reminder",
+          "text": "每天练一小会儿巡线小车和编程，练到顺手就好。"
+        },
+        {
+          "kind": "reminder",
+          "text": "出发前一晚早点睡，感冒还没好利索，路上多喝水。"
+        },
+        {
+          "kind": "checklist",
+          "title": "携带清单",
+          "items": [
+            "学生证或身份证明",
+            "笔记本电脑和充电器（记得提前充好电）",
+            "还在吃的咳嗽药",
+            "薄外套——西安10月中旬早晚偏凉"
+          ]
+        },
+        {
+          "kind": "parent_confirm",
+          "title": "西安西客松参赛：需要家长帮忙确认的事",
+          "detail": "管家已把行程与清单准备好，请家长确认交通与报名相关事项。"
+        },
+        {
+          "kind": "reminder",
+          "text": "每天晚上提醒你复习 20 分钟数学。"
+        },
+        {
+          "kind": "reminder",
+          "text": "睡前一分钟提醒你收好文具和书包。"
+        },
+        {
+          "kind": "reminder",
+          "text": "考试当天早上提醒你带齐东西再出门。"
+        },
+        {
+          "kind": "checklist",
+          "title": "携带清单",
+          "items": [
+            "削好的铅笔两支",
+            "橡皮一块",
+            "直尺一把",
+            "装温水的水壶"
+          ]
+        },
+        {
+          "kind": "reminder",
+          "text": "先按考试在 10 月 9 日周五来排：每天只复习 20 分钟；如果老师通知的日期"
+        },
+        {
+          "kind": "reminder",
+          "text": "10 月 3 日—4 日：翻错题本，圈出 3 道最没把握的题，再练竖式和口算。"
+        },
+        {
+          "kind": "reminder",
+          "text": "10 月 5 日—6 日：练应用题，读题时圈关键词，再回看重做 2 道错题并讲一"
+        },
+        {
+          "kind": "checklist",
+          "title": "携带清单",
+          "items": [
+            "文具袋：前一晚就装好放进书包。",
+            "2 支削好的铅笔、1 块橡皮、1 把直尺。",
+            "几张草稿纸。",
+            "学生证。"
+          ]
         }
       ],
       "log": [
@@ -328,51 +399,119 @@
           "ts": "2026-10-03T10:46:57",
           "actor": "user",
           "text": "巡检"
+        },
+        {
+          "ts": "2026-10-03T11:47:33",
+          "actor": "butler",
+          "text": "执行链已存档"
+        },
+        {
+          "ts": "2026-10-03T11:47:39",
+          "actor": "butler",
+          "text": "执行了 reminder"
+        },
+        {
+          "ts": "2026-10-03T11:47:39",
+          "actor": "butler",
+          "text": "执行了 reminder"
+        },
+        {
+          "ts": "2026-10-03T11:47:39",
+          "actor": "butler",
+          "text": "执行了 reminder"
+        },
+        {
+          "ts": "2026-10-03T11:47:39",
+          "actor": "butler",
+          "text": "执行了 checklist"
+        },
+        {
+          "ts": "2026-10-03T11:47:39",
+          "actor": "butler",
+          "text": "执行了 parent_confirm"
+        },
+        {
+          "ts": "2026-10-03T11:48:18",
+          "actor": "user",
+          "text": "巡检"
+        },
+        {
+          "ts": "2026-10-03T11:53:58",
+          "actor": "butler",
+          "text": "执行链已存档"
+        },
+        {
+          "ts": "2026-10-03T11:54:04",
+          "actor": "butler",
+          "text": "执行了 reminder"
+        },
+        {
+          "ts": "2026-10-03T11:54:04",
+          "actor": "butler",
+          "text": "执行了 reminder"
+        },
+        {
+          "ts": "2026-10-03T11:54:04",
+          "actor": "butler",
+          "text": "执行了 reminder"
+        },
+        {
+          "ts": "2026-10-03T11:54:04",
+          "actor": "butler",
+          "text": "执行了 checklist"
+        },
+        {
+          "ts": "2026-10-03T12:00:17",
+          "actor": "butler",
+          "text": "执行链已存档"
+        },
+        {
+          "ts": "2026-10-03T12:00:25",
+          "actor": "butler",
+          "text": "执行了 reminder"
+        },
+        {
+          "ts": "2026-10-03T12:00:25",
+          "actor": "butler",
+          "text": "执行了 reminder"
+        },
+        {
+          "ts": "2026-10-03T12:00:25",
+          "actor": "butler",
+          "text": "执行了 reminder"
+        },
+        {
+          "ts": "2026-10-03T12:00:25",
+          "actor": "butler",
+          "text": "执行了 checklist"
         }
       ],
       "created": "2026-09-28",
       "updated": "2026-10-03",
       "plan": {
-        "title": "西客松参赛准备清单",
+        "title": "数学考试准备计划",
         "nodes": [
           {
             "id": "n1",
-            "title": "查赛事信息",
-            "tool": "race_lookup",
+            "title": "确认考试日期",
+            "tool": "now",
             "depends_on": [],
             "status": "done"
           },
           {
             "id": "n2",
-            "title": "查威海到西安交通",
-            "tool": "transport_lookup",
-            "depends_on": [],
+            "title": "排每日复习表",
+            "tool": "llm",
+            "depends_on": [
+              "n1"
+            ],
             "status": "done"
           },
           {
             "id": "n3",
-            "title": "搜赛前须知",
-            "tool": "web_search",
+            "title": "列文具与易错清单",
+            "tool": "llm",
             "depends_on": [],
-            "status": "done"
-          },
-          {
-            "id": "n4",
-            "title": "列必带与备赛清单",
-            "tool": "llm",
-            "depends_on": [
-              "n1",
-              "n3"
-            ],
-            "status": "done"
-          },
-          {
-            "id": "n5",
-            "title": "定出发时间建议",
-            "tool": "llm",
-            "depends_on": [
-              "n2"
-            ],
             "status": "done"
           }
         ]

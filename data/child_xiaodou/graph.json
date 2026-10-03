@@ -602,8 +602,8 @@
       "type": "trait",
       "status": "active",
       "first_seen": "2024-10-11",
-      "last_seen": "2026-10-02",
-      "weight": 14,
+      "last_seen": "2026-10-03",
+      "weight": 15,
       "private": false,
       "facts": [
         {
@@ -645,6 +645,10 @@
         {
           "date": "2026-10-02",
           "text": "西客松比赛前一晚快 11 点还没睡，说有点紧张，在桌边敲手指，跟着管家做了三遍深呼吸"
+        },
+        {
+          "date": "2026-10-03",
+          "text": "睡前轻声说“我有点紧张”，被安抚后躺着安静入睡。"
         }
       ]
     },
@@ -922,6 +926,44 @@
         {
           "date": "2026-10-02",
           "text": "管家教小豆紧张时慢慢做三次深呼吸，一次比一次放松，前一晚按清单点一遍证件、电脑、U盘、零件包和药。"
+        }
+      ]
+    },
+    {
+      "id": "n_2cec7681",
+      "label": "数学考试",
+      "domain": "intellect",
+      "type": "goal",
+      "status": "active",
+      "first_seen": "2026-10-03",
+      "last_seen": "2026-10-03",
+      "weight": 2,
+      "private": false,
+      "facts": [
+        {
+          "date": "2026-10-03",
+          "text": "下周有一次数学考试，小豆打算提前准备，计划每天复习20分钟、先翻错题。"
+        },
+        {
+          "date": "2026-10-03",
+          "text": "下周10月9日周五考数学，按每天复习20分钟排计划；10月3—4日先翻错题本，圈出3道最没把握的题再练竖式和口算"
+        }
+      ]
+    },
+    {
+      "id": "n_36d01b9a",
+      "label": "错题本",
+      "domain": "intellect",
+      "type": "interest",
+      "status": "active",
+      "first_seen": "2026-10-03",
+      "last_seen": "2026-10-03",
+      "weight": 1,
+      "private": false,
+      "facts": [
+        {
+          "date": "2026-10-03",
+          "text": "数学复习的起点是错题本，从里面挑3道最没把握的题重做，考前还要回看重做2道错题并讲一遍"
         }
       ]
     }
@@ -1301,6 +1343,20 @@
     {
       "source": "new_pc",
       "target": "xikesong",
+      "rel": "联想到",
+      "since": "2026-10-03",
+      "weight": 1
+    },
+    {
+      "source": "n_2cec7681",
+      "target": "cold",
+      "rel": "联想到",
+      "since": "2026-10-03",
+      "weight": 1
+    },
+    {
+      "source": "n_2cec7681",
+      "target": "n_36d01b9a",
       "rel": "联想到",
       "since": "2026-10-03",
       "weight": 1
