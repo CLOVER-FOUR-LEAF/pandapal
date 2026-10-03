@@ -583,7 +583,15 @@ class FileStore:
             # 图片能不能真送进视觉模型（坏图/HEIC 为 false；前端据此给一句人话）
             "vision_ok": item.get("vision_ok"),
             # 原始文件名里可能有隐私（"成绩单-张三.pdf"），预览用名字由前端展示
-            "preview": f"/api/files/{item.get('id')}/content",
+            #
+            # preview 只在"这份文件真能当图显示"时才有值。以前所有类型都塞了这个 URL，
+            # 前端就把它当缩略图挂进 <img>：xlsx/docx 回来的是 application/octet-stream、
+            # pdf 带 Content-Disposition: attachment，浏览器一律解不出来，占位区就只剩空白
+            # ——图标被跳过、缩略图又出不来，表现就是"传了 Excel / PDF 不显示图标"。
+            "preview": f"/api/files/{item.get('id')}/content"
+                       if item.get("kind") == "image" else "",
+            # 下载/查看原文件一律用它（所有类型都有），与 preview 的语义分开
+            "content": f"/api/files/{item.get('id')}/content",
         }
 
     # ---------- 写 ----------

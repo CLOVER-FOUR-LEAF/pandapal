@@ -64,8 +64,8 @@ const THEMES = {
 
 // 行星质感变体：0 气态巨行星（条纹） 1 岩质（大陆/海洋/极冠） 2 涡旋云海
 const PLANET_VARIANTS = 3;
-const GALAXY_STARS = 11000;
-const GALAXY_RADIUS = 58;
+const GALAXY_STARS = 6000;
+const GALAXY_RADIUS = 40;
 const BACK_STARS = 1400;
 
 const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
@@ -329,7 +329,7 @@ function atmosphereMaterial(hex) {
 //   dust  臂内侧的暗尘带（普通混合，压暗 haze）→ 臂与臂间有清晰的分界
 //   stars 大小/亮度按幂律分布的星点（加色，轻微闪烁）+ 臂上的粉色星云结
 // 节点所在的内圈（r < GALAXY_CLEAR）整体压暗，星系只在图谱外围铺开，不和标签抢。
-const GALAXY_CLEAR = 15;
+const GALAXY_CLEAR = 13;
 const GALAXY_ARM_TWIST = 0.36;   // 对数螺旋的缠绕率：越大臂越紧
 
 function mulberry32(seed) {
@@ -348,17 +348,17 @@ function galaxyPointsMaterial({ soft = 4.0, opacity = 1, additive = true, dark =
   return new THREE.ShaderMaterial({
     uniforms: {
       uTime: { value: 0 }, uScale: { value: 400 }, uOpacity: { value: opacity },
-      uTwinkle: { value: 1 },
+      uTwinkle: { value: 1 }, uNear: { value: new THREE.Vector2(8, 22) },
     },
     vertexShader: [
       "attribute float aSize; attribute float aBright; attribute float aPhase;",
       "attribute vec3 color;",
-      "uniform float uTime; uniform float uScale; uniform float uTwinkle;",
+      "uniform float uTime; uniform float uScale; uniform float uTwinkle; uniform vec2 uNear;",
       "varying vec3 vColor; varying float vBright;",
       "void main(){",
       "  vec4 mv = modelViewMatrix * vec4(position, 1.0);",
       "  float tw = 1.0 + uTwinkle * 0.28 * sin(uTime * (0.6 + fract(aPhase * 7.13) * 1.9) + aPhase * 6.2831);",
-      "  vBright = aBright * tw; vColor = color;",
+      "  vBright = aBright * tw * smoothstep(uNear.x, uNear.y, -mv.z); vColor = color;",
       "  gl_PointSize = clamp(aSize * uScale / max(-mv.z, 0.1), 1.0, 96.0);",
       "  gl_Position = projectionMatrix * mv;",
       "}",
@@ -408,7 +408,7 @@ function buildGalaxy() {
   const scale = lowEnd ? 0.6 : 1;
   const ARMS = [   // 两条主臂 + 两条次臂：主次分明才看得出"旋"
     { a0: 0, w: 1.0 }, { a0: Math.PI, w: 1.0 },
-    { a0: Math.PI * 0.5, w: 0.42 }, { a0: Math.PI * 1.5, w: 0.42 },
+    { a0: Math.PI * 0.5, w: 0.3 }, { a0: Math.PI * 1.5, w: 0.3 },
   ];
   const armW = ARMS.reduce((s, a) => s + a.w, 0);
   const pickArm = () => {
@@ -416,14 +416,15 @@ function buildGalaxy() {
     for (const a of ARMS) { if ((x -= a.w) <= 0) return a; }
     return ARMS[0];
   };
-  const R0 = 5, RMAX = GALAXY_RADIUS;
+  const R0 = 4, RMAX = GALAXY_RADIUS;
   // 对数螺旋 θ(r) = a0 + ln(r/R0)/k
   const armAngle = (arm, r) => arm.a0 + Math.log(Math.max(r, R0) / R0) / GALAXY_ARM_TWIST;
   const radial = () => R0 + Math.pow(rnd(), 1.15) * (RMAX - R0);
-  // 内圈压暗系数：节点区（图谱 + 标签）留给信息，星系从外圈开始亮
+  // 径向亮度包络：内圈让给图谱，外缘柔和淡出，中间一圈最亮——星环像一道光晕托在图谱外围
   const clearFade = (r) => {
     const t = clamp((r - GALAXY_CLEAR * 0.55) / (GALAXY_CLEAR * 0.75), 0, 1);
-    return 0.12 + 0.88 * t * t * (3 - 2 * t);
+    const o = clamp((r - RMAX * 0.55) / (RMAX * 0.5), 0, 1);
+    return (0.12 + 0.88 * t * t * (3 - 2 * t)) * (1 - o * o * (3 - 2 * o));
   };
   const cCore = new THREE.Color(0xffe2b0), cArm = new THREE.Color(0xbfd4ff),
         cOuter = new THREE.Color(0x8a7dff), cHII = new THREE.Color(0xff8fc8),
@@ -432,7 +433,7 @@ function buildGalaxy() {
   const thick = (r) => (0.55 + 1.4 * Math.exp(-r / 7)) * (1 - 0.5 * r / RMAX);
 
   // ---- haze：沿臂中心铺连续光带
-  const HN = Math.round(520 * scale);
+  const HN = Math.round(480 * scale);
   const haze = pointsLayer(HN, (i, pos, col, size, bright, phase) => {
     const arm = pickArm();
     const r = R0 + 2 + Math.pow(rnd(), 0.9) * (RMAX - R0 - 2);
@@ -445,14 +446,14 @@ function buildGalaxy() {
     tmp.copy(cHazeIn).lerp(cHaze, t);
     col[i * 3] = tmp.r; col[i * 3 + 1] = tmp.g; col[i * 3 + 2] = tmp.b;
     size[i] = (6 + rnd() * 7) * (0.75 + t * 0.8);
-    bright[i] = 0.26 * arm.w * clearFade(r) * (1 - 0.45 * t);
+    bright[i] = 0.17 * arm.w * clearFade(r) * (1 - 0.45 * t);
     phase[i] = rnd();
     return true;
   }, galaxyPointsMaterial({ soft: 2.2, opacity: 1 }));
   haze.material.uniforms.uTwinkle.value = 0;
 
   // ---- dust：臂内侧（朝核心一侧）的暗带，压在 haze 之上、星点之下
-  const DN = Math.round(900 * scale);
+  const DN = Math.round(520 * scale);
   const dust = pointsLayer(DN, (i, pos, col, size, bright, phase) => {
     const arm = ARMS[i % 2];   // 只给两条主臂画尘带
     const r = R0 + 4 + rnd() * (RMAX * 0.82 - R0 - 4);
@@ -518,7 +519,7 @@ function buildGalaxy() {
     bright[i] = b * clearFade(r) * (0.6 + rnd() * 0.4);
     phase[i] = rnd();
     return true;
-  }, galaxyPointsMaterial({ soft: 5.0, opacity: 1 }));
+  }, galaxyPointsMaterial({ soft: 5.0, opacity: 0.95 }));
 
   haze.renderOrder = -3;
   dust.renderOrder = -2;
@@ -526,8 +527,8 @@ function buildGalaxy() {
   const g = new THREE.Group();
   g.add(haze, dust, stars);
   // 星盘略低于图谱平面并微倾：读作"托着星球的银河"，而不是和节点搅在一起
-  g.position.y = -1.6;
-  g.rotation.x = 0.1;
+  g.position.y = -0.6;
+  g.rotation.x = 0.95;
   g.userData.materials = [haze.material, dust.material, stars.material];
   return g;
 }
@@ -645,7 +646,10 @@ export function initScene(containerEl) {
     const mods = await withTimeout(
       Promise.all([
         import("./vendor/three.module.min.js"),
-        import("./vendor/OrbitControls.js"),
+        // ?v=2：OrbitControls 打过本地补丁（滚轮缩放在页面缩放 <100% 时会除以 0），
+        // 而 /static/vendor/ 是按 immutable 长缓存的（max-age=86400），换 URL 才能让
+        // 已经装过 SW / 缓存过旧文件的浏览器真正拿到修复，不用手动清缓存。
+        import("./vendor/OrbitControls.js?v=2"),
         import("./vendor/CSS2DRenderer.js"),
       ]),
       8000,

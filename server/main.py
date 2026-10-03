@@ -67,9 +67,12 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 # 前端无内联脚本/事件处理器（启动层也是独立的 static/splash.js），CSP 收口到 'self'；
 # style 留 'unsafe-inline'（app.js 大量 el.style 赋值、启动层内联样式），img 放 data:（favicon 是内嵌 SVG）。
+# img 还必须放 blob:：附件原图（带 token 的 /api/files/<id>/content）拿不到裸 URL，
+# 前端一律 fetch 成 Blob 再用 createObjectURL 挂到 <img> 上。少了 blob: 就会被 CSP
+# 拦掉——表现是"多模态的图片一张都显示不出来"，而控制台只报一行 CSP 违规。
 _CSP = (
     "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
-    "img-src 'self' data:; connect-src 'self'; font-src 'self'; "
+    "img-src 'self' data: blob:; connect-src 'self'; font-src 'self'; "
     "object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
 )
 
@@ -84,6 +87,10 @@ async def _security_headers(request: Request, call_next):
         size = int(length)
         if request.url.path == "/api/files":
             cap = config.UPLOAD_MAX_BYTES + 64 * 1024  # 留 multipart 边界与字段开销
+        elif request.url.path == "/api/stt":
+            # 语音识别的体积就是那段录音本身：16k 单声道 wav ≈ 32KB/s，一段 10 秒的话
+            # 就 320KB；套 256KB 的 JSON 闸门会让正常录音一律 413（"录了但识别不了"）
+            cap = stt.MAX_BYTES + 64 * 1024
         else:
             cap = 256_000
         if size > cap:
@@ -97,6 +104,11 @@ async def _security_headers(request: Request, call_next):
     # 给它们 max-age 会让部署后一小时内的旧 app.js 去调新接口
     if request.url.path.startswith("/static/vendor/"):
         resp.headers["Cache-Control"] = "public, max-age=86400, immutable"
+    else:
+        # 显式声明 no-cache（= 每次都带 ETag 回源校验，未变仍是 304）：
+        # 只有 ETag/Last-Modified 时浏览器会按"启发式缓存"直接用本地副本，
+        # 改完 style.css / app.js 刷新看不到变化，就是被这条坑的。
+        resp.headers["Cache-Control"] = "no-cache"
     return resp
 
 
@@ -538,6 +550,9 @@ def _upload_throttle(key: str) -> bool:
                   if not v or now - v[-1] >= config.UPLOAD_WINDOW_S]:
             _UPLOAD_HITS.pop(k, None)
     return ok
+
+
+
 
 
 # 所有会调 LLM 的接口共用一份额度：按账号 + 按 IP 双桶。

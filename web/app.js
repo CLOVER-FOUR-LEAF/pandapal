@@ -113,6 +113,7 @@ const state = {
   attachPending: [], // 上传中/失败的附件槽位
   recent: [],        // 服务端最近上传的附件（"最近上传"面板用）
   recentOpen: false, // 面板是否展开
+  lightboxFile: null, // 大图浮层里正在看的附件（下载原图要用）
   needGraphRefresh: false,
   relayDir: "teacher2parent",
   aggs: new Map(),       // 聚合球 id -> [成员节点 id]（2D 兜底折叠用；3D 内部自己管）
@@ -120,7 +121,7 @@ const state = {
 };
 
 let pandaSvg = null;
-let micRec = null;
+let micRec = null;      // 当前活跃的识别器 / 录音器：发送、退出登录时按得住（见 resetComposer）
 
 /* ==========================================================================
  * 1. DOM / 字符串 / 图标 / 日期工具
@@ -1021,7 +1022,7 @@ const CHAT_WELCOME =
 /** 清掉上一账号留在界面上的内容，避免换号后看到旧数据。 */
 function resetUserUI() {
   const box = chatBox();
-  if (box) box.innerHTML = CHAT_WELCOME;
+  if (box) { sweepPendingObjectUrls(box); box.innerHTML = CHAT_WELCOME; }
   const set = (sel, html) => { const n = $(sel); if (n) n.innerHTML = html; };
   set("#chips", ""); // 快捷话题是上一个账号的上下文，清掉等新账号的 /api/suggest
   // 附件是上一个账号/上一轮的遗留：清干净，别把别人的文件带给下一个账号
@@ -1033,6 +1034,9 @@ function resetUserUI() {
   if (fb) fb.setAttribute("aria-expanded", "false");
   state.retryFiles = [];
   renderAttachList();
+  // 图片缓存与大图浮层也是上一个账号的内容：URL 失效之外还要把内存里的 blob 丢掉
+  closeLightbox();
+  attachBlobs.clear();
   const fi = $("#file-input");
   if (fi) fi.value = "";
   set("#briefing-card .panel-body", '<div class="skeleton skeleton-lines"></div>');
@@ -1085,7 +1089,7 @@ function resetUserUI() {
   }
   const secretBtn = $("#secret-btn");
   if (secretBtn) secretBtn.setAttribute("aria-pressed", "false");
-  try { if (micRec && micRec.abort) micRec.abort(); } catch { /* 忽略 */ }
+  micCancel();   // 还有没上传的录音就丢掉，别把上一个人的声音带进下一个账号
 }
 
 function logout() {
@@ -1161,6 +1165,7 @@ function applyAuth() {
   if (sendBtn) sendBtn.disabled = !canChat;
   setHidden("#secret-btn", !canChat);
   setHidden("#dream-btn", !canChat);
+  setHidden("#mic-btn", !canChat);   // 语音输入也是发消息的一种（家长只读）
   // 角色徽标 + 各子视图"返回"按钮回到本角色首页
   const roleName = { child: "孩子", parent: "家长", admin: "评委" }[role] || role;
   setText("#child-name", `@ ${state.name} · ${roleName}`);
@@ -1935,9 +1940,25 @@ function attachIcon(file) {
   return "i-doc";
 }
 
+/** 只有"真能当图显示"的附件才挂 <img>：图片类型 + 有可用的原图地址。
+ *
+ * 这条判断必须守住：xlsx/docx 的原图是 application/octet-stream、pdf 带
+ * Content-Disposition: attachment，浏览器一律解码失败，挂上去只会留下一块空白
+ * （图标还被跳过）——那正是"传了 Excel/PDF 看不到图标"的成因。
+ */
+function isPreviewableImage(f) {
+  return !!f && f.kind === "image" && !!(f.preview || f.content);
+}
+
+/** 下载/看原图用的地址：优先 content（所有类型都有），退回 preview（老数据）。 */
+function fileContentUrl(f) {
+  return (f && (f.content || f.preview)) || "";
+}
+
 function renderAttachList() {
   const box = $("#attach-list");
   if (!box) return;
+  sweepPendingObjectUrls(box);   // 重绘前先把上一批缩略图的 objectURL 收掉
   box.innerHTML = "";
   const items = [...(state.attach || []), ...(state.attachPending || [])];
   if (!items.length && !state.recentOpen) {
@@ -1947,13 +1968,14 @@ function renderAttachList() {
   box.classList.remove("hidden");
   items.forEach((f) => {
     const chip = el("span", `attach-chip${f.error ? " error" : ""}${f.uploading ? " uploading" : ""}`);
-    if (f.preview) {
+    if (isPreviewableImage(f)) {
       const img = el("img", "attach-thumb");
       img.alt = "";
       img.loading = "lazy";
-      loadPrivateImage(img, f.preview);
+      loadPrivateImage(img, f.preview || f.content, () => swapImgToIcon(img, f));
       chip.appendChild(img);
     } else {
+      // 非图片（PDF/Word/Excel/文本）：直接给类型图标，不去试解码原图
       chip.appendChild(icon(attachIcon(f)));
     }
     chip.appendChild(el("span", "attach-name", f.name || "文件"));
@@ -2118,15 +2140,146 @@ async function uploadFiles(fileList) {
   if (input) input.focus();
 }
 
-/** 带鉴权的图片加载：<img> 不能带 Authorization 头，所以 fetch 成 blob 再挂上去。 */
-async function loadPrivateImage(img, url) {
+/** 附件原图缓存：url → { blob, size }。
+ *
+ * 缓存是为了点开大图时不用再请求一次原图（列表里的缩略图通常就是刚存下的那张）；
+ * 但绝不复用 objectURL 本身——URL 一旦被 revoke 就永久失效，二次挂到 <img> 上
+ * 会静默变空白（"图时有时无"就是这么来的）。每次上屏生成一个新的。
+ */
+const attachBlobs = new Map();
+
+/**
+ * 等元素挂上 DOM（最多约 1 秒）。
+ *
+ * 为什么需要：文件卡是"先建节点、请求回来再 append"的，图片的 fetch 常常比
+ * append 先完成。返回 true 表示可以继续挂图；false 表示这个节点已经被换掉/移除，
+ * 调用方应当放弃（此时多半已经有一个新节点在接管，不该再往上挂）。
+ */
+function waitForDom(node, timeout = 1000) {
+  if (node.isConnected) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const t0 = Date.now();
+    const tick = () => {
+      if (node.isConnected) { resolve(true); return; }
+      if (Date.now() - t0 > timeout) { resolve(false); return; }
+      if (typeof requestAnimationFrame === "function") requestAnimationFrame(tick);
+      else setTimeout(tick, 16);
+    };
+    tick();
+  });
+}
+
+/**
+ * 带鉴权的图片加载：<img> 不能带 Authorization 头，所以 fetch 成 blob 再挂上去。
+ *
+ * onFail：拿不到图时回调，调用方据此换成文件图标——只留一个破了的小方块
+ * （或干脆空白）会让人以为"文件传丢了"，其实多半只是这张图挂了。
+ *
+ * 两道保险，因为"服务端说是图片"不等于"浏览器解得了"（HEIC、坏图、被截断）：
+ *   1. fetch 失败 / 空 blob 立刻回调；
+ *   2. 挂上去后等一次 load——有些图能取到字节却解码不了，那就同样回落成图标。
+ */
+async function loadPrivateImage(img, url, onFail, hideIcons = false) {
+  if (!img || !url) { onFail?.(); return; }
+  let objUrl = "";
   try {
-    const resp = await api(url);
-    const blob = await resp.blob();
-    const objUrl = URL.createObjectURL(blob);
+    let blob = (attachBlobs.get(url) || {}).blob;
+    if (!blob) {
+      const resp = await api(url);
+      blob = await resp.blob();
+      if (!blob || !blob.size) throw new Error("空文件");
+      attachBlobs.set(url, { blob });
+    }
+    // 等元素真正挂上 DOM 再挂图。
+    //
+    // 这里以前是 `if (!img.isConnected) return;`——它正是"图发出去以后在聊天里
+    // 显示不出来"的元凶：文件卡是异步插进聊天区的（先建节点、发完请求再 append），
+    // fetch 回来的那一刻 img 往往还没连上，于是整段被静默丢掉，只留下一个没有
+    // src 的 <img>（占位图标还在，所以看起来就是"空白一块"）。而且 blob 已经缓存
+    // 过了，重绘时也不能因为"暂时没连上"就放弃——那会让一次重绘永久丢掉这张图。
+    if (!(await waitForDom(img))) return;   // 真的被换掉/移除了才放弃
+    objUrl = URL.createObjectURL(blob);
+    // 记在元素上，重绘时由 sweepPendingObjectUrls 统一回收
+    img.dataset.objurl = objUrl;
     img.src = objUrl;
-    img.addEventListener("load", () => URL.revokeObjectURL(objUrl), { once: true });
-  } catch { /* 图加载失败不影响文字 */ }
+    // 已经挂过图（缓存命中）就直接收掉占位图标：load 事件不会再触发第二次，
+    // 只在 load 里收会让占位图标永远留着，叠在缩略图上。
+    if (hideIcons && img.complete && img.naturalWidth) img.classList.add("no-icon");
+    if (typeof img.decode === "function") {
+      await img.decode();           // 解码失败会 reject，走到下面的 onFail
+      if (!img.isConnected) return; // 解码期间被换掉：新节点有它自己的加载
+    }
+    if (hideIcons) img.classList.add("no-icon");
+  } catch {
+    if (objUrl) { try { URL.revokeObjectURL(objUrl); } catch { /* 忽略 */ } }
+    onFail?.();
+  }
+}
+
+/** 把"没挂上的 <img>"换回文件图标：卡片仍然可读，只是没有预览。 */
+function swapImgToIcon(img, file) {
+  if (!img || !img.isConnected) return;
+  const svg = icon(attachIcon(file));
+  img.replaceWith(svg);
+}
+
+/** 清掉还没用上的 objectURL：暂存区/对话区重绘前叫一次，别让 blob 越攒越多。 */
+function sweepPendingObjectUrls(root) {
+  if (!root) return;
+  if (root._pendingUrls) {
+    root._pendingUrls.forEach((u) => { try { URL.revokeObjectURL(u); } catch { /* 忽略 */ } });
+    root._pendingUrls = null;
+  }
+  root.querySelectorAll("img[data-objurl]").forEach((im) => {
+    try { URL.revokeObjectURL(im.dataset.objurl); } catch { /* 忽略 */ }
+  });
+}
+
+/** 点开大图：附件原图在对话框里只有缩略图那么大，看不清题面/手写答案。 */
+let lightboxUrl = null;
+
+function closeLightbox() {
+  const box = $("#lightbox");
+  if (box) { box.classList.add("hidden"); box.setAttribute("aria-hidden", "true"); }
+  state.lightboxFile = null;
+  if (lightboxUrl) {
+    try { URL.revokeObjectURL(lightboxUrl); } catch { /* 忽略 */ }
+    lightboxUrl = null;
+  }
+  const img = $("#lightbox-img");
+  if (img) img.removeAttribute("src");
+}
+
+/** 显示原图（不裁剪、按屏幕缩放）。blob 已在缓存里就直接用，避免二次下载。 */
+async function openLightbox(file) {
+  const box = $("#lightbox");
+  const img = $("#lightbox-img");
+  const url = fileContentUrl(file);
+  if (!box || !img || !isPreviewableImage(file) || !url) return;
+  try {
+    let blob = (attachBlobs.get(url) || {}).blob;
+    if (!blob) {
+      const resp = await api(url);
+      blob = await resp.blob();
+      attachBlobs.set(url, { blob });
+    }
+    if (lightboxUrl) { try { URL.revokeObjectURL(lightboxUrl); } catch { /* 忽略 */ } }
+    lightboxUrl = URL.createObjectURL(blob);
+    state.lightboxFile = file;
+    img.alt = file.name || "图片";
+    img.src = lightboxUrl;
+    const cap = $("#lightbox-cap");
+    if (cap) {
+      const bits = [file.name || "图片"];
+      if (file.width && file.height) bits.push(`${file.width}×${file.height}`);
+      if (file.size_cn) bits.push(file.size_cn);
+      cap.textContent = bits.join(" · ");
+    }
+    box.classList.remove("hidden");
+    box.setAttribute("aria-hidden", "false");
+  } catch (e) {
+    toast(`这张图打不开了：${e.message}`);
+  }
 }
 
 /** 一轮对话 / 一条历史消息附带的文件卡（点在图片上看大图，其它文件走下载）。 */
@@ -2135,28 +2288,54 @@ function filesRow(files) {
   if (!list.length) return null;
   const row = el("div", "msg-files");
   list.forEach((f) => {
-    const card = el("a", "msg-file");
-    card.href = f.preview || "#";
-    card.setAttribute("aria-label", `${f.name || "文件"}（${attachKindCn(f.kind)}）`);
-    card.onclick = (e) => { e.preventDefault(); downloadAttach(f); };
-    if (f.kind === "image" && f.preview) {
+    const isImage = isPreviewableImage(f);
+    const card = el("a", `msg-file${isImage ? " msg-file-image" : ""}`);
+    card.href = fileContentUrl(f) || "#";
+    card.setAttribute("aria-label", isImage
+      ? `${f.name || "图片"}（点开看大图）`
+      : `${f.name || "文件"}（${attachKindCn(f.kind)}）`);
+    // 图片：先给一个文件图标兜底，图挂上了再把它去掉——上传的就是张坏图时，
+    // 卡片不会变成一个破图占位，而是如实回落到"图片 · 2.1 MB"。
+    let ph = null;
+    if (isImage) {
+      ph = icon("i-image");
+      card.appendChild(ph);
+    }
+    card.onclick = (e) => {
+      e.preventDefault();
+      if (isImage) openLightbox(f); else downloadAttach(f);
+    };
+    if (isImage) {
       const img = el("img");
-      img.alt = "";
+      img.alt = f.name || "图片";
       img.loading = "lazy";
-      loadPrivateImage(img, f.preview);
+      // hideIcons：图挂上后连占位图标一起收掉，卡片上只留缩略图本身
+      loadPrivateImage(img, fileContentUrl(f), () => img.remove(), true);
+      img.addEventListener("load", () => img.classList.add("no-icon"), { once: true });
       card.appendChild(img);
+      // 缩略图本身可点开大图；旁边再给一个明确的"下载原图"入口，
+      // 否则想存下来的人只能先点开大图、再点浮层里的按钮，多一步。
+      const dl = el("button", "msg-file-dl");
+      dl.type = "button";
+      dl.setAttribute("aria-label", `下载原图 ${f.name || "图片"}`);
+      dl.title = `下载原图 · ${f.name || "图片"}`;
+      dl.appendChild(icon("i-download"));
+      dl.onclick = (e) => { e.preventDefault(); e.stopPropagation(); downloadAttach(f); };
+      card.appendChild(dl);
     } else {
       card.appendChild(icon(attachIcon(f)));
+      const info = el("span", "msg-file-info");
+      info.appendChild(el("span", "msg-file-name", f.name || "文件"));
+      const bits = [attachKindCn(f.kind)];
+      if (f.size_cn) bits.push(f.size_cn);
+      // 图片的 text 是元信息行（"图片：W×H"），不是抽取正文——不能显示成"已读出 N 字"
+      if (f.has_text && f.chars) bits.push(`已读出 ${f.chars} 字`);
+      else if (f.note) bits.push(f.note);
+      info.appendChild(el("span", "msg-file-sub", bits.join(" · ")));
+      // 只有非图片才要这条文字说明：图片本身就能说明一切，文件名移到
+      // title（悬停可见）和大图浮层的标题里，卡片上只留缩略图。
+      card.appendChild(info);
     }
-    const info = el("span", "msg-file-info");
-    info.appendChild(el("span", "msg-file-name", f.name || "文件"));
-    const bits = [attachKindCn(f.kind)];
-    if (f.size_cn) bits.push(f.size_cn);
-    // 图片的 text 是元信息行（"图片：W×H"），不是抽取正文——不能显示成"已读出 N 字"
-    if (f.kind !== "image" && f.has_text && f.chars) bits.push(`已读出 ${f.chars} 字`);
-    else if (f.note) bits.push(f.note);
-    info.appendChild(el("span", "msg-file-sub", bits.join(" · ")));
-    card.appendChild(info);
     row.appendChild(card);
   });
   return row;
@@ -4936,6 +5115,18 @@ function bind() {
     if (input) input.click();
   });
   on("#files-btn", toggleRecentFiles);
+  // 看大图：点背景或图片本身关闭，Esc 也能关（见下面的全局键盘处理）
+  const lightbox = $("#lightbox");
+  if (lightbox) {
+    lightbox.onclick = (e) => {
+      if (e.target === lightbox || e.target === $("#lightbox-img")) closeLightbox();
+    };
+  }
+  on("#lightbox-close", closeLightbox);
+  on("#lightbox-download", () => {
+    const f = state.lightboxFile;
+    if (f) downloadAttach(f);
+  });
   // 粘贴上传：截图后 Ctrl+V 直接进待发送区（桌面端最省事的一条路）
   const msgInput = $("#msg-input");
   if (msgInput) {
@@ -5025,10 +5216,12 @@ function bind() {
       }
     });
   }
-  // ESC：回答进行中先停回答（和主流 agent 一致），否则关抽屉
+  // ESC：大图先关（看图为最上层），然后停回答，最后关抽屉
   document.addEventListener("keydown", (e) => {
     if (e.key !== "Escape" || e.isComposing || e.keyCode === 229) return; // 输入法里按 Esc 是取消候选字
-    // 先关开着的抽屉；没有可关的，回答进行中才是停回答
+    const lb = $("#lightbox");
+    if (lb && !lb.classList.contains("hidden")) { closeLightbox(); return; }
+    // 再关开着的抽屉；没有可关的，回答进行中才是停回答
     let closed = false;
     for (const sel of ["#node-drawer", "#affair-detail"]) {
       const d = $(sel);

@@ -826,7 +826,10 @@ button:disabled, .btn:disabled, .icon-btn:disabled, .chip:disabled {
   body { overflow: hidden; }
   #main-view {
     display: grid;
-    grid-template-columns: clamp(310px, 23vw, 350px) minmax(0, 1fr) clamp(390px, 28vw, 460px);
+    /* 两侧边栏加宽：左栏（晨报/事务/星球速览）与右栏（对话）都更舒展。
+       下限贴着"窄桌面不挤中间"，上限抬到 440/580——原先 310~350 / 390~460
+       在 1280 就撞下限、1440 以上撞上限，等于两头都被 clamp 夹住，看不出变化。 */
+    grid-template-columns: clamp(330px, 25vw, 440px) minmax(0, 1fr) clamp(420px, 33vw, 580px);
     grid-template-rows: var(--topbar-h) minmax(0, 1fr);
     grid-template-areas:
       "topbar topbar topbar"
@@ -1452,7 +1455,8 @@ button:disabled, .btn:disabled, .icon-btn:disabled, .chip:disabled {
 .attach-chip.error { color: var(--bad); border-color: rgba(243, 130, 122, .5); }
 .attach-chip .ic { width: 15px; height: 15px; flex: none; color: var(--bamboo); }
 .attach-thumb {
-  width: 34px; height: 34px; border-radius: 7px; object-fit: cover; flex: none;
+  width: 38px; height: 38px; border-radius: 7px; object-fit: contain; flex: none;
+  background: rgba(255, 255, 255, .05);
   border: 1px solid var(--line);
 }
 .attach-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1496,7 +1500,65 @@ button:disabled, .btn:disabled, .icon-btn:disabled, .chip:disabled {
 .msg-file .msg-file-name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .msg-file .msg-file-sub { color: var(--ink-dim); font-size: 11px; }
 .msg-file:hover { border-color: var(--bamboo); }
-.msg-file img { width: 46px; height: 46px; border-radius: 8px; object-fit: cover; flex: none; border: 1px solid var(--line); }
+/* 图片卡：不做成"小卡片 + 小方块"，而是在对话里直接把图片显示出来。
+   缩略图按原始比例缩放（不裁剪），多张自动换行；点图开大图、角标下载原图。
+   高度固定 150px，宽度随比例自适应（封顶 240px），竖版作业照和横版截图都能看清。
+   卡片上不放文件名/尺寸那行文字：图片自己说明一切，文件名在 title 与大图浮层里。 */
+.msg-file.msg-file-image {
+  position: relative; display: block; padding: 0; overflow: hidden;
+  border-radius: 12px; line-height: 0; max-width: min(240px, 100%);
+}
+.msg-file.msg-file-image > .ic {
+  width: 26px; height: 26px; margin: 14px; color: var(--bamboo);
+}
+.msg-file.msg-file-image img {
+  display: block; width: auto; height: 150px; max-width: min(240px, 100%);
+  object-fit: contain; border: none;
+}
+/* 图挂上了：收起占位图标，并把卡片的边框/底色去掉——只留图本身。
+   只给图加 no-icon 会留下一条空白，所以这里让外层卡片同步进入"只剩图"的状态。 */
+.msg-file.msg-file-image:has(img.no-icon) {
+  border-color: transparent; background: none;
+}
+.msg-file.msg-file-image:has(img.no-icon) > .ic { display: none; }
+/* :has 支持不完整时的兜底：图标不进布局，图永远优先占位 */
+.msg-file.msg-file-image img.no-icon { position: relative; z-index: 1; }
+/* 下载原图：默认半透明，悬停/键盘聚焦时才显眼 */
+.msg-file-dl {
+  position: absolute; top: 6px; right: 6px; width: 26px; height: 26px;
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 0; cursor: pointer; border: none; border-radius: 8px;
+  color: #eaf7f1; background: rgba(10, 20, 16, .58); opacity: 0;
+  transition: opacity .16s ease; z-index: 2;
+}
+.msg-file-dl .ic { width: 15px; height: 15px; }
+.msg-file.msg-file-image:hover .msg-file-dl,
+.msg-file-dl:focus-visible { opacity: 1; }
+.msg-file-dl:hover { background: var(--bamboo); color: #07130d; }
+/* 窄屏：图片矮一点，一张图不至于把整个对话栏占满 */
+@media (max-width: 720px) {
+  .msg-file.msg-file-image img { height: 132px; max-width: 100%; }
+}
+/* 窄屏里没有 hover：下载角标常显，不然手机上找不到入口 */
+@media (hover: none) {
+  .msg-file-dl { opacity: 1; }
+}
+/* 大图浮层：原图铺满可视区，点背景/按 Esc 关 */
+.lightbox {
+  position: fixed; inset: 0; z-index: 90; display: flex; flex-direction: column;
+  background: rgba(4, 10, 8, .88); backdrop-filter: blur(3px);
+}
+.lightbox-bar {
+  display: flex; align-items: center; gap: 8px; flex: none;
+  padding: 10px 14px; color: var(--ink-2); font-size: 12.5px;
+}
+.lightbox-cap { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lightbox .icon-btn { color: var(--ink-2); }
+.lightbox .icon-btn:hover { color: var(--bamboo); }
+#lightbox-img {
+  flex: 1 1 auto; min-height: 0; width: 100%; object-fit: contain;
+  padding: 0 14px 18px; cursor: zoom-out;
+}
 /* 拖拽到聊天区时的落点提示 */
 #chat.drop-active { outline: 2px dashed var(--bamboo); outline-offset: -8px; border-radius: var(--r); }
 

@@ -2,12 +2,19 @@
 // Geometry and fabric textures are generated locally; no remote assets required.
 //
 // 对外 API（scene3d.js 调用）：
-//   useThree(THREE)            注入 three 模块（避免二次加载 CDN）
-//   createPanda(THREE?)        -> THREE.Group；动画只改内部 rig，root.position 留给场景摆放
-//   setPandaMood(group, mood)  idle | thinking | working | happy | worried | speaking
-//   updatePanda(group, dt)     每帧推进动画（由 scene3d 的 rAF 调用）
-//   triggerWave(group)         挥手 1.6 秒（点击熊猫时用）
-//   getFaceCount(group)        三角面数统计（自检用）
+//   useThree(THREE)               注入 three 模块（避免二次加载 CDN）
+//   createPanda(THREE?)           -> THREE.Group；动画只改内部 rig，root.position 留给场景摆放
+//   setPandaMood(group, mood)     idle | listening | curious | thinking | working | speaking
+//                                 happy | excited | proud | shy | worried | sad | sleepy
+//   triggerAction(group, name)    一次性动作：wave|nod|shake|hop|cheer|bow|stretch|hug|tilt|point
+//   triggerWave(group)            挥手 1.6 秒（点击熊猫时用，等价 triggerAction(group,"wave")）
+//   setPandaLook(group, x, y)     眼神跟随：-1..1 的屏幕偏移，熊猫会转头看过去
+//   setPandaAttention(group, on)  被鼠标指着/摸到：耳朵竖起、眼睛睁大一点
+//   updatePanda(group, dt)        每帧推进动画（由 scene3d 的 rAF 调用）
+//   getFaceCount(group)           三角面数统计（自检用）
+//
+// 设计原则：姿势用"通道 + 平滑过渡"表达情绪，一次性动作用"包络叠加"叠在姿势之上；
+// 两类动画都只改 rig 内部，绝不碰 root —— 场景负责摆位，拖拽/停靠都不会被动画冲掉。
 
 let THREE_REF = null;
 
@@ -233,6 +240,44 @@ function blushTexture(t) {
   return texture;
 }
 
+// 手绘感的小圆点贴图：用于腮红、汗滴、音符、星光这类"表情符号"附件。
+// 全部用径向渐变本地生成，不引外部资源。
+function dotTexture(t, soft = true) {
+  const size = 64, data = new Uint8Array(size * size * 4);
+  for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+    const u = ((x + 0.5) / size) * 2 - 1, v = ((y + 0.5) / size) * 2 - 1;
+    const r = Math.hypot(u, v);
+    const i = (y * size + x) * 4;
+    data[i] = data[i + 1] = data[i + 2] = 255;
+    data[i + 3] = soft ? Math.pow(Math.max(0, 1 - r), 1.6) * 255 : (r <= 1 ? 255 : 0);
+  }
+  const texture = new t.DataTexture(data, size, size, t.RGBAFormat);
+  texture.magFilter = texture.minFilter = t.LinearFilter;
+  texture.needsUpdate = true;
+  return texture;
+}
+
+// 心形/星星这类轮廓贴图：同一个 64² 缓冲里按 (u,v) 判定，边缘用 3×3 超采样做抗锯齿。
+function shapeTexture(t, inside) {
+  const size = 64, data = new Uint8Array(size * size * 4);
+  const at = (u, v) => inside(u, v);
+  for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+    let hit = 0;
+    for (let sy = 0; sy < 3; sy++) for (let sx = 0; sx < 3; sx++) {
+      const u = ((x + (sx + 0.5) / 3) / size) * 2 - 1;
+      const v = ((y + (sy + 0.5) / 3) / size) * 2 - 1;
+      if (at(u, v)) hit++;
+    }
+    const i = (y * size + x) * 4;
+    data[i] = data[i + 1] = data[i + 2] = 255;
+    data[i + 3] = (hit / 9) * 255;
+  }
+  const texture = new t.DataTexture(data, size, size, t.RGBAFormat);
+  texture.magFilter = texture.minFilter = t.LinearFilter;
+  texture.needsUpdate = true;
+  return texture;
+}
+
 // Bent ribbons follow a shared downward groom; their roots blend into the surface.
 function addPile(t, mesh, material, count, length, seed = 17) {
   const source = mesh.geometry, positions = source.attributes.position;
@@ -295,18 +340,64 @@ function addPile(t, mesh, material, count, length, seed = 17) {
   mesh.add(pile);
 }
 
-// ---------- 姿势通道的目标值（mood -> pose） ----------
-// arm*: 抬臂角度（正=向前抬）；headPitch: 正=低头；brow: 1=皱眉担心；mouth: 张嘴程度
+// ---------- 表情通道的目标值（mood -> pose） ----------
+// 每个通道都由 updatePanda 指数逼近，所以 mood 只是"想去哪"，不是硬切。
+//   arm*     抬臂角度（正 = 向前抬）；左臂抱着记事本，右臂是"表达手"
+//   headPitch 正 = 低头；headTilt 正 = 歪头；brow 正 = 担心内压、负 = 挑眉
+//   mouth    张嘴程度；eye    眼睛整体缩放（>1 睁大、<1 眯起）
+//   squash   纵向压扁（>1 挺直、<1 缩成一团）；lean 左右重心偏移
+//   ear      耳朵起落：正 = 竖起（好奇），负 = 耷拉（难过）
 const POSE = {
-  idle: { armL: 0.38, armR: 0.2, headPitch: -0.025, headTilt: -0.055, brow: 0, mouth: 0, squash: 1 },
-  thinking: { armL: 0.4, armR: 1.38, headPitch: -0.06, headTilt: 0.12, brow: 0.12, mouth: 0, squash: 1 },
-  working: { armL: 0.68, armR: 0.95, headPitch: 0.18, headTilt: -0.04, brow: 0.04, mouth: 0, squash: 1 },
-  happy: { armL: 0.45, armR: 2.1, headPitch: -0.1, headTilt: -0.07, brow: -0.1, mouth: 0.38, squash: 1 },
-  worried: { armL: 0.34, armR: 0.28, headPitch: 0.1, headTilt: -0.06, brow: 0.65, mouth: 0.04, squash: 0.99 },
-  speaking: { armL: 0.36, armR: 0.48, headPitch: -0.025, headTilt: 0.04, brow: -0.04, mouth: 0.25, squash: 1 },
+  idle:      { armL: 0.38, armR: 0.2,  headPitch: -0.025, headTilt: -0.055, brow: 0,     mouth: 0,    squash: 1,    eye: 1,    lean: 0,     ear: 0 },
+  listening: { armL: 0.34, armR: 0.16, headPitch: -0.05,  headTilt: 0.06,   brow: -0.06, mouth: 0,    squash: 1.01, eye: 1.06, lean: -0.01, ear: 0.5 },
+  curious:   { armL: 0.46, armR: 0.3,  headPitch: -0.08,  headTilt: 0.2,    brow: -0.14, mouth: 0.1,  squash: 1.02, eye: 1.12, lean: 0.02,  ear: 0.8 },
+  thinking:  { armL: 0.4,  armR: 1.38, headPitch: -0.06,  headTilt: 0.12,   brow: 0.12,  mouth: 0,    squash: 1,    eye: 0.9,  lean: 0,     ear: 0.2 },
+  working:   { armL: 0.68, armR: 0.95, headPitch: 0.18,   headTilt: -0.04,  brow: 0.04,  mouth: 0,    squash: 1,    eye: 0.94, lean: 0,     ear: 0.1 },
+  speaking:  { armL: 0.36, armR: 0.48, headPitch: -0.025, headTilt: 0.04,   brow: -0.04, mouth: 0.25, squash: 1,    eye: 1.02, lean: 0.01,  ear: 0.35 },
+  happy:     { armL: 0.45, armR: 2.1,  headPitch: -0.1,   headTilt: -0.07,  brow: -0.1,  mouth: 0.38, squash: 1,    eye: 1.1,  lean: 0,     ear: 0.7 },
+  excited:   { armL: 0.6,  armR: 2.35, headPitch: -0.16,  headTilt: -0.1,   brow: -0.2,  mouth: 0.5,  squash: 1.03, eye: 1.18, lean: 0,     ear: 0.9 },
+  proud:     { armL: 0.42, armR: 0.72, headPitch: -0.14,  headTilt: -0.05,  brow: -0.12, mouth: 0.24, squash: 1.03, eye: 1.06, lean: -0.02, ear: 0.6 },
+  shy:       { armL: 0.3,  armR: 1.72, headPitch: 0.2,    headTilt: 0.16,   brow: -0.02, mouth: 0.06, squash: 0.99, eye: 0.82, lean: 0.01,  ear: -0.2 },
+  worried:   { armL: 0.34, armR: 0.28, headPitch: 0.1,    headTilt: -0.06,  brow: 0.65,  mouth: 0.04, squash: 0.99, eye: 1.04, lean: 0,     ear: -0.1 },
+  sad:       { armL: 0.24, armR: 0.14, headPitch: 0.24,   headTilt: 0.05,   brow: 0.78,  mouth: 0.02, squash: 0.97, eye: 0.86, lean: 0,     ear: -0.7 },
+  sleepy:    { armL: 0.32, armR: 0.18, headPitch: 0.3,    headTilt: -0.14,  brow: -0.04, mouth: 0,    squash: 0.99, eye: 0.32, lean: -0.03, ear: -0.5 },
 };
 
-export const PANDA_MOODS = ["idle", "thinking", "working", "happy", "worried", "speaking"];
+export const PANDA_MOODS = Object.keys(POSE);
+
+// 一次性动作：{dur, gain} + 一个把 [0,1] 进度映射成通道偏移的函数（包络自带起落，
+// 首尾都是 0，所以动作能随时被叠加或打断而不会跳）。
+const ACTIONS = {
+  // 挥手：抬起 + 左右摆
+  wave: { dur: 1.6, apply(p, o) { const s = Math.pow(Math.sin(p * Math.PI), 0.65); o.armR += -2.25 * s; o.armRz += (-0.48 - Math.sin(p * Math.PI * 6) * 0.22) * s; o.headTilt += -0.06 * s; o.mouth += 0.16 * s; o.ear += 0.5 * s; } },
+  // 点头：同意
+  nod: { dur: 1.1, apply(p, o) { const s = Math.sin(p * Math.PI); o.headPitch += Math.sin(p * Math.PI * 3) * 0.2 * s; o.mouth += 0.14 * s; } },
+  // 摇头：不确定/不行
+  shake: { dur: 1.2, apply(p, o) { const s = Math.sin(p * Math.PI); o.headYaw += Math.sin(p * Math.PI * 4) * 0.22 * s; o.brow += 0.2 * s; } },
+  // 原地小跳
+  hop: { dur: 0.9, apply(p, o) { const s = Math.sin(p * Math.PI); o.jump += Math.pow(s, 1.5) * 0.3; o.tuck += s * 0.5; o.ear += 0.7 * s; } },
+  // 欢呼：双臂举起 + 跳
+  cheer: { dur: 1.7, apply(p, o) { const s = Math.sin(p * Math.PI); o.jump += Math.pow(s, 1.3) * 0.36; o.armR += -2.5 * s; o.armL += -0.9 * s; o.tuck += s * 0.6; o.mouth += 0.36 * s; o.eye += 0.16 * s; o.brow += -0.24 * s; o.ear += 0.9 * s; } },
+  // 鞠躬：谢谢/抱歉
+  bow: { dur: 1.5, apply(p, o) { const s = Math.sin(p * Math.PI); o.headPitch += 0.5 * s; o.armL += -0.3 * s; o.armR += -0.24 * s; o.squash += -0.04 * s; } },
+  // 伸懒腰：双臂外张、抬头
+  stretch: { dur: 1.9, apply(p, o) { const s = Math.sin(p * Math.PI); o.armR += -1.7 * s; o.armL += -1.1 * s; o.armRz += -0.5 * s; o.armLz += 0.5 * s; o.headPitch += -0.26 * s; o.mouth += 0.28 * s; o.squash += 0.05 * s; o.ear += 0.6 * s; } },
+  // 抱一抱自己：安慰
+  hug: { dur: 1.8, apply(p, o) { const s = Math.sin(p * Math.PI); o.armR += 1.35 * s; o.armL += 0.35 * s; o.armRz += 0.42 * s; o.headPitch += 0.16 * s; o.headTilt += 0.1 * s; o.eye += -0.16 * s; } },
+  // 好奇歪头
+  tilt: { dur: 1.3, apply(p, o) { const s = Math.sin(p * Math.PI); o.headTilt += 0.34 * s; o.ear += 0.7 * s; o.eye += 0.1 * s; } },
+  // 指向某个节点（朝右前方伸爪）
+  point: { dur: 1.4, apply(p, o) { const s = Math.sin(p * Math.PI); o.armR += -1.35 * s; o.armRz += -0.62 * s; o.headTilt += -0.12 * s; o.squash += 0.03 * s; } },
+};
+
+export const PANDA_ACTIONS = Object.keys(ACTIONS);
+
+/** 空的动作偏移累加器（每帧复用，避免 GC）。 */
+function blankOffsets() {
+  return { armR: 0, armL: 0, armRz: 0, armLz: 0, headPitch: 0, headTilt: 0, headYaw: 0,
+           brow: 0, mouth: 0, squash: 0, eye: 0, lean: 0, ear: 0, jump: 0, tuck: 0 };
+}
+
 
 /**
  * 创建熊猫管家。
@@ -562,6 +653,57 @@ export function createPanda(THREE, opts = {}) {
   addPile(t, patchL, darkPile, 420, 0.01, 71);
   addPile(t, patchR, darkPile, 420, 0.01, 72);
 
+  // ---------- 表情道具（贴在脸旁的小符号：汗滴/爱心/星光/音符/睡意）----------
+  // 全部做成 Sprite 挂在 headGroup 上，随头一起动；默认透明，由 mood / 动作淡入淡出。
+  const softDot = dotTexture(t, true);
+  const heartTex = shapeTexture(t, (u, v) => {
+    // 心形：两条圆 + 一个尖
+    const x = u * 1.15, y = -v * 1.35 + 0.28;
+    return (Math.pow(x * x + y * y - 0.55, 3) - x * x * y * y * y) <= 0;
+  });
+  const starTex = shapeTexture(t, (u, v) => {
+    // 四角星光：|x|^0.55 + |y|^0.55 <= 1
+    return Math.pow(Math.abs(u), 0.52) + Math.pow(Math.abs(v), 0.52) <= 1.02;
+  });
+  const noteTex = shapeTexture(t, (u, v) => {
+    const head = Math.hypot((u + 0.34) / 0.42, (v + 0.46) / 0.36) <= 1;
+    const stem = u > 0.28 && u < 0.44 && v > -0.46 && v < 0.72;
+    const flag = u > 0.4 && u < 0.92 && v > 0.2 && v < 0.66;
+    return head || stem || flag;
+  });
+  const sparkTex = shapeTexture(t, (u, v) => {
+    const core = Math.hypot(u / 0.26, v / 0.26) <= 1;
+    const cross = Math.abs(u) < 0.09 && Math.abs(v) < 0.86 || Math.abs(v) < 0.09 && Math.abs(u) < 0.86;
+    return core || cross;
+  });
+
+  const props = new t.Group();
+  props.name = "panda-props";
+  headGroup.add(props);
+  const spriteMat = (tex, color, opacity = 0) => new t.SpriteMaterial({
+    map: tex, color, transparent: true, opacity, depthWrite: false, depthTest: true,
+    blending: t.NormalBlending, fog: false,
+  });
+  const mkProp = (tex, color, x, y, z, sc, opacity = 0) => {
+    const sp = new t.Sprite(spriteMat(tex, color, opacity));
+    sp.position.set(x, y, z);
+    sp.scale.setScalar(sc);
+    sp.name = "panda-prop";
+    props.add(sp);
+    return sp;
+  };
+  // 头半径约 1.68，脸在 +z 一侧：道具贴在脸颊外侧/头顶，别糊在脸上
+  const propBlushL = mkProp(softDot, 0xff9d86, -1.34, -0.5, faceDepth(-1.2, -0.52) - 0.1, 0.92);
+  const propBlushR = mkProp(softDot, 0xff9d86, 1.34, -0.5, faceDepth(1.2, -0.52) - 0.1, 0.92);
+  const propSweat = mkProp(softDot, 0xa9d8f5, 1.5, 0.62, faceDepth(1.2, 0.3) - 0.05, 0.5);
+  const propHeartL = mkProp(heartTex, 0xff7f97, -1.5, 0.72, 0.55, 0.62);
+  const propHeartR = mkProp(heartTex, 0xff7f97, 1.52, 0.86, 0.5, 0.5);
+  const propSparkL = mkProp(sparkTex, 0xfff0b8, -1.32, 1.02, 0.7, 0.66);
+  const propSparkR = mkProp(sparkTex, 0xfff0b8, 1.24, 1.16, 0.66, 0.84);
+  const propNote = mkProp(noteTex, 0x9fe0c0, 1.56, 1.18, 0.42, 0.7);
+  const propZzz = mkProp(noteTex, 0xbfe4ff, -1.46, 1.24, 0.3, 0.0);
+  const propQuestion = mkProp(softDot, 0xffe7a8, 1.5, 0.9, 0.3, 0.0);
+
   root.scale.setScalar(s);
   root.userData = {
     panda: true,
@@ -570,11 +712,27 @@ export function createPanda(THREE, opts = {}) {
     pose: { ...POSE.idle },
     t: 0,
     lookYaw: 0,
+    lookPitch: 0,
+    lookX: 0,
+    lookY: 0,
+    attention: 0,
+    attentionTarget: 0,
     blinkAt: 1.6 + Math.random() * 2.4,
     blinkUntil: -1,
     waveUntil: -1,
     pageUntil: -1,
-    textures: [fabric, blush, fur.color, fur.normal, ...eyeMaps],
+    idleUntil: 4 + Math.random() * 5,   // 下一次自发小动作
+    idleAction: "",                      // 正在播的自发小动作
+    action: "",                          // 正在播的手动动作
+    actionUntil: -1,
+    actionStart: 0,
+    offset: blankOffsets(),              // 动作偏移（复用，不分配）
+    props: {
+      group: props, blushL: propBlushL, blushR: propBlushR, sweat: propSweat,
+      heartL: propHeartL, heartR: propHeartR,
+      sparkL: propSparkL, sparkR: propSparkR, note: propNote, zzz: propZzz, question: propQuestion,
+    },
+    textures: [fabric, blush, fur.color, fur.normal, ...eyeMaps, softDot, heartTex, starTex, noteTex, sparkTex],
     parts: {
       rig, body, tail, armL, armR, legL, legR, footL, footR,
       headGroup, head, earL, earR, eyeL, eyeR, mouth, smile, browL, browR, padGroup, pagePivot, penGroup,
@@ -587,20 +745,62 @@ export function createPanda(THREE, opts = {}) {
 /**
  * 切换情绪状态（立即记录，姿势由 updatePanda 平滑过渡过去）。
  * @param {THREE.Group} group createPanda 的返回值
- * @param {string} mood idle|thinking|working|happy|worried|speaking
+ * @param {string} mood PANDA_MOODS 里的一个；未知值退回 idle
  */
 export function setPandaMood(group, mood) {
   if (!group || !group.userData || !group.userData.panda) return;
   const m = POSE[mood] ? mood : "idle";
-  group.userData.mood = m;
-  if (m === "thinking") group.userData.pageUntil = group.userData.t + 1.2;
-  if (m === "happy") group.userData.waveUntil = -1; // 跳一下优先
+  const ud = group.userData;
+  if (ud.mood === m) return;
+  ud.mood = m;
+  // 翻页只在"要动笔"的表情里出现；进入时立刻排一次，别等 1.6 秒才翻
+  if (m === "thinking" || m === "working") ud.pageUntil = Math.min(ud.pageUntil, ud.t) || ud.t;
 }
 
-/** 点击熊猫时挥手。 */
+/**
+ * 播一次动作。同名的正在播就忽略；不同名的直接顶掉（孩子连点不会排队卡住）。
+ * @param {THREE.Group} group
+ * @param {string} name PANDA_ACTIONS 里的一个；未知值忽略
+ * @returns {boolean} 是否接受
+ */
+export function triggerAction(group, name) {
+  if (!group || !group.userData || !group.userData.panda) return false;
+  if (!ACTIONS[name]) return false;
+  const ud = group.userData;
+  if (ud.action === name && ud.t < ud.actionUntil) return false; // 正在播同一个，别重头再来
+  ud.action = name;
+  ud.actionStart = ud.t;
+  ud.actionUntil = ud.t + ACTIONS[name].dur;
+  ud.idleAction = "";           // 动作优先，自发小动作让位
+  ud.idleUntil = ud.t + 2.5 + Math.random() * 4;
+  return true;
+}
+
+/** 点击熊猫时挥手（等价 triggerAction(group, "wave")）。 */
 export function triggerWave(group) {
+  return triggerAction(group, "wave");
+}
+
+/**
+ * 眼神/转头跟随：x、y 是 -1..1 的偏移（相对熊猫正面）。
+ * 视觉上比真转头更"活"——眼睛跟着鼠标走是小朋友最容易察觉的生命感。
+ */
+export function setPandaLook(group, x, y) {
   if (!group || !group.userData || !group.userData.panda) return;
-  group.userData.waveUntil = group.userData.t + 1.6;
+  const ud = group.userData;
+  ud.lookX = Math.max(-1, Math.min(1, x || 0));
+  ud.lookY = Math.max(-1, Math.min(1, y || 0));
+}
+
+/** 鼠标指着/摸着熊猫：耳朵竖起、眼睛睁大、停止自动小动作（它在看你）。 */
+export function setPandaAttention(group, on) {
+  if (!group || !group.userData || !group.userData.panda) return;
+  group.userData.attentionTarget = on ? 1 : 0;
+}
+
+/** 是否正在被"注意"（拖拽/悬停中）。 */
+export function isPandaAttentive(group) {
+  return !!(group && group.userData && group.userData.panda && group.userData.attention > 0.5);
 }
 
 /**
@@ -622,38 +822,81 @@ export function updatePanda(group, dt) {
   const pose = ud.pose;
   for (const key in target) pose[key] += (target[key] - pose[key]) * k;
 
-  // 眨眼：每 2~5 秒一次，持续 140ms
+  // 被注意 / 眼神跟随都走平滑，避免鼠标一动头就抖
+  ud.attention += (ud.attentionTarget - ud.attention) * (1 - Math.exp(-d * 6));
+  ud.lookYaw += (ud.lookX * 0.34 - ud.lookYaw) * (1 - Math.exp(-d * 5));
+  ud.lookPitch += (-ud.lookY * 0.22 - ud.lookPitch) * (1 - Math.exp(-d * 5));
+
+  // ---------- 动作偏移（一次性动作 + 空闲小动作）----------
+  const o = ud.offset;
+  for (const key in o) o[key] = 0;
+  if (ud.action && t < ud.actionUntil) {
+    const spec = ACTIONS[ud.action];
+    spec.apply(Math.max(0, Math.min(1, (t - ud.actionStart) / spec.dur)), o);
+  } else if (ud.action) {
+    ud.action = "";
+    ud.actionUntil = -1;
+  }
+  // 空闲小动作：只有闲下来、没被注意、没在说话时才自娱自乐
+  if (!ud.action && ud.attention < 0.35) {
+    if (ud.idleAction) {
+      const spec = ACTIONS[ud.idleAction];
+      if (spec && t < ud.idleUntil) spec.apply(Math.max(0, Math.min(1, (t - ud.idleStart) / spec.dur)), o);
+      else { ud.idleAction = ""; ud.idleUntil = t + 4 + Math.random() * 6; }
+    } else if (t > ud.idleUntil && (ud.mood === "idle" || ud.mood === "listening")) {
+      const pool = IDLE_ACTIONS;
+      ud.idleAction = pool[(Math.random() * pool.length) | 0];
+      ud.idleStart = t;
+      ud.idleUntil = t + ACTIONS[ud.idleAction].dur;
+    }
+  }
+
+  // 眨眼：每 2~5 秒一次，持续 140ms；被注意时眨得更"精神"（间隔略短）
   if (t > ud.blinkAt) {
-    ud.blinkAt = t + 2 + Math.random() * 3;
+    ud.blinkAt = t + (ud.attention > 0.5 ? 1.4 : 2) + Math.random() * 3;
     ud.blinkUntil = t + 0.14;
   }
   const blinkPhase = Math.max(0, Math.min(1, (ud.blinkUntil - t) / 0.14));
-  const eyeScaleY = 1 - Math.sin(blinkPhase * Math.PI) * 0.92;
+  const blink = Math.sin(blinkPhase * Math.PI);
+  // 眯眼类表情（sleepy）本就该是眯的，别在闭眼上再叠
+  const eyeOpen = pose.eye * (ud.attention > 0.5 ? 1 + 0.08 * ud.attention : 1);
+  const eyeScaleY = Math.max(0.06, eyeOpen * (1 - blink * 0.92));
 
   // ---------- 呼吸 ----------
   const breath = Math.sin(t * 1.45) * 0.012;
-  P.body.scale.set((FORM.bodyScale[0] - breath * 0.3) * pose.squash, (FORM.bodyScale[1] + breath) * pose.squash, (FORM.bodyScale[2] - breath * 0.2) * pose.squash);
+  const squash = pose.squash + o.squash;
+  P.body.scale.set(
+    (FORM.bodyScale[0] - breath * 0.3) * squash,
+    (FORM.bodyScale[1] + breath) * squash,
+    (FORM.bodyScale[2] - breath * 0.2) * squash
+  );
   P.tail.rotation.y = Math.sin(t * 1.1) * 0.08;
 
   // ---------- 头部 ----------
-  let headPitch = pose.headPitch;
-  let headTilt = pose.headTilt + Math.sin(t * 0.9) * 0.02;
-  let headYaw = 0;
+  let headPitch = pose.headPitch + o.headPitch + ud.lookPitch;
+  let headTilt = pose.headTilt + o.headTilt + Math.sin(t * 0.9) * 0.02;
+  let headYaw = ud.lookYaw + o.headYaw;
   if (ud.mood === "thinking") {
-    headYaw = Math.sin(t * 1.8) * 0.035;
+    headYaw += Math.sin(t * 1.8) * 0.035;
     headTilt += Math.sin(t * 1.8) * 0.02;
-  } else if (ud.mood === "worried") {
-    headYaw = Math.sin(t * 1.8) * 0.045;
+  } else if (ud.mood === "worried" || ud.mood === "sad") {
+    headYaw += Math.sin(t * 1.4) * 0.045;
   } else if (ud.mood === "speaking") {
     headPitch += Math.sin(t * 4) * 0.016;
+  } else if (ud.mood === "curious" || ud.mood === "listening") {
+    headTilt += Math.sin(t * 0.7) * 0.03; // 歪着头听，慢一点显得在认真听
   }
-  P.headGroup.position.y = FORM.headRestY + Math.sin(t * 1.45 + 0.6) * 0.025 - pose.headPitch * 0.16;
-  P.headGroup.rotation.set(headPitch, ud.lookYaw + headYaw, headTilt);
+  P.headGroup.position.y = FORM.headRestY + Math.sin(t * 1.45 + 0.6) * 0.025 - headPitch * 0.16;
+  P.headGroup.rotation.set(headPitch, headYaw, headTilt);
   P.eyeL.scale.y = eyeScaleY;
   P.eyeR.scale.y = eyeScaleY;
+  // 眼睛整体缩放：睁大眼（好奇/惊喜）会明显变精神，这是最省成本的"有生命力"
+  const eyeXZ = Math.max(0.4, eyeOpen) * (1 + (1 - blink) * 0);
+  P.eyeL.scale.x = eyeXZ;
+  P.eyeR.scale.x = eyeXZ;
 
   // ---------- 眉毛 ----------
-  const b = pose.brow;
+  const b = pose.brow + o.brow;
   P.browL.rotation.z = -0.55 * b;
   P.browR.rotation.z = 0.55 * b;
   P.browL.position.y = FORM.browY - 0.08 * Math.max(0, b);
@@ -661,18 +904,19 @@ export function updatePanda(group, dt) {
   P.browL.visible = P.browR.visible = Math.abs(b) > 0.085;
 
   // ---------- 嘴 ----------
-  let mouthOpen = pose.mouth;
+  let mouthOpen = pose.mouth + o.mouth;
   if (ud.mood === "speaking") mouthOpen = 0.08 + Math.abs(Math.sin(t * 9)) * 0.42;
   P.mouth.visible = mouthOpen > 0.025;
   P.mouth.scale.set(0.9, Math.max(0.01, mouthOpen), 0.22);
   P.mouth.position.y = FORM.mouthY - mouthOpen * 0.035;
-  P.smile.scale.y = 1 - Math.max(0, pose.brow) * 0.16;
+  // 微笑：眉毛下压（担心）时收敛，越开心越弯
+  P.smile.scale.y = 1 - Math.max(0, pose.brow) * 0.16 + Math.max(0, mouthOpen) * 0.12;
 
   // ---------- 手臂 ----------
-  let armLx = -pose.armL;
-  let armRx = -pose.armR;
-  let armLz = 0.18 + Math.sin(t * 1.2) * 0.015;
-  let armRz = 0.16 + Math.sin(t * 1.2 + 0.4) * 0.018;
+  let armLx = -pose.armL + o.armL;
+  let armRx = -pose.armR + o.armR;
+  let armLz = 0.18 + Math.sin(t * 1.2) * 0.015 + o.armLz;
+  let armRz = 0.16 + Math.sin(t * 1.2 + 0.4) * 0.018 + o.armRz;
   if (ud.mood === "thinking") {
     // 挠头：抬起 + 前后小幅摩擦
     armRx += Math.sin(t * 2.4) * 0.035;
@@ -681,28 +925,25 @@ export function updatePanda(group, dt) {
     // 写字：手臂小幅往复
     armRx += Math.sin(t * 5.5) * 0.035;
     armLx += Math.sin(t * 5.5 + 0.3) * 0.012;
-  } else if (ud.mood === "happy") {
+  } else if (ud.mood === "happy" || ud.mood === "excited") {
     armRz = -0.35 - Math.sin(t * 5) * 0.14;
-  }
-  // 挥手（点击熊猫）
-  if (t < ud.waveUntil) {
-    const p = 1 - (ud.waveUntil - t) / 1.6;
-    const env = Math.pow(Math.sin(p * Math.PI), 0.65);
-    armRx += (-2.25 - armRx) * env;
-    armRz += (-0.48 - armRz - Math.sin(t * 10) * 0.22) * env;
+  } else if (ud.mood === "shy") {
+    armRx += Math.sin(t * 1.6) * 0.02;
   }
   P.armL.rotation.set(armLx, 0, armLz);
   P.armR.rotation.set(armRx, 0, armRz);
 
-  // ---------- 腿：happy 时收腿 ----------
-  const jump = ud.mood === "happy" ? happyJump(t) : 0;
-  const tuck = jump * 0.5;
+  // ---------- 腿：开心时收腿 + 动作带来的跳 ----------
+  const jump = (ud.mood === "happy" || ud.mood === "excited" ? happyJump(t) : 0) + o.jump;
+  const tuck = jump * 0.5 + o.tuck;
   P.legL.rotation.x = -tuck * 0.9;
   P.legR.rotation.x = -tuck * 0.75;
   P.footL.rotation.x = -tuck * 0.6;
   P.footR.rotation.x = -tuck * 0.5;
   P.rig.position.y = jump;
-  P.rig.rotation.z = Math.sin(t * 1.1) * 0.005;
+  // 重心轻移 + 左右晃：静止的熊猫也会"站不住"
+  P.rig.position.x = (pose.lean + o.lean) * 0.5 + Math.sin(t * 0.55) * 0.02;
+  P.rig.rotation.z = Math.sin(t * 1.1) * 0.005 + (pose.lean + o.lean) * 0.05;
 
   // ---------- 记事本 ----------
   P.padGroup.rotation.x = 0.15 + Math.max(0, pose.armL - 0.38) * 0.3;
@@ -718,10 +959,61 @@ export function updatePanda(group, dt) {
     P.pagePivot.rotation.y *= Math.max(0, 1 - d * 6);
   }
 
-  // 耳朵随动作轻弹
+  // 耳朵：起落（好奇竖起 / 难过耷拉）+ 随动作轻弹
+  const ear = pose.ear + o.ear;
   const earBob = Math.sin(t * 2.1) * 0.018;
-  P.earL.rotation.z = earBob;
-  P.earR.rotation.z = -earBob;
+  P.earL.rotation.z = earBob - ear * 0.3;
+  P.earR.rotation.z = -earBob + ear * 0.3;
+  P.earL.position.y = 1.3 + ear * 0.07;
+  P.earR.position.y = 1.3 + ear * 0.07;
+
+  // ---------- 表情道具：按 mood / 动作淡入淡出 ----------
+  updateProps(ud, P, t, d);
+}
+
+/** 空闲时自己找点事做（只在 idle/listening 且没被注意时触发）。 */
+const IDLE_ACTIONS = ["tilt", "nod", "stretch", "hop", "shake"];
+
+/** 表情道具的显隐与浮动。目标透明度按 mood 定，指数逼近避免"啪"地出现。 */
+function updateProps(ud, P, t, d) {
+  const mood = ud.mood;
+  const target = {
+    blushL: mood === "happy" || mood === "shy" || mood === "excited" || mood === "proud" ? 0.5 : mood === "sad" ? 0.18 : 0.2,
+    blushR: 0,
+    sweat: mood === "worried" || mood === "sad" ? 0.62 : 0,
+    heartL: mood === "happy" || mood === "proud" ? 0.8 : 0,
+    heartR: mood === "happy" || mood === "proud" ? 0.62 : 0,
+    sparkL: mood === "excited" || mood === "proud" ? 0.85 : 0,
+    sparkR: mood === "excited" || mood === "proud" ? 0.9 : 0,
+    note: mood === "speaking" ? 0.5 : 0,
+    zzz: mood === "sleepy" ? 0.85 : 0,
+    question: mood === "curious" ? 0.8 : 0,
+  };
+  target.blushR = target.blushL;
+  const props = ud.props;
+  const k = Math.min(1, d * 3);
+  const float = (name, sp, baseY, speed = 1.4, amp = 0.06) => {
+    sp.material.opacity += (target[name] - sp.material.opacity) * k;
+    sp.visible = sp.material.opacity > 0.01;
+    if (!sp.visible) return;
+    sp.position.y = baseY + Math.sin(t * speed + baseY * 3) * amp;
+  };
+  float("blushL", props.blushL, -0.5, 0.8, 0.01);
+  float("blushR", props.blushR, -0.5, 0.8, 0.01);
+  float("sweat", props.sweat, 0.62, 2.2, 0.09);
+  float("heartL", props.heartL, 0.72, 1.8, 0.09);
+  float("heartR", props.heartR, 0.86, 1.5, 0.11);
+  float("sparkL", props.sparkL, 1.02, 2.6, 0.08);
+  float("sparkR", props.sparkR, 1.16, 2.1, 0.1);
+  float("note", props.note, 1.18, 2.4, 0.08);
+  float("zzz", props.zzz, 1.24, 1.1, 0.13);
+  float("question", props.question, 0.9, 1.6, 0.07);
+  // 星星/爱心随呼吸缩放，别像贴纸一样死板
+  const pulse = 1 + Math.sin(t * 2.4) * 0.07;
+  if (props.sparkL.visible) props.sparkL.scale.setScalar(0.66 * (1 + Math.sin(t * 2.9) * 0.12));
+  if (props.sparkR.visible) props.sparkR.scale.setScalar(0.84 * pulse);
+  if (props.heartL.visible) props.heartL.scale.setScalar(0.62 * pulse);
+  if (props.heartR.visible) props.heartR.scale.setScalar(0.5 * (1 + Math.sin(t * 2.1 + 1) * 0.09));
 }
 
 /** A small celebratory bounce, with a rest between gestures. */

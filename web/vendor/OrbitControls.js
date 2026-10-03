@@ -494,7 +494,14 @@ class OrbitControls extends EventDispatcher {
 
 		function getZoomScale( delta ) {
 
-			const normalized_delta = Math.abs( delta ) / ( 100 * ( window.devicePixelRatio | 0 ) );
+			// 本地修改（勿被上游覆盖）：原式是 Math.abs(delta) / ( 100 * ( window.devicePixelRatio | 0 ) )。
+			// devicePixelRatio | 0 在页面缩放小于 100% 时会被截成 0（DPR 0.9/0.8/0.67…），
+			// 除以 0 得 Infinity，pow( 0.95, Infinity ) = 0，接着 dollyOut( 0 ) 做 scale /= 0 ——
+			// 相机直接落到 target 上，表现就是"滚轮动一下画面突然放到最大"。
+			// 两道防线：DPR 至少按 1 算；单次事件最多按 1.5 档计（≈6%），
+			// 这样高分辨率滚轮/惯性滚动一次抛出很大的 deltaY 也不会一步跳到底。
+			const dpr = Math.max( 1, window.devicePixelRatio || 1 );
+			const normalized_delta = Math.min( 1.5, Math.abs( delta ) / ( 100 * dpr ) );
 			return Math.pow( 0.95, scope.zoomSpeed * normalized_delta );
 
 		}
