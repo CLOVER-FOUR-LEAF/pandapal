@@ -170,7 +170,19 @@ def test_wiring() -> None:
     record("attach_thumb_not_cropped",
            "object-fit: cover" not in css[css.find(".attach-thumb"):css.find(".attach-thumb") + 200]
            and ".msg-file.msg-file-image img" in css)
-    record("attach_img_fallback", "swapImgToIcon" in js and "async function loadPrivateImage(img, url, onFail)" in js)
+    record("attach_img_fallback",
+           "swapImgToIcon" in js and "async function loadPrivateImage(img, url, onFail" in js)
+    # 图片卡是异步插进聊天区的：fetch 回来时 img 常常还没连上 DOM，
+    # 早期那句 `if (!img.isConnected) return;`（注释"别白挂"）会把整张图静默丢掉——
+    # 换成 waitForDom 等待；解码后被换掉时那一句仍然保留（那时才对）。
+    record("attach_waits_for_dom",
+           "function waitForDom" in js and "await waitForDom(img)" in js
+           and "已经换了一轮/被移除，别白挂" not in js)
+    # 图片卡只留缩略图本身：文件名/尺寸那行说明只给非图片渲染
+    record("attach_image_card_textless",
+           "const info = el(\"span\", \"msg-file-info\")" in js
+           and js.find("const info = el(\"span\", \"msg-file-info\")")
+           > js.find("} else {", js.find("function filesRow")))
     # 非图片（PDF/Word/Excel）绝不能被当成缩略图挂 <img>：原图是 octet-stream / attachment，
     # 浏览器解码失败就只剩空白，图标又被跳过——"传 Excel 不显示图标"就是这么来的
     record("attach_image_guard",

@@ -2131,6 +2131,27 @@ async function uploadFiles(fileList) {
 const attachBlobs = new Map();
 
 /**
+ * 等元素挂上 DOM（最多约 1 秒）。
+ *
+ * 为什么需要：文件卡是"先建节点、请求回来再 append"的，图片的 fetch 常常比
+ * append 先完成。返回 true 表示可以继续挂图；false 表示这个节点已经被换掉/移除，
+ * 调用方应当放弃（此时多半已经有一个新节点在接管，不该再往上挂）。
+ */
+function waitForDom(node, timeout = 1000) {
+  if (node.isConnected) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const t0 = Date.now();
+    const tick = () => {
+      if (node.isConnected) { resolve(true); return; }
+      if (Date.now() - t0 > timeout) { resolve(false); return; }
+      if (typeof requestAnimationFrame === "function") requestAnimationFrame(tick);
+      else setTimeout(tick, 16);
+    };
+    tick();
+  });
+}
+
+/**
  * 带鉴权的图片加载：<img> 不能带 Authorization 头，所以 fetch 成 blob 再挂上去。
  *
  * onFail：拿不到图时回调，调用方据此换成文件图标——只留一个破了的小方块
@@ -2140,7 +2161,7 @@ const attachBlobs = new Map();
  *   1. fetch 失败 / 空 blob 立刻回调；
  *   2. 挂上去后等一次 load——有些图能取到字节却解码不了，那就同样回落成图标。
  */
-async function loadPrivateImage(img, url, onFail) {
+async function loadPrivateImage(img, url, onFail, hideIcons = false) {
   if (!img || !url) { onFail?.(); return; }
   let objUrl = "";
   try {
@@ -2151,15 +2172,26 @@ async function loadPrivateImage(img, url, onFail) {
       if (!blob || !blob.size) throw new Error("空文件");
       attachBlobs.set(url, { blob });
     }
-    if (!img.isConnected) return;   // 已经换了一轮/被移除，别白挂
+    // 等元素真正挂上 DOM 再挂图。
+    //
+    // 这里以前是 `if (!img.isConnected) return;`——它正是"图发出去以后在聊天里
+    // 显示不出来"的元凶：文件卡是异步插进聊天区的（先建节点、发完请求再 append），
+    // fetch 回来的那一刻 img 往往还没连上，于是整段被静默丢掉，只留下一个没有
+    // src 的 <img>（占位图标还在，所以看起来就是"空白一块"）。而且 blob 已经缓存
+    // 过了，重绘时也不能因为"暂时没连上"就放弃——那会让一次重绘永久丢掉这张图。
+    if (!(await waitForDom(img))) return;   // 真的被换掉/移除了才放弃
     objUrl = URL.createObjectURL(blob);
     // 记在元素上，重绘时由 sweepPendingObjectUrls 统一回收
     img.dataset.objurl = objUrl;
     img.src = objUrl;
+    // 已经挂过图（缓存命中）就直接收掉占位图标：load 事件不会再触发第二次，
+    // 只在 load 里收会让占位图标永远留着，叠在缩略图上。
+    if (hideIcons && img.complete && img.naturalWidth) img.classList.add("no-icon");
     if (typeof img.decode === "function") {
       await img.decode();           // 解码失败会 reject，走到下面的 onFail
-      if (!img.isConnected) return;
+      if (!img.isConnected) return; // 解码期间被换掉：新节点有它自己的加载
     }
+    if (hideIcons) img.classList.add("no-icon");
   } catch {
     if (objUrl) { try { URL.revokeObjectURL(objUrl); } catch { /* 忽略 */ } }
     onFail?.();
@@ -2259,30 +2291,33 @@ function filesRow(files) {
       const img = el("img");
       img.alt = f.name || "图片";
       img.loading = "lazy";
-      loadPrivateImage(img, fileContentUrl(f), () => img.remove());
-      img.addEventListener("load", () => { ph?.remove(); ph = null; }, { once: true });
+      // hideIcons：图挂上后连占位图标一起收掉，卡片上只留缩略图本身
+      loadPrivateImage(img, fileContentUrl(f), () => img.remove(), true);
+      img.addEventListener("load", () => img.classList.add("no-icon"), { once: true });
       card.appendChild(img);
       // 缩略图本身可点开大图；旁边再给一个明确的"下载原图"入口，
       // 否则想存下来的人只能先点开大图、再点浮层里的按钮，多一步。
       const dl = el("button", "msg-file-dl");
       dl.type = "button";
       dl.setAttribute("aria-label", `下载原图 ${f.name || "图片"}`);
-      dl.title = "下载原图";
+      dl.title = `下载原图 · ${f.name || "图片"}`;
       dl.appendChild(icon("i-download"));
       dl.onclick = (e) => { e.preventDefault(); e.stopPropagation(); downloadAttach(f); };
       card.appendChild(dl);
     } else {
       card.appendChild(icon(attachIcon(f)));
+      const info = el("span", "msg-file-info");
+      info.appendChild(el("span", "msg-file-name", f.name || "文件"));
+      const bits = [attachKindCn(f.kind)];
+      if (f.size_cn) bits.push(f.size_cn);
+      // 图片的 text 是元信息行（"图片：W×H"），不是抽取正文——不能显示成"已读出 N 字"
+      if (f.has_text && f.chars) bits.push(`已读出 ${f.chars} 字`);
+      else if (f.note) bits.push(f.note);
+      info.appendChild(el("span", "msg-file-sub", bits.join(" · ")));
+      // 只有非图片才要这条文字说明：图片本身就能说明一切，文件名移到
+      // title（悬停可见）和大图浮层的标题里，卡片上只留缩略图。
+      card.appendChild(info);
     }
-    const info = el("span", "msg-file-info");
-    info.appendChild(el("span", "msg-file-name", f.name || "文件"));
-    const bits = [attachKindCn(f.kind)];
-    if (f.size_cn) bits.push(f.size_cn);
-    // 图片的 text 是元信息行（"图片：W×H"），不是抽取正文——不能显示成"已读出 N 字"
-    if (f.kind !== "image" && f.has_text && f.chars) bits.push(`已读出 ${f.chars} 字`);
-    else if (f.note) bits.push(f.note);
-    info.appendChild(el("span", "msg-file-sub", bits.join(" · ")));
-    card.appendChild(info);
     row.appendChild(card);
   });
   return row;
