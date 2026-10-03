@@ -43,3 +43,6 @@ data/users.json
 data/tokens.json
 data/profiles.json
 data/settings.json
+
+# ---------- 演示视频（按要求单独提交，不入库） ----------
+*.mp4

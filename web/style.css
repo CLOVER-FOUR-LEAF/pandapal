@@ -1387,6 +1387,37 @@ button:disabled, .btn:disabled, .icon-btn:disabled, .chip:disabled {
 #chips .chip:hover { transform: translateY(-1px); border-color: var(--bamboo); }
 #chips .chip-due { color: var(--amber-deep); border-color: rgba(245, 158, 11, .4); background: var(--amber-light); }
 #chips .chip-next { color: var(--bamboo); border-color: var(--bam-a4); background: var(--bamboo-light); }
+/* 暂停后并列的两个出口：接着续写 / 不再续写（后者是"停止"，用灰调不抢眼） */
+#chips .chip-stop { color: var(--ink-dim); border-color: var(--line-strong); background: var(--card-2); }
+
+/* 消息队列条：回答进行中排下的消息，轮次结束自动依次发出，点 × 撤下一条。
+   和 chips 同宽同边距，视觉上接在快捷话题下面，是"还没发出去的话"。 */
+.msg-queue {
+  display: flex; align-items: center; gap: 7px; flex-wrap: nowrap;
+  overflow-x: auto; overflow-y: hidden;
+  padding: 8px 14px 10px;
+  border-top: 1px solid var(--line);
+  background: var(--card);
+  scrollbar-width: none;
+}
+.msg-queue::-webkit-scrollbar { display: none; }
+.msg-queue .mq-label {
+  flex: none; display: inline-flex; align-items: center; gap: 5px;
+  font-size: 12px; font-weight: 550; color: var(--ink-dim);
+}
+.msg-queue .mq-label .ic { width: 13px; height: 13px; }
+.msg-queue .mq-item {
+  flex: none; display: inline-flex; align-items: center; gap: 6px;
+  max-width: 260px; padding: 6px 10px;
+  font: inherit; font-size: 13px;
+  color: var(--ink-2); background: var(--card-2);
+  border: 1px dashed var(--line-strong); border-radius: 999px;
+  cursor: pointer;
+  transition: color var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease);
+}
+.msg-queue .mq-item:hover { color: var(--ink); border-color: var(--bamboo); }
+.msg-queue .mq-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.msg-queue .mq-item .ic { width: 12px; height: 12px; flex: none; opacity: .7; }
 
 .inputbar {
   /* 右栏只有 ~400px：四个工具键 + 发送键会把输入框挤到只剩几个字宽，收紧间距与键径 */
