@@ -48,7 +48,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, Field
 
 from . import (actions, affairs, auth, config, executor, files, graph, llm, memory, planner,
-               prompts, router, sessions, store, suggest, synth, tools, tts, voice)
+               prompts, router, sessions, store, stt, suggest, synth, tools, tts, voice)
 
 
 @asynccontextmanager
@@ -1292,10 +1292,15 @@ async def _chat_stream(sess, raw_message: str, ctx: dict, resume: ResumeReq | No
         raw_message = SECRET_PREFIX + message if is_secret else message
 
     async def work():
-        nonlocal reply_text
+        nonlocal reply_text, message
         # 附件先回执：前端不必等 mode 就能把文件卡画出来（大图上传后尤其明显）
         if attachments:
             await emit({"type": "files", "files": [_file_public(sess, a) for a in attachments]})
+        # 上轮管家问了"先问清楚"的问题：孩子的这句回复不是新需求，
+        # 是补全——并回原请求再走完整管线（悄悄话轮不合并，pending 留给下一轮）
+        if sess.pending_clarify and not is_secret and not resume:
+            pend, sess.pending_clarify = sess.pending_clarify, None
+            message = f"{pend['orig']}（孩子补充说明：{message}）"
         if resume:
             # 续写不分类、不建事务：带着原问题和半截回答直接接着往下说
             last_turn["intent"] = "chat"
@@ -1385,6 +1390,25 @@ async def _chat_stream(sess, raw_message: str, ctx: dict, resume: ResumeReq | No
                 plan = await plan_task
             except planner.PlanError:
                 plan = None
+            if plan and plan.get("clarify"):
+                # 管家判断"缺了做不对的关键信息"（如没说要写什么主题）：先问不硬做。
+                # 原请求挂进 pending_clarify，孩子下一条回复会并回来重走完整管线。
+                q = str(plan["clarify"])
+                if not is_secret:
+                    sess.pending_clarify = {"orig": message}
+                if affair:
+                    try:
+                        await asyncio.to_thread(
+                            a_store.update, affair["id"],
+                            {"summary": "等孩子补充说明"},
+                            actor="butler", note="先问清楚再动手")
+                    except Exception:  # noqa: BLE001 事务摘要更新不上不影响提问本身
+                        pass
+                reply_text = q
+                await emit({"type": "token", "text": q})
+                return
+            # 写作类请求：卡片展示"管家查到的素材和提纲"，成品是随后交付的文稿文件
+            write_rule = prompts.WRITE_CARD_RULE if _DRAFT_ASK.search(message) else ""
             if plan:
                 ptitle = (plan.get("title") or "").strip()[:18]
                 if created and affair and ptitle and ptitle not in _GENERIC_TITLES:
@@ -1418,17 +1442,20 @@ async def _chat_stream(sess, raw_message: str, ctx: dict, resume: ResumeReq | No
                     # 直接走单次直出（它不依赖节点结果）
                     card = await _card_with_fallback(
                         sess.store, message, use_synth=False, title=plan["title"],
-                        attach_ctx=_attach_digest(_file_store(sess), attachments))
+                        attach_ctx=_attach_digest(_file_store(sess), attachments),
+                        extra_rule=write_rule)
                 else:
                     card = await _card_with_fallback(
                         sess.store, message, results=results, title=plan["title"],
                         pairs=[(n["title"], results.get(n["id"], "")) for n in ok_nodes],
-                        attach_ctx=_attach_digest(_file_store(sess), attachments))
+                        attach_ctx=_attach_digest(_file_store(sess), attachments),
+                        extra_rule=write_rule)
             else:
                 await emit({"type": "phase", "phase": "synthesizing"})
                 card = await _card_with_fallback(
                     sess.store, message, use_synth=False,
-                    attach_ctx=_attach_digest(_file_store(sess), attachments))
+                    attach_ctx=_attach_digest(_file_store(sess), attachments),
+                    extra_rule=write_rule)
             reply_text = synth.card_to_text(card)
 
             # ③ 实际去执行：加提醒 / 生成清单 / 请家长确认。
@@ -1578,9 +1605,14 @@ async def _chat_settle(sess, ctx: dict):
     finally:
         # 记忆链路的结束标记；异常照旧往上抛给 guarded 的 _settle 兜底
         await out.put(None)
-    for _ in range(2):
+    # 数的是两个结束标记，不是两个元素——队列里还混着 memory/suggest/affair
+    # 事件占位；按"取两个"数的话语音事件（TTS 要几秒才到）几乎必然被丢，
+    # 表现为"试音有声、回复没声"。
+    pending = 2
+    while pending:
         chunk = await out.get()
         if chunk is None:
+            pending -= 1
             continue
         yield chunk
 
@@ -1715,7 +1747,7 @@ _DIRECT_BUDGET = 25.0  # 直出：实测 ~5s
 
 async def _card_with_fallback(store, message: str, *, results: dict | None = None,
                               title: str = "", pairs=(), use_synth: bool = True,
-                              attach_ctx: str = "") -> dict:
+                              attach_ctx: str = "", extra_rule: str = "") -> dict:
     """出卡片的三档降级：汇总 → 单次直出 → 纯本地摊结果。
 
     为什么要有第三档：synth 实测平均 35s、最慢 52.6s，已经贴着单次调用超时
@@ -1731,7 +1763,8 @@ async def _card_with_fallback(store, message: str, *, results: dict | None = Non
     if use_synth:
         try:
             return await asyncio.wait_for(
-                synth.synthesize(store, message, results or {}, attach_ctx), _SYNTH_BUDGET)
+                synth.synthesize(store, message, results or {}, attach_ctx,
+                                 extra_rule), _SYNTH_BUDGET)
         except Exception as e:  # noqa: BLE001 含 TimeoutError；CancelledError 不在此列，照常上抛
             print(f"[card] 汇总失败，降级：{e!r}")
         if results:
@@ -1739,7 +1772,8 @@ async def _card_with_fallback(store, message: str, *, results: dict | None = Non
             # 刚查到的车次/时间对不上的内容。直接摊真结果，降级不降真。
             return synth.assemble_from_results(title, list(pairs))
     try:
-        return await asyncio.wait_for(synth.direct_card(store, message, attach_ctx), _DIRECT_BUDGET)
+        return await asyncio.wait_for(
+            synth.direct_card(store, message, attach_ctx, extra_rule), _DIRECT_BUDGET)
     except Exception as e:  # noqa: BLE001
         print(f"[card] 直出也失败，用本地兜底：{e!r}")
     return synth.assemble_from_results(title, list(pairs))
@@ -1978,6 +2012,30 @@ async def api_voice_audio(request: Request, vid: str, name: str = ""):
         raise HTTPException(404, "这段语音已经不在了")
     return FileResponse(path, media_type=tts.mime_for(vid),
                         headers={"Cache-Control": "private, max-age=300"})
+
+
+@app.post("/api/stt")
+async def api_stt(request: Request, name: str = "", file: UploadFile = None):
+    """语音识别：浏览器 SpeechRecognition 不可用时的服务端兜底（MiMo ASR）。
+
+    Chrome 的识别走 Google 服务器（国内报 network）、Firefox 没有这个 API——
+    前端此时把录音转成 wav 传这里，任何支持 getUserMedia 的浏览器都能用。
+    """
+    await _auth_session(request, "chat", name)
+    if not stt.available():
+        raise HTTPException(503, "服务端没配语音 Key（TTS_API_KEY），识别不可用")
+    if file is None or not file.filename:
+        raise HTTPException(400, "没有收到音频")
+    data = await _read_upload_limited(file, stt.MAX_BYTES)
+    if data is None:
+        raise HTTPException(413, "录音太长了，一句话说完再试")
+    if not data:
+        raise HTTPException(400, "录音是空的")
+    try:
+        text = await stt.transcribe(data, file.content_type or "audio/wav")
+    except stt.STTError as e:
+        raise HTTPException(503, f"语音识别暂时不可用：{e}")
+    return {"text": text}
 
 
 # ---------------------------------------------------------------- 附件（多模态上传）

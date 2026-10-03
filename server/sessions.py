@@ -111,6 +111,9 @@ class Session:
         self.history: deque[dict] = deque(maxlen=config.HISTORY_TAIL * 2)
         self.lock = asyncio.Lock()
         self.last_active = time.monotonic()
+        # 待澄清的原请求：上一轮管家问了"写什么主题呀"这类问题还没动工，
+        # 孩子下一条回复要并回原请求再规划（见 main.work 的 pending 合并）
+        self.pending_clarify: dict | None = None
 
 
 def _read_history(path: Path) -> list[dict]:

@@ -60,6 +60,8 @@ cp .env.example .env   # 然后填入你的 LLM_API_KEY 等
 | 按依赖并行执行 + SSE 实时状态 | `server/executor.py` |
 | 结构化卡片合成 | `server/synth.py` |
 | 代办文书（"帮我写份自我介绍/发言稿"→LLM 真写全文→文稿卡+落盘 `drafts.json` 挂回事务） | `server/actions.py` `draft` |
+| 先问清楚再动手：需求缺关键信息（如"帮我写论文"没说写什么）→ planner 输出 `{"clarify": …}` 反问而非拿记忆硬猜；原请求挂 `Session.pending_clarify`，孩子下一句回复并回原请求重走完整管线 | `server/planner.py` `clarify` + `server/main.py` pending 合并 |
+| 长文稿管线（论文/报告/作文）：卡片只展示"查到的素材+提纲"，正文走 `paper_outline` 定结构 → 各节并行生成 → 拼 markdown（单节失败如实标缺） | `server/actions.py` `_write_paper` + `prompts.py` `PAPER_*` |
 | 交付物落盘：draft 文稿同时落成 `files/` 里的 .docx 真文件（python-docx 排版，失败退 .md），卡片一键下载、文件面板标「管家产出」徽章 | `server/actions.py` `_draft_to_file` + `GET /api/files/{id}/content?download=1` |
 | 文件式记忆读写：轮后 LLM 抽取→topics/daily/MEMORY；单写锁+原子写 | `server/memory.py` |
 | 工具脚手架（声明式注册表，@tool 注册即接入 planner/executor/闲聊通道）：看时间 `now` / 本地赛事库 `race_lookup` / 交通参考 `transport_lookup` / wttr.in 天气 `weather` / 联网搜索 `web_search`（Tavily 兼容端点，未配置则必应网页解析兜底）/ 打开网页 `web_browse` | `server/tools.py` |

@@ -21,7 +21,7 @@ import uuid
 from datetime import date
 from pathlib import Path
 
-from . import files, llm, prompts
+from . import files, llm, prompts, tools
 from .affairs import AffairStore, ics_text
 from .memory import MemoryStore
 from .store import lock_for, read_json, slug, write_json
@@ -224,21 +224,26 @@ async def _do_draft(child_dir: Path, affair: dict, action: dict) -> dict:
     context = str(action.get("context") or "").strip() or "（无前置素材，靠记忆与常识写）"
     mem_store = MemoryStore(child_dir)
     mem = await asyncio.to_thread(mem_store.active_block)
-    data = await llm.complete_json(
-        [
-            {"role": "system", "content": "你是文书起草模块，只输出 JSON。"},
-            {"role": "user", "content": prompts.DRAFT.format(
-                name=mem_store.child_name,
-                request=request or "写一份文稿",
-                context=context,
-                memory_block=mem or "（暂无记忆）",
-            )},
-        ],
-        max_tokens=1600,
-        caller="draft",
-    )
-    title = str(data.get("title") or action.get("title") or "文稿").strip()[:40]
-    body = str(data.get("body") or data.get("text") or "").strip()
+    if _LONG_FORM.search(request):
+        # 论文/报告这类长文稿一次调用写不好：提纲 → 各节并行写 → 拼成 markdown。
+        # 产物是"能交差的成稿"，不是"怎么写"的建议——这是 draft 的完整形态。
+        title, body = await _write_paper(mem_store, request, context, mem)
+    else:
+        data = await llm.complete_json(
+            [
+                {"role": "system", "content": "你是文书起草模块，只输出 JSON。"},
+                {"role": "user", "content": prompts.DRAFT.format(
+                    name=mem_store.child_name,
+                    request=request or "写一份文稿",
+                    context=context,
+                    memory_block=mem or "（暂无记忆）",
+                )},
+            ],
+            max_tokens=1600,
+            caller="draft",
+        )
+        title = str(data.get("title") or action.get("title") or "文稿").strip()[:40]
+        body = str(data.get("body") or data.get("text") or "").strip()
     if not body:
         raise ValueError("文稿正文为空")
     try:
@@ -254,6 +259,70 @@ async def _do_draft(child_dir: Path, affair: dict, action: dict) -> dict:
          "affair_id": affair.get("id"), "created": draft.get("created"),
          **({"file_id": file_item["id"], "file_name": file_item.get("name"),
              "file_ext": file_item.get("ext")} if file_item else {})})
+
+
+# 长文稿锚点：命中这些词的需求，单发调用写出来只会是"写作建议"——必须分段生成
+_LONG_FORM = re.compile(r"论文|报告|作文|文章|总结|综述|文档|材料|小论文|研究")
+
+# 长文稿的分节上限：再多节并写下去，孩子等不起、token 也烧得没边
+_PAPER_MAX_SECTIONS = 6
+
+
+async def _write_paper(mem_store: MemoryStore, request: str, context: str,
+                       mem: str) -> tuple[str, str]:
+    """长文稿两段式生成：提纲定结构 → 各节并行写真内容 → 拼成 markdown 正文。
+
+    一节写挂了不整篇作废——那节如实标"没写出来"，比交一篇缺块还装齐的诚实。
+    """
+    outline = await llm.complete_json(
+        [
+            {"role": "system", "content": "你是文书提纲模块，只输出 JSON。"},
+            {"role": "user", "content": prompts.PAPER_OUTLINE.format(
+                name=mem_store.child_name,
+                request=request,
+                context=context or "（无前置素材）",
+                memory_block=mem or "（暂无记忆）",
+                now=tools.now_text(),
+            )},
+        ],
+        max_tokens=900,
+        caller="paper_outline",
+    )
+    title = str(outline.get("title") or "文稿").strip()[:40]
+    sections = [s for s in (outline.get("sections") or [])
+                if isinstance(s, dict) and str(s.get("heading") or "").strip()]
+    if not sections:
+        raise ValueError("提纲为空")
+    sections = sections[:_PAPER_MAX_SECTIONS]
+
+    async def _sec(sec: dict) -> str:
+        return await llm.complete(
+            [
+                {"role": "system", "content": "你是文书写作模块，只写这一节的正文。"},
+                {"role": "user", "content": prompts.PAPER_SECTION.format(
+                    name=mem_store.child_name,
+                    title=title,
+                    heading=str(sec["heading"])[:30],
+                    request=request,
+                    points="；".join(str(p) for p in (sec.get("points") or [])[:4]) or "（无要点）",
+                    context=context or "（无前置素材）",
+                    memory_block=mem or "（暂无记忆）",
+                    now=tools.now_text(),
+                )},
+            ],
+            max_tokens=1200,
+            caller="paper",
+        )
+
+    parts = await asyncio.gather(*(_sec(s) for s in sections), return_exceptions=True)
+    chunks = [f"# {title}"]
+    for sec, part in zip(sections, parts):
+        chunks.append(f"\n\n## {str(sec['heading']).strip()[:30]}\n")
+        if isinstance(part, str) and part.strip():
+            chunks.append(part.strip())
+        else:
+            chunks.append("（这一节没写出来，留着自己补。）")
+    return title or "文稿", "".join(chunks).strip()
 
 
 # markdown 行内标记：进 Word 的是给孩子打印/上交的东西，** 和 ` 不能留在字面上

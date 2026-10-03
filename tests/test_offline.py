@@ -75,6 +75,11 @@ async def fake_complete_json(messages, *, max_tokens=1200, caller="unknown"):
             return {"intent": "new_affair", "mood": "happy", "affair_id": None, "reason": "离线"}
         return {"intent": "chat", "mood": "normal", "affair_id": None, "reason": "离线"}
     if caller == "planner":
+        # 只看"孩子的话："之后的真实消息（prompt 模板本身带着这些字样）：
+        # 写作类缺主题 → 先问不硬做；已带补充说明的原请求则正常出计划
+        said = content.rsplit("孩子的话：", 1)[-1]
+        if "论文" in said and "补充说明" not in said:
+            return {"clarify": "想写哪个主题呀？比如机器人课的小车，还是别的？"}
         return {"title": "离线筹备计划", "nodes": [
             {"id": "n1", "title": "想想第一步", "tool": "llm",
              "args": {"task": "列出第一步"}, "depends_on": []},
@@ -88,6 +93,12 @@ async def fake_complete_json(messages, *, max_tokens=1200, caller="unknown"):
         ]}
     if caller == "draft":
         return {"title": "离线自我介绍", "body": "大家好，我是小豆，每周六上午都上机器人课。"}
+    if caller == "paper_outline":
+        return {"title": "我的巡线小车调试记", "sections": [
+            {"heading": "研究背景", "points": ["为什么想记录"]},
+            {"heading": "调试过程", "points": ["改参数", "记结果"]},
+            {"heading": "结论与感想", "points": ["更稳了"]},
+        ]}
     if caller == "extract_graph":
         # 模板本身含 [[secret]] 字样，必须只看"孩子："那一行里的用户原话
         secret = "[[secret]]" in content.rsplit("孩子：", 1)[-1]
@@ -306,6 +317,35 @@ async def _run(client: httpx.AsyncClient) -> None:
         for n in ("drafts_list", "draft_detail", "draft_linked", "draft_persisted",
                   "draft_file", "draft_file_listed", "draft_file_download", "draft_file_linked"):
             record(n, False, "无 draft action")
+
+    # 4c. 写作澄清 → 补全 → 长文稿交付：
+    #   "帮我写论文"没说写啥 → 管家先问（token 问题、无卡片），不拿记忆硬猜；
+    #   孩子补一句主题 → 回复并回原请求重走管线 → 分段成稿 → 落成 .docx 可下载
+    cevs = await post_sse(client, "/api/chat",
+                          {"name": NAME, "message": "帮我写一篇比赛小论文"})
+    ctypes = _types(cevs)
+    ctext = "".join(e.get("text", "") for e in cevs if e.get("type") == "token")
+    record("clarify_ask",
+           "card" not in ctypes and "主题" in ctext,
+           f"types={ctypes} q={ctext[:40]}")
+    revs = await post_sse(client, "/api/chat",
+                          {"name": NAME, "message": "就写机器人课的巡线小车"})
+    pact = next((e for e in revs
+                 if e.get("type") == "action" and e.get("kind") == "draft"), None)
+    ppl = (pact or {}).get("payload") or {}
+    record("clarify_resume",
+           bool(pact) and pact.get("ok") is True and bool(ppl.get("body")),
+           f"ok={pact.get('ok') if pact else '无'} title={ppl.get('title')}")
+    record("paper_sections",
+           ppl.get("body", "").count("\n## ") >= 2,
+           f"sections={ppl.get('body', '').count('## ')}")
+    if ppl.get("file_id"):
+        dl = await client.get(f"/api/files/{ppl['file_id']}/content{q}&download=1")
+        record("paper_file_download",
+               dl.status_code == 200 and len(dl.content) > 500,
+               f"status={dl.status_code} bytes={len(dl.content)}")
+    else:
+        record("paper_file_download", False, "长文稿未产出文件")
 
     # 5. 悄悄话：private 节点只在 child 视角可见（含 view=非parent 不泄露的白名单校验）
     sevs = await post_sse(client, "/api/chat",
