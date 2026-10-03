@@ -285,8 +285,26 @@ async def _run(client: httpx.AsyncClient) -> None:
             if (CHILD_DIR / "drafts.json").exists() else {}
         record("draft_persisted",
                any(d.get("id") == dpl["draft_id"] for d in dfile.get("drafts", [])))
+        # 交付物文件：draft 同时把稿子落成 files/ 里的真文件，可下载、清单里标 generated
+        record("draft_file", bool(dpl.get("file_id")), f"file_id={dpl.get('file_id')}")
+        if dpl.get("file_id"):
+            fl = await get_json(client, f"/api/files{q}")
+            gen = [f for f in fl.get("files", []) if f.get("id") == dpl["file_id"]]
+            record("draft_file_listed",
+                   len(gen) == 1 and gen[0].get("origin") == "generated",
+                   f"listed={len(gen)} origin={gen[0].get('origin') if gen else '无'}")
+            dl = await client.get(f"/api/files/{dpl['file_id']}/content{q}&download=1")
+            record("draft_file_download",
+                   dl.status_code == 200 and len(dl.content) > 200,
+                   f"status={dl.status_code} bytes={len(dl.content)}")
+            rec = next((d for d in dfile.get("drafts", []) if d.get("id") == dpl["draft_id"]), {})
+            record("draft_file_linked", rec.get("file_id") == dpl["file_id"])
+        else:
+            for n in ("draft_file_listed", "draft_file_download", "draft_file_linked"):
+                record(n, False, "draft 未产出文件")
     else:
-        for n in ("drafts_list", "draft_detail", "draft_linked", "draft_persisted"):
+        for n in ("drafts_list", "draft_detail", "draft_linked", "draft_persisted",
+                  "draft_file", "draft_file_listed", "draft_file_download", "draft_file_linked"):
             record(n, False, "无 draft action")
 
     # 5. 悄悄话：private 节点只在 child 视角可见（含 view=非parent 不泄露的白名单校验）

@@ -60,6 +60,7 @@ cp .env.example .env   # 然后填入你的 LLM_API_KEY 等
 | 按依赖并行执行 + SSE 实时状态 | `server/executor.py` |
 | 结构化卡片合成 | `server/synth.py` |
 | 代办文书（"帮我写份自我介绍/发言稿"→LLM 真写全文→文稿卡+落盘 `drafts.json` 挂回事务） | `server/actions.py` `draft` |
+| 交付物落盘：draft 文稿同时落成 `files/` 里的 .docx 真文件（python-docx 排版，失败退 .md），卡片一键下载、文件面板标「管家产出」徽章 | `server/actions.py` `_draft_to_file` + `GET /api/files/{id}/content?download=1` |
 | 文件式记忆读写：轮后 LLM 抽取→topics/daily/MEMORY；单写锁+原子写 | `server/memory.py` |
 | 工具脚手架（声明式注册表，@tool 注册即接入 planner/executor/闲聊通道）：看时间 `now` / 本地赛事库 `race_lookup` / 交通参考 `transport_lookup` / wttr.in 天气 `weather` / 联网搜索 `web_search`（Tavily 兼容端点，未配置则必应网页解析兜底）/ 打开网页 `web_browse` | `server/tools.py` |
 | 闲聊直答的工具轮：启发式命中 → 调度器挑工具 → 结果注入 system → 流式回复（`tool` SSE 事件驱动前端工具条） | `server/main.py` `_tool_round` + `server/prompts.py` `TOOL_PICK` |

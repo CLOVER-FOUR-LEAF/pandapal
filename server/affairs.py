@@ -542,8 +542,10 @@ class AffairStore:
         raise KeyError(did)
 
     @_locked
-    def add_draft(self, title: str, body: str, affair_id: str | None = None) -> dict:
-        """存一份文稿：同一事务下同标题视为同一份（重写更新正文，幂等）。"""
+    def add_draft(self, title: str, body: str, affair_id: str | None = None,
+                  file_id: str | None = None) -> dict:
+        """存一份文稿：同一事务下同标题视为同一份（重写更新正文，幂等）。
+        file_id 是这份稿子在 files/ 仓里对应的可下载文件（可为空）。"""
         root = self._load_drafts()
         title = str(title or "未命名文稿").strip()
         body = str(body or "")
@@ -551,6 +553,7 @@ class AffairStore:
             if (isinstance(d, dict) and str(d.get("affair_id") or "") == str(affair_id or "")
                     and str(d.get("title")) == title):
                 d["body"] = body
+                d["file_id"] = file_id or None
                 d["created"] = now_iso()
                 write_json(self.drafts_path, root)
                 return d
@@ -560,6 +563,7 @@ class AffairStore:
             "title": title,
             "body": body,
             "affair_id": str(affair_id) if affair_id else None,
+            "file_id": file_id or None,
             "created": now_iso(),
         }
         root["drafts"].append(draft)

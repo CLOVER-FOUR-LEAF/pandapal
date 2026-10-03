@@ -571,6 +571,8 @@ class FileStore:
             "size": int(item.get("size") or 0),
             "size_cn": human_size(int(item.get("size") or 0)),
             "created": item.get("created") or "",
+            # upload=用户上传 / generated=管家产出（旧索引没有这字段，按 upload 看）
+            "origin": item.get("origin") or "upload",
             # 让前端知道"这份文件读出了什么"，而不是只显示一个文件名
             "has_text": bool(str(item.get("text") or "").strip()),
             "chars": int(item.get("text_chars") or len(str(item.get("text") or ""))),
@@ -586,10 +588,13 @@ class FileStore:
 
     # ---------- 写 ----------
 
-    def save(self, data: bytes, filename: str, mime: str = "", kind: str = "") -> dict:
+    def save(self, data: bytes, filename: str, mime: str = "", kind: str = "",
+             origin: str = "upload") -> dict:
         """落盘一份附件并登记索引。返回落盘后的元数据（含抽取正文）。
 
         顺序很关键：先写文件、再写索引。反过来会出现"索引里有、文件不在"的坏状态。
+        origin="generated" 给管家自己产出的交付物（文稿文件等）：走同一套
+        配额/索引/下载链路，前端据此打个"管家产出"徽章，和上传件区分开。
         """
         kind = kind or kind_of(filename, mime)
         name = safe_name(filename)
@@ -613,6 +618,7 @@ class FileStore:
             "created": _now_iso(),
             "text": text,
             "text_chars": text_chars,
+            "origin": "generated" if origin == "generated" else "upload",
         }
         for key in ("width", "height", "pages", "sheets", "slides", "vision_ok"):
             if meta.get(key) is not None:

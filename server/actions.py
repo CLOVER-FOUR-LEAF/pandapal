@@ -15,12 +15,13 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import re
 import uuid
 from datetime import date
 from pathlib import Path
 
-from . import llm, prompts
+from . import files, llm, prompts
 from .affairs import AffairStore, ics_text
 from .memory import MemoryStore
 from .store import lock_for, read_json, slug, write_json
@@ -210,10 +211,14 @@ def _do_ics(affair: dict) -> dict:
 
 
 async def _do_draft(child_dir: Path, affair: dict, action: dict) -> dict:
-    """代办文书：LLM 真写一份文稿 → 落盘 drafts.json → payload 带回全文。
+    """代办文书：LLM 真写一份文稿 → 落盘 drafts.json → 再落一份可下载文件。
 
     action 字段：request=孩子原话（必填素材）、context=刚查到的方案/卡片文本、
     title=可选指定题目。文稿全文进 payload，前端直接出文稿卡（"给我一个结果"）。
+
+    交付物双落盘是"说一件事、给我一个能拿走的结果"：drafts.json 管对话里的
+    卡片回读，files/ 里的文件管下载打印（复制粘贴丢格式，孩子交作业要 Word）。
+    文件写挂了不连累文稿本身——卡照样出，只是没有下载按钮（诚实降级）。
     """
     request = str(action.get("request") or action.get("text") or affair.get("title") or "").strip()
     context = str(action.get("context") or "").strip() or "（无前置素材，靠记忆与常识写）"
@@ -236,9 +241,71 @@ async def _do_draft(child_dir: Path, affair: dict, action: dict) -> dict:
     body = str(data.get("body") or data.get("text") or "").strip()
     if not body:
         raise ValueError("文稿正文为空")
+    try:
+        file_item = await asyncio.to_thread(_draft_to_file, child_dir, title, body)
+    except Exception:  # noqa: BLE001 交付文件是加分项，不是文稿成立的前提
+        file_item = None
     draft = await asyncio.to_thread(
-        AffairStore(child_dir).add_draft, title, body, affair.get("id"))
+        AffairStore(child_dir).add_draft, title, body, affair.get("id"),
+        file_item.get("id") if file_item else None)
     return _result(
         "draft", True, f"文稿写好了：《{title}》，点开看看",
         {"draft_id": draft["id"], "title": title, "body": body,
-         "affair_id": affair.get("id"), "created": draft.get("created")})
+         "affair_id": affair.get("id"), "created": draft.get("created"),
+         **({"file_id": file_item["id"], "file_name": file_item.get("name"),
+             "file_ext": file_item.get("ext")} if file_item else {})})
+
+
+# markdown 行内标记：进 Word 的是给孩子打印/上交的东西，** 和 ` 不能留在字面上
+_MD_INLINE = re.compile(r"[*`_]+")
+
+
+def _md_clean(text: str) -> str:
+    return _MD_INLINE.sub("", str(text or "")).strip()
+
+
+def _draft_docx(title: str, body: str) -> bytes:
+    """文稿正文 → .docx 字节：LLM 写的是 markdown 风文本，
+    标题/列表/引用映射成 Word 样式，其余按普通段落走（如实排版，不重写内容）。
+    """
+    import docx  # python-docx：读附件依赖它，写文稿顺带可写（零新增依赖）
+
+    doc = docx.Document()
+    doc.add_heading(_md_clean(title) or "文稿", level=0)
+    for raw in body.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        m = re.match(r"^(#{1,6})\s+(.*)", line)
+        if m:
+            doc.add_heading(_md_clean(m.group(2)) or " ", level=min(len(m.group(1)), 4))
+            continue
+        m = re.match(r"^[-*·•]\s+(.*)", line)
+        if m:
+            doc.add_paragraph(_md_clean(m.group(1)), style="List Bullet")
+            continue
+        m = re.match(r"^\d+[.、)]\s*(.*)", line)
+        if m:
+            doc.add_paragraph(_md_clean(m.group(1)), style="List Number")
+            continue
+        m = re.match(r"^>\s*(.*)", line)
+        if m:
+            doc.add_paragraph(_md_clean(m.group(1)), style="Intense Quote")
+            continue
+        doc.add_paragraph(_md_clean(line))
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
+def _draft_to_file(child_dir: Path, title: str, body: str) -> dict:
+    """文稿落成 files/ 里一份可下载文件：.docx 优先（打印/交作业的场景），
+    python-docx 出岔子退 .md——下载入口始终有，格式降级如实反映在扩展名上。"""
+    store = files.FileStore(child_dir)
+    try:
+        return store.save(_draft_docx(title, body), f"{title}.docx",
+                          "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                          origin="generated")
+    except Exception:
+        return store.save(body.encode("utf-8"), f"{title}.md",
+                          "text/markdown", origin="generated")

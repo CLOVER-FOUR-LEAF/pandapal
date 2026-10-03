@@ -1588,6 +1588,13 @@ function draftsBlock(aff) {
       }
     };
     det.appendChild(copyBtn);
+    if (d.file_id) {
+      const dlBtn = el("button", "btn-approve doc-copy");
+      dlBtn.type = "button";
+      append(dlBtn, icon("i-doc"), document.createTextNode("下载文件"));
+      dlBtn.onclick = () => downloadAttach({ id: d.file_id, name: `${d.title || "文稿"}.docx` });
+      det.appendChild(dlBtn);
+    }
     wrap.appendChild(det);
   });
   return wrap;
@@ -1891,6 +1898,8 @@ function recentFilesPanel() {
     row.appendChild(icon(attachIcon(f)));
     row.appendChild(el("span", "attach-name", f.name || "文件"));
     const bits = [attachKindCn(f.kind)];
+    // 管家产出的交付物（写好的文稿等）和我上传的东西不是一回事，徽章分开
+    if (f.origin === "generated") bits.push("管家产出");
     if (f.size_cn) bits.push(f.size_cn);
     if (f.has_text && f.chars) bits.push(`${f.chars} 字`);
     row.appendChild(el("span", "attach-meta", bits.join(" · ")));
@@ -2301,7 +2310,7 @@ function addActionRow(ev) {
   scrollBottom();
 }
 
-/** 代办文书卡：draft 动作的产出物，正文整段可读完、可复制。 */
+/** 代办文书卡：draft 动作的产出物，正文整段可读完、可复制、可下载成文件。 */
 function addDocCard(d) {
   const box = chatBox();
   if (!box || !d) return;
@@ -2327,6 +2336,14 @@ function addDocCard(d) {
     }
   };
   foot.appendChild(copyBtn);
+  // 服务端已把文稿落成 files/ 里的真文件（.docx，降级为 .md）：交作业/打印拿走即用
+  if (d.file_id) {
+    const dlBtn = el("button", "btn-approve doc-copy");
+    dlBtn.type = "button";
+    append(dlBtn, icon("i-doc"), document.createTextNode(`下载 ${d.file_ext || "文件"}`));
+    dlBtn.onclick = () => downloadAttach({ id: d.file_id, name: d.file_name || `${d.title || "文稿"}.${d.file_ext || "docx"}` });
+    foot.appendChild(dlBtn);
+  }
   if (d.created) {
     foot.appendChild(el("span", "doc-time", String(d.created).slice(0, 16).replace("T", " ")));
   }
