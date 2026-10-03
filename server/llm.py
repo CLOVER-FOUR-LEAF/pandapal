@@ -578,7 +578,7 @@ async def complete(
                     # 全都不行才上报，让上层去掉图片重试并如实说明
                     log_call(caller, False, (time.monotonic() - at0) * 1000,
                              f"视觉被拒: {_err_text(e)}", cand=cand)
-                    vision_dead = True
+                    last_err, vision_dead = e, True
                     break
                 last_err = e
                 wait = _retry_wait(e, retries, is_last)
@@ -729,7 +729,7 @@ async def stream(
                 if _vision_rejected(e, messages):
                     log_call(caller, False, (time.monotonic() - at0) * 1000,
                              f"视觉被拒: {_err_text(e)}", cand=cand)
-                    vision_dead = True
+                    last_err, vision_dead = e, True
                     break
                 last_err = e
                 wait = _retry_wait(e, retries, is_last)
