@@ -153,6 +153,24 @@ def test_wiring() -> None:
     record("merge_split_btn", 'data-act="split"' in js and "unmergePlanets" in js)
 
 
+def test_fonts() -> None:
+    """Anthropic 风格字体：自托管 @font-face + 双栈（UI 无衬线 / 管家的话衬线）。"""
+    css = read("style.css")
+    record("font_faces_declared", css.count("@font-face") == 4
+           and '"DM Sans"' in css and '"Source Serif 4"' in css)
+    files = sorted(p.name for p in (WEB / "fonts").glob("*.woff2"))
+    record("font_files_present", files == [
+        "dm-sans-latin-ext.woff2", "dm-sans-latin.woff2",
+        "source-serif-4-latin-ext.woff2", "source-serif-4-latin.woff2"], str(files))
+    record("font_files_nonempty", all((WEB / "fonts" / f).stat().st_size > 10000 for f in files))
+    record("font_stack_dm_sans", '--font: "DM Sans",' in css.replace("\n", " ").replace("  ", " "))
+    record("serif_stack_cjk_fallback", "--font-serif:" in css
+           and '"Songti SC"' in css and '"SimSun"' in css)
+    for sel in (".msg.ai .md", ".login-title", ".weekly-headline", ".dream-body"):
+        hit = re.search(re.escape(sel) + r"\s*\{[^}]*font-family:\s*var\(--font-serif\)", css, re.S)
+        record(f"serif_on_{sel.strip('.')}", bool(hit))
+
+
 def test_parent_streaming() -> None:
     """家长端全面流式：转达/通知/周报/梦想四路都走 ?stream=1，且有在途序号保护。"""
     js, css = read("app.js"), read("style.css")
@@ -185,6 +203,7 @@ def main() -> int:
         test_braces_balanced()
         test_es_modules_parse()
         test_wiring()
+        test_fonts()
         test_parent_streaming()
         test_pause_state_hygiene()
     except Exception as e:  # noqa: BLE001

@@ -5,7 +5,7 @@
       "id": "xikesong",
       "title": "西安西客松参赛",
       "kind": "travel",
-      "stage": "executing",
+      "stage": "followup",
       "due": "2026-10-18",
       "owner_next": "parent",
       "summary": "车票方案已发妈妈确认，参赛清单 9 项备好，背包里要放上还在吃的感冒药",
@@ -484,6 +484,11 @@
           "ts": "2026-10-03T12:00:25",
           "actor": "butler",
           "text": "执行了 checklist"
+        },
+        {
+          "ts": "2026-10-03T13:01:43",
+          "actor": "parent",
+          "text": "家长已确认"
         }
       ],
       "created": "2026-09-28",
