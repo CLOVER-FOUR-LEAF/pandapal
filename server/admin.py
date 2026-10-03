@@ -70,7 +70,8 @@ def _collect_overview() -> dict:
         "children": {"total": len(children), "affairs": affairs_n, "graph_nodes": nodes_n},
         "llm": {
             "configured": bool(config.LLM_API_KEY),
-            "backup": bool(config.LLM_API_KEY2),
+            "backup": bool(config.LLM_API_KEY2 or config.LLM_API_KEY3),
+            "fallback": bool(config.LLM_API_KEY3),
             "protocol": config.LLM_PROTOCOL, "model": config.LLM_MODEL,
         },
         "search": {"configured": bool(config.SEARCH_API_KEY and config.SEARCH_BASE_URL)},
@@ -147,7 +148,9 @@ def _settings_payload() -> dict:
 # 后台「API 配置」页的分组（键必须在 config.SETTINGS_KEYS 里）
 _SETTINGS_GROUPS = [
     ("llm", "大模型 LLM", ["LLM_PROTOCOL", "LLM_BASE_URL", "LLM_API_KEY",
-                          "LLM_API_KEY2", "LLM_MODEL", "LLM_REASONING_EFFORT", "LLM_VISION"]),
+                          "LLM_API_KEY2", "LLM_API_KEY3", "LLM_BASE_URL2",
+                          "LLM_MODEL2", "LLM_PROTOCOL2", "LLM_MODEL",
+                          "LLM_REASONING_EFFORT", "LLM_VISION"]),
     ("search", "联网搜索", ["SEARCH_API_KEY", "SEARCH_BASE_URL"]),
     ("tts", "语音合成 TTS（管家朗读）",
      ["TTS_API_KEY", "TTS_BASE_URL", "TTS_MODEL", "TTS_MODEL_DESIGN", "TTS_VOICE",
@@ -159,6 +162,7 @@ _SETTINGS_GROUPS = [
 # 枚举型配置给下拉框，免得手敲出 "Design" "true" 这类服务端不认的值
 _CHOICES = {
     "LLM_PROTOCOL": [["openai", "OpenAI 兼容"], ["anthropic", "Anthropic"]],
+    "LLM_PROTOCOL2": [["", "同主端点"], ["openai", "OpenAI 兼容"], ["anthropic", "Anthropic"]],
     "LLM_REASONING_EFFORT": [["", "不传（非推理模型）"], ["low", "low"], ["high", "high"], ["max", "max"]],
     "LLM_VISION": [["auto", "auto（先试，失败降级）"], ["on", "on（强制看图）"], ["off", "off（不带图）"]],
     "TTS_ENABLED": [["1", "开启"], ["0", "关闭"]],
@@ -166,12 +170,16 @@ _CHOICES = {
     "TTS_FORMAT": [["mp3", "mp3"], ["wav", "wav"]],
 }
 _HELP = {
+    "LLM_API_KEY2": "同端点的第二把 Key：主 Key 被限流/吊销时顶上",
+    "LLM_API_KEY3": "填上才启用异构兜底端点：主端点整体挂掉时切换，可配另一家服务商",
     "TTS_API_KEY": "填了 Key 才会出声；孩子端右上角的喇叭随之出现",
     "TTS_VOICE": "builtin 模式的内置音色：冰糖 / 茉莉 / 苏打 / 白桦",
     "TTS_DEFAULT_STYLE": "design 模式下就是喂给音色设计模型的描述",
 }
 # 留空时实际会用的值：作为 placeholder 显示，管理员一眼看出"空着也能跑"
 _DEFAULT_HINT = {
+    "LLM_BASE_URL2": lambda: "留空 = 主端点地址",
+    "LLM_MODEL2": lambda: "留空 = 主端点模型",
     "TTS_BASE_URL": lambda: f"留空 = {tts.DEF_BASE_URL}",
     "TTS_MODEL": lambda: f"留空 = {tts.DEF_MODEL_BUILTIN}",
     "TTS_MODEL_DESIGN": lambda: f"留空 = {tts.DEF_MODEL_DESIGN}",

@@ -35,6 +35,15 @@ LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-chat")
 # 推理型模型（deepseek-flash/v4-pro 等）可用的推理档位：low|high|max；留空则不传参
 LLM_REASONING_EFFORT = os.getenv("LLM_REASONING_EFFORT", "")
 
+# 异构兜底端点：配上 LLM_API_KEY3 才启用。备用 Key（LLM_API_KEY2）和主 Key
+# 共享同一个服务商——防得住限流、防不住服务商整体抖动；兜底端点允许指向
+# 另一家服务商/另一个模型，主端点连不上时自动切换。URL/模型/协议留空时
+# 分别回落到主端点的值（只换 Key 也是合法兜底）。
+LLM_API_KEY3 = os.getenv("LLM_API_KEY3", "")
+LLM_BASE_URL2 = os.getenv("LLM_BASE_URL2", "").rstrip("/")
+LLM_MODEL2 = os.getenv("LLM_MODEL2", "")
+LLM_PROTOCOL2 = os.getenv("LLM_PROTOCOL2", "").strip().lower()
+
 # 视觉能力开关：auto（默认）表示"先当能看图，被 provider 拒绝后自动降级并如实告诉孩子"；
 # off 表示明确知道当前模型看不了图（如 deepseek-chat），一开始就不带图、直接说清楚，
 # 省掉一次必然失败的请求；on 表示强制按视觉模型处理。
@@ -132,6 +141,11 @@ SETTINGS_KEYS: dict[str, tuple[str, object, bool]] = {
     "LLM_BASE_URL": ("LLM_BASE_URL", lambda v: str(v).strip().rstrip("/"), False),
     "LLM_API_KEY": ("LLM_API_KEY", lambda v: str(v).strip(), True),
     "LLM_API_KEY2": ("LLM_API_KEY2", lambda v: str(v).strip(), True),
+    # 异构兜底：LLM_API_KEY3 配上才启用；URL/模型/协议留空回落主端点的值
+    "LLM_API_KEY3": ("LLM_API_KEY3", lambda v: str(v).strip(), True),
+    "LLM_BASE_URL2": ("LLM_BASE_URL2", lambda v: str(v).strip().rstrip("/"), False),
+    "LLM_MODEL2": ("LLM_MODEL2", lambda v: str(v).strip(), False),
+    "LLM_PROTOCOL2": ("LLM_PROTOCOL2", lambda v: str(v).strip().lower(), False),
     "LLM_MODEL": ("LLM_MODEL", lambda v: str(v).strip(), False),
     "LLM_REASONING_EFFORT": ("LLM_REASONING_EFFORT", lambda v: str(v).strip().lower(), False),
     # 视觉能力：auto/on/off，后台可以直接切（用非视觉模型时提前关掉，省一次注定失败的请求）

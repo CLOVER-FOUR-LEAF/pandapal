@@ -3933,13 +3933,16 @@ async function loadLogs() {
     calls.forEach((c) => {
       const row = el("div", "log-row");
       const ok = c.ok;
+      // usage 是 provider 回报的真实计数（有就优先展示）；tokens 是本地估算，兜底用
+      const usageTxt = c.usage ? `${c.usage.in}/${c.usage.out} tok`
+        : c.tokens !== undefined ? `~${escapeHtml(c.tokens)} tok` : "";
       row.innerHTML =
         `<span class="ts">${escapeHtml(String(c.ts || "").slice(5))}</span>
          <span class="caller">${escapeHtml(c.caller || "")}</span>
-         <span>${escapeHtml(c.model || "")}${c.protocol ? `<span class="ts"> ·${escapeHtml(c.protocol)}</span>` : ""}</span>
+         <span title="${escapeHtml(c.endpoint || "")}">${escapeHtml(c.model || "")}${c.protocol ? `<span class="ts"> ·${escapeHtml(c.protocol)}</span>` : ""}</span>
          <span>${c.ms !== undefined ? `${escapeHtml(c.ms)}ms` : "—"}</span>
          <span>${ok
-           ? `<span class="ok">成功</span>${c.tokens !== undefined ? ` <span class="ts">${escapeHtml(c.tokens)} tok</span>` : ""}`
+           ? `<span class="ok">成功</span>${usageTxt ? ` <span class="ts">${usageTxt}</span>` : ""}${c.truncated ? ` <span class="bad">截断</span>` : ""}`
            : `<span class="bad">失败</span> <span class="err">${escapeHtml(c.err || "")}</span>`}</span>`;
       box.appendChild(row);
     });
