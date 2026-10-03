@@ -98,12 +98,55 @@ def test_fast_triage() -> None:
         llm.complete_json = saved
 
 
+def test_classify_cache() -> None:
+    """同一句+同一份简报 → 第二次走缓存不花 LLM；简报变了算新消息；
+    LLM 失败的保底结果不缓存。"""
+    router._classify_cache.clear()
+    calls = {"n": 0}
+    saved = llm.complete_json
+
+    async def fake(messages, **kw):
+        calls["n"] += 1
+        return {"intent": "new_affair", "mood": "normal", "affair_id": None,
+                "reason": "模型"}
+
+    async def boom(messages, **kw):
+        calls["n"] += 1
+        raise RuntimeError("429")
+
+    llm.complete_json = fake
+    try:
+        m = "帮我准备一下机器人比赛要带什么"  # 带办事信号，必过 fast veto
+        d1 = asyncio.run(router.classify(m, "事务A"))
+        record("cache_first_llm", calls["n"] == 1 and d1["intent"] == "new_affair")
+        d2 = asyncio.run(router.classify(m, "事务A"))
+        record("cache_hit_skips_llm",
+               calls["n"] == 1 and d2["intent"] == "new_affair"
+               and "缓存" in d2["reason"], str(d2))
+        asyncio.run(router.classify(m, "事务B新加的"))
+        record("cache_brief_keyed", calls["n"] == 2, f"calls={calls['n']}")
+        # 失败不缓存：LLM 抛错走关键词保底，修好后同一句重新问模型
+        llm.complete_json = boom
+        m2 = "帮我准备明天的读书分享"
+        d3 = asyncio.run(router.classify(m2, ""))
+        record("cache_miss_on_error",
+               d3["intent"] == "new_affair" and d3["reason"] == "关键词保底"
+               and calls["n"] == 3, str(d3))
+        llm.complete_json = fake
+        asyncio.run(router.classify(m2, ""))
+        record("cache_retry_after_error", calls["n"] == 4, f"calls={calls['n']}")
+    finally:
+        llm.complete_json = saved
+        router._classify_cache.clear()
+
+
 def main() -> int:
     try:
         test_looks_like_continuation()
         test_classify_continuation_is_chat()
         test_fallback_still_works()
         test_fast_triage()
+        test_classify_cache()
     except Exception as e:  # noqa: BLE001
         record("测试脚本自身", False, repr(e))
     passed = sum(1 for _, ok, _ in RESULTS if ok)

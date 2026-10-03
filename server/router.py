@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import re
+import time
 
 from . import llm, prompts
 
@@ -75,6 +77,35 @@ def _fast_path(message: str) -> dict | None:
             "affair_id": None, "reason": "快速通道"}
 
 
+# ---- 分类结果缓存 --------------------------------------------------------------
+# 同一句再发一遍（评委反复点同一演示输入、孩子重发），意图不该再花一次 LLM RTT。
+# key 带上事务简报：简报变了（事务增删）意图本来就可能变，不算同一条消息。
+# 只驻内存——重启丢缓存只是慢一点，不是错；mood 会随上下文漂移，TTL 给短点。
+_CLASSIFY_TTL = 300.0
+_CLASSIFY_MAX = 200
+_classify_cache: dict[str, tuple[float, dict]] = {}
+
+
+def _cache_get(key: str) -> dict | None:
+    hit = _classify_cache.get(key)
+    if not hit or time.time() - hit[0] >= _CLASSIFY_TTL:
+        return None
+    cached = dict(hit[1])
+    cached["reason"] = ((cached.get("reason") or "") + "（缓存）")[:80]
+    return cached
+
+
+def _cache_put(key: str, result: dict) -> None:
+    _classify_cache[key] = (time.time(), dict(result))
+    if len(_classify_cache) <= _CLASSIFY_MAX:
+        return
+    for k in [k for k, (ts, _) in _classify_cache.items()
+              if time.time() - ts >= _CLASSIFY_TTL]:
+        del _classify_cache[k]
+    while len(_classify_cache) > _CLASSIFY_MAX:  # dict 保序，弹出最老的
+        _classify_cache.pop(next(iter(_classify_cache)))
+
+
 def looks_like_todos(message: str) -> bool:
     """确定性兜底：拆成片段后，含待办词的片段 ≥2 个就视为多任务。LLM 漏判时用它纠偏。"""
     parts = [p for p in _TODO_SPLIT.split(message.lower()) if p.strip()]
@@ -105,6 +136,11 @@ async def classify(message: str, affairs_brief: str = "") -> dict:
     fast = _fast_path(message)
     if fast is not None:
         return fast
+    key = hashlib.sha256(
+        f"{affairs_brief}\x00{message}".encode("utf-8")).hexdigest()[:24]
+    cached = _cache_get(key)
+    if cached is not None:
+        return cached
     try:
         data = await asyncio.wait_for(llm.complete_json(
             [{"role": "user", "content": prompts.ROUTER.format(
@@ -120,12 +156,15 @@ async def classify(message: str, affairs_brief: str = "") -> dict:
             intent = "todo"  # 一句话好几件待办却被判成闲聊/单事务：纠偏成拆解
         if intent in _VALID_INTENTS:
             aid = data.get("affair_id")
-            return {
+            result = {
                 "intent": intent,
                 "mood": mood if mood in _VALID_MOODS else "normal",
                 "affair_id": str(aid) if aid else None,
                 "reason": str(data.get("reason", ""))[:80],
             }
+            _cache_put(key, result)
+            return result
     except Exception:  # noqa: BLE001 分类失败不能拖垮对话
         pass
+    # 关键词保底不缓存：LLM 只是暂时不可用，别把降级结果钉在缓存里
     return _fallback(message)
