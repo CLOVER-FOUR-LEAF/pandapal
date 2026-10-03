@@ -4176,6 +4176,10 @@ function setupMic() {
         if (this._aborted) return;   // abort() 后晚到的 stop()：丢弃不转写
         teardown();
         const wav = pcmToWav(chunks, ctx.sampleRate);
+        if (wav.byteLength <= 44) {   // 一帧没采到（误触即停）：别白跑一次识别
+          toast(MIC_ERR_TEXT["no-speech"]);
+          return;
+        }
         toast("识别中…");
         try {
           const fd = new FormData();

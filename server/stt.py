@@ -25,9 +25,10 @@ import httpx
 from . import config, tts
 
 DEF_MODEL_ASR = "mimo-v2.5-asr"
-# 单次录音上限：16kHz 单声道 WAV ≈ 32KB/s，12MB 约等于 6 分钟，远超实际用例；
+# 单次录音上限：官方规定 base64 载荷 ≤10MB，原始音频按 3/4 折算留 7MB。
+# 16kHz 单声道 WAV ≈ 32KB/s，7MB 约等于 3.5 分钟，远超"按住说一句话"的用例；
 # 主要防的是有人拿这条公开端点刷上传流量
-MAX_BYTES = 12 * 1024 * 1024
+MAX_BYTES = 7 * 1024 * 1024
 
 _ASR_MIMES = {"audio/wav", "audio/x-wav", "audio/mpeg", "audio/mp3"}
 
